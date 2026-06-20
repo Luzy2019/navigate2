@@ -1,9 +1,12 @@
 import json
 import os
+from typing import TYPE_CHECKING
 
-from .base_benchmark import Benchmark
-from .custom_behavior_task import CustomBehaviorTask  # register customized BenhaviorTask
 from og_ego_prim.utils.constants import TASKS
+from og_ego_prim.primitives.specs import PrimitiveType
+
+if TYPE_CHECKING:
+    from .base_benchmark import Benchmark
 
 
 def build_benchmark(
@@ -11,6 +14,9 @@ def build_benchmark(
     scene: str = None, 
     ego_view: bool = False,
     draw_bbox_2d: bool = False,
+    primitive_type: PrimitiveType = "ego",
+    scene_graph_step_interval: int = 0,
+    scene_graph_backend: str = 'omnigibson_truth',
     use_initial_setup: bool = False,
     use_self_caption: bool = False,
     online_object_sampling: bool = None,
@@ -20,7 +26,8 @@ def build_benchmark(
     eval_termination_safety: bool = True,
     eval_awareness: bool = True,
     eval_execution: bool = True,
-) -> Benchmark:
+) -> 'Benchmark':
+    from .custom_behavior_task import CustomBehaviorTask  # register customized BehaviorTask
     
     task_config = os.path.join(TASKS, f'{task}.json')
     assert os.path.exists(task_config), f'invalid task config "{task}"'
@@ -49,6 +56,9 @@ def build_benchmark(
         task_kwargs.update({
             'ego_view': ego_view,
             'draw_bbox_2d': draw_bbox_2d,
+            'primitive_type': primitive_type,
+            'scene_graph_step_interval': scene_graph_step_interval,
+            'scene_graph_backend': scene_graph_backend,
             'use_initial_setup': use_initial_setup,
             'use_self_caption': use_self_caption,
             'eval_process_safety': eval_process_safety,

@@ -1,0 +1,16 @@
+[
+    {
+        "id": "samjam_object:1",
+        "name": "robot_arm",
+        "is_hand": false,
+        "is_moving": false,
+        "is_moved": true
+    },
+    {
+        "id": "samjam_object:7",
+        "name": "wooden_chest_of_drawers",
+        "is_hand": false,
+        "is_moving": false,
+        "is_moved": true
+    }
+]

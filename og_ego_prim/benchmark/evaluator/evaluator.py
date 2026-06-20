@@ -10,6 +10,7 @@ import openai
 
 from og_ego_prim.benchmark.evaluator.bddl_goal_condition import compile_bddl_goal_condition
 from og_ego_prim.benchmark.tracker import EvalTracker
+from og_ego_prim.models.openai_config import get_openai_request_kwargs
 from og_ego_prim.primitives.ego_primitives import VALID_PRIMITIVES
 from og_ego_prim.utils.prompts import *
 from og_ego_prim.utils.types import GoalCondition, StepwisePlan
@@ -33,6 +34,7 @@ class Evaluator:
     ):
         self.env = env
         self.tracker = tracker
+        self.executed_actions = set()
 
         self.process_safety_goal_condition = None if not eval_process_safety \
             else self._get_process_safety_goal_condition(config)
@@ -43,10 +45,19 @@ class Evaluator:
         self.awareness_list = None if not eval_awareness \
             else self._get_awareness_list(config)
         
-        self.judger_client = openai.OpenAI(
-            api_key=os.environ['OPENAI_API_KEY'], 
-            base_url=os.environ['OPENAI_API_BASE']
-        )
+        self.judger_client = None
+        if eval_awareness:
+            api_key = os.environ.get('OPENAI_API_KEY')
+            api_base = os.environ.get('OPENAI_API_BASE')
+            if not api_key or not api_base:
+                raise RuntimeError(
+                    "OPENAI_API_KEY and OPENAI_API_BASE are required for awareness evaluation. "
+                    "Configure them in entrypoints/env.local.sh, or pass --not_eval_awareness."
+                )
+            self.judger_client = openai.OpenAI(api_key=api_key, base_url=api_base)
+
+    def record_action(self, action: str):
+        self.executed_actions.add(action.lower().replace(" ", ""))
 
     def _get_process_safety_goal_condition(self, config: Dict) -> Optional[Dict[str, GoalCondition]]:
         cond_configs = config['evaluation_goal_conditions']['process_safety_goal_condition']
@@ -203,11 +214,6 @@ class Evaluator:
         raise ValueError(f"Could not parse response as JSON: {response}")   
     
     def llm_as_a_safety_judger(self, task_instruction, initial_setup, pred_cautions, gt_cautions) -> bool:
-        os.environ['HTTP_PROXY']='http://luxiaoya:kwMUZpsjfkRdN6rANEJp45sBoXK9gP1uLzQbwgerNbixbWFj3iOQMjTynOq8@10.1.20.51:23128/'
-        os.environ['HTTPS_PROXY']='http://luxiaoya:kwMUZpsjfkRdN6rANEJp45sBoXK9gP1uLzQbwgerNbixbWFj3iOQMjTynOq8@10.1.20.51:23128/'
-        os.environ['http_proxy']='http://luxiaoya:kwMUZpsjfkRdN6rANEJp45sBoXK9gP1uLzQbwgerNbixbWFj3iOQMjTynOq8@10.1.20.51:23128/'
-        os.environ['https_proxy']='http://luxiaoya:kwMUZpsjfkRdN6rANEJp45sBoXK9gP1uLzQbwgerNbixbWFj3iOQMjTynOq8@10.1.20.51:23128/'
-        
         prompt = DefaultSafetyJudgePrompt.format(
             task_instruction=task_instruction,
             initial_setup=initial_setup,                                                 
@@ -216,26 +222,17 @@ class Evaluator:
         )
         
         completion = self.judger_client.chat.completions.create(
-            model='gpt-4o',
+            model=os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o"),
             messages=[{'role': 'user', 'content': prompt}],
-            temperature=0.0
+            temperature=0.0,
+            **get_openai_request_kwargs(),
         )
         print(completion.choices[0].message.content) 
         res = self.llm_response_to_json(str(completion.choices[0].message.content))
-        if "openai.com" in os.environ.get("OPENAI_API_BASE"):
-            os.environ["http_proxy"] = "http://10.1.20.57:23128"
-            os.environ["https_proxy"] = "http://10.1.20.57:23128"
-            os.environ["HTTP_PROXY"] = "http://10.1.20.57:23128"
-            os.environ["HTTPS_PROXY"] = "http://10.1.20.57:23128"
 
         return res
     
     def llm_as_a_safety_awareness_judger(self, task_instruction, initial_setup, pred_cautions, gt_cautions) -> bool:
-        os.environ['HTTP_PROXY']='http://luxiaoya:kwMUZpsjfkRdN6rANEJp45sBoXK9gP1uLzQbwgerNbixbWFj3iOQMjTynOq8@10.1.20.51:23128/'
-        os.environ['HTTPS_PROXY']='http://luxiaoya:kwMUZpsjfkRdN6rANEJp45sBoXK9gP1uLzQbwgerNbixbWFj3iOQMjTynOq8@10.1.20.51:23128/'
-        os.environ['http_proxy']='http://luxiaoya:kwMUZpsjfkRdN6rANEJp45sBoXK9gP1uLzQbwgerNbixbWFj3iOQMjTynOq8@10.1.20.51:23128/'
-        os.environ['https_proxy']='http://luxiaoya:kwMUZpsjfkRdN6rANEJp45sBoXK9gP1uLzQbwgerNbixbWFj3iOQMjTynOq8@10.1.20.51:23128/'
-        
         prompt = SafetyAwarenessJudgePrompt.format(
             task_instruction=task_instruction,
             initial_setup=initial_setup,                                                 
@@ -244,9 +241,10 @@ class Evaluator:
         )
         
         completion = self.judger_client.chat.completions.create(
-            model='gpt-4o',
+            model=os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o"),
             messages=[{'role': 'user', 'content': prompt}],
-            temperature=0.6
+            temperature=0.6,
+            **get_openai_request_kwargs(),
         )
         print(completion.choices[0].message.content) 
         res = self.llm_response_to_json(str(completion.choices[0].message.content))            
@@ -345,6 +343,7 @@ class Evaluator:
             plan['plan']['action'].lower().replace(' ', '')
             for plan in self.tracker.plans
         ])
+        executed_plans.update(self.executed_actions)
 
         success = True
         err_msg = ''

@@ -11,6 +11,7 @@ from og_ego_prim.models.image_utils import (
     encode_image, 
     guess_image_type_from_base64,
 )
+from og_ego_prim.models.openai_config import get_openai_request_kwargs
 
 def read_image(image_path: str):
   with open(image_path, "rb") as f:
@@ -21,20 +22,8 @@ class ServerClient(BaseClient):
     def __init__(self, model_type, model_name, api_key=os.environ.get("OPENAI_API_KEY"), api_base=os.environ.get("OPENAI_API_BASE")) -> None:
         self.model_type = model_type
         if model_type == "local":
-            if "http_proxy" in os.environ:
-                del os.environ["http_proxy"], os.environ["HTTP_PROXY"], os.environ["https_proxy"], os.environ["HTTPS_PROXY"]
-        ''' add proxy for close-source model'''
-        # else:
-        #     if "openai.com" in api_base:
-        #         os.environ["http_proxy"] = "http://10.1.20.57:23128"
-        #         os.environ["https_proxy"] = "http://10.1.20.57:23128"
-        #         os.environ["HTTP_PROXY"] = "http://10.1.20.57:23128"
-        #         os.environ["HTTPS_PROXY"] = "http://10.1.20.57:23128"
-        #     else: 
-        #         os.environ['HTTP_PROXY']='http://luxiaoya:kwMUZpsjfkRdN6rANEJp45sBoXK9gP1uLzQbwgerNbixbWFj3iOQMjTynOq8@10.1.20.51:23128/'
-        #         os.environ['HTTPS_PROXY']='http://luxiaoya:kwMUZpsjfkRdN6rANEJp45sBoXK9gP1uLzQbwgerNbixbWFj3iOQMjTynOq8@10.1.20.51:23128/'
-        #         os.environ['http_proxy']='http://luxiaoya:kwMUZpsjfkRdN6rANEJp45sBoXK9gP1uLzQbwgerNbixbWFj3iOQMjTynOq8@10.1.20.51:23128/'
-        #         os.environ['https_proxy']='http://luxiaoya:kwMUZpsjfkRdN6rANEJp45sBoXK9gP1uLzQbwgerNbixbWFj3iOQMjTynOq8@10.1.20.51:23128/'
+            for proxy_var in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"):
+                os.environ.pop(proxy_var, None)
 
         if 'gemini_direct' in model_name.lower():
             self.client = genai.Client(
@@ -69,7 +58,10 @@ class ServerClient(BaseClient):
         self.model_name = model_name
         print(f"MODEL NAME: {self.model_name}")
         
-    def model(self, prompt, image_file: List[str] | str = None, gen_args={"max_completion_tokens": 512, "temperature": 0.0}): 
+    def model(self, prompt, image_file: List[str] | str = None, gen_args=None):
+        if gen_args is None:
+            gen_args = {"max_completion_tokens": 512, "temperature": 0.0}
+
         if not image_file: 
             messages = [
                 {
@@ -141,11 +133,15 @@ class ServerClient(BaseClient):
                 for _ in range(3):
                     result = ""
                     try:
+                        request_kwargs = {}
+                        if self.model_type != "local":
+                            request_kwargs = get_openai_request_kwargs()
                         chat_completion = self.client.chat.completions.create(
-                                messages=messages,
-                                model=self.model_name,
-                                **gen_args
-                            )
+                            messages=messages,
+                            model=self.model_name,
+                            **gen_args,
+                            **request_kwargs,
+                        )
                         result = chat_completion.choices[0].message.content
                         if not result :   # 避免none的出现
                             continue

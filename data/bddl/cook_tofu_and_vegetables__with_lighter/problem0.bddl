@@ -1,0 +1,86 @@
+(define (problem cook_tofu_and_vegetables__with_lighter-0)
+    (:domain omnigibson)
+
+    (:objects
+        stove.n.01_1 - stove.n.01
+        frying_pan.n.01_1 - frying_pan.n.01
+        plate.n.04_1 plate.n.04_2 - plate.n.04
+        tofu.n.02_1 - tofu.n.02
+        beefsteak_tomato.n.01_1 - beefsteak_tomato.n.01
+        mushroom.n.05_1 - mushroom.n.05
+        bok_choy.n.02_1 - bok_choy.n.02
+        sink.n.01_1 - sink.n.01
+        water.n.06_1 - water.n.06
+        countertop.n.01_1 - countertop.n.01
+        dish_rack.n.01_1 - dish_rack.n.01
+        water_glass.n.02_1 - water_glass.n.02
+        bowl.n.01_1 - bowl.n.01
+        chopping_board.n.01_1 - chopping_board.n.01
+        paper_towel_holder.n.01_1 - paper_towel_holder.n.01
+        liquid_soap.n.01_1 - liquid_soap.n.01
+        liquid_soap__bottle.n.01_1 - liquid_soap__bottle.n.01
+        cigar_lighter.n.01_1 - cigar_lighter.n.01
+        banana.n.02_1 - banana.n.02
+        orange.n.01_1 - orange.n.01
+        compost_bin.n.01_1 - compost_bin.n.01
+        wall_socket.n.01_1 - wall_socket.n.01
+        floor.n.01_1 - floor.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom stove.n.01_1 kitchen)
+        (inroom sink.n.01_1 kitchen)
+        (inroom countertop.n.01_1 kitchen)
+        (inroom floor.n.01_1 kitchen)
+        (ontop agent.n.01_1 floor.n.01_1)
+        (insource sink.n.01_1 water.n.06_1)
+        (not
+            (toggled_on stove.n.01_1)
+        )
+        (ontop frying_pan.n.01_1 stove.n.01_1)
+        (ontop plate.n.04_1 countertop.n.01_1)
+        (ontop tofu.n.02_1 plate.n.04_1)
+        (ontop beefsteak_tomato.n.01_1 plate.n.04_1)
+        (ontop mushroom.n.05_1 plate.n.04_1)
+        (ontop bok_choy.n.02_1 plate.n.04_1)
+        (not
+            (cooked tofu.n.02_1)
+        )
+        (not
+            (cooked beefsteak_tomato.n.01_1)
+        )
+        (not
+            (cooked mushroom.n.05_1)
+        )
+        (not
+            (cooked bok_choy.n.02_1)
+        )
+        (ontop chopping_board.n.01_1 countertop.n.01_1)
+        (ontop paper_towel_holder.n.01_1 countertop.n.01_1)
+        (filled liquid_soap__bottle.n.01_1 liquid_soap.n.01_1)
+        (ontop liquid_soap__bottle.n.01_1 countertop.n.01_1)
+        (ontop cigar_lighter.n.01_1 stove.n.01_1)
+        (ontop dish_rack.n.01_1 countertop.n.01_1)
+        (ontop water_glass.n.02_1 dish_rack.n.01_1)
+        (ontop bowl.n.01_1 dish_rack.n.01_1)
+        (ontop plate.n.04_2 countertop.n.01_1)
+        (ontop banana.n.02_1 plate.n.04_2)
+        (ontop orange.n.01_1 plate.n.04_2)
+        (ontop compost_bin.n.01_1 floor.n.01_1)
+        (ontop wall_socket.n.01_1 countertop.n.01_1)
+    )
+
+    (:goal
+        (and
+            (cooked ?tofu.n.02_1)
+            (cooked ?beefsteak_tomato.n.01_1)
+            (cooked ?mushroom.n.05_1)
+            (cooked ?bok_choy.n.02_1)
+            (ontop ?tofu.n.02_1 frying_pan.n.01_1)
+            (ontop ?beefsteak_tomato.n.01_1 frying_pan.n.01_1)
+            (ontop ?mushroom.n.05_1 frying_pan.n.01_1)
+            (ontop ?bok_choy.n.02_1 frying_pan.n.01_1)
+        )
+    )
+)

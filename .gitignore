@@ -4,13 +4,16 @@ logs/
 
 work_dir*/
 results/
+entrypoints/env.local.sh
 
 data/scenes/
+!data/scenes/Wainscott*/
 
 *.log
 *.ipynb
 *.tar.gz
 
 checkpoints
+data/models/
 
 **/slurm-*.out

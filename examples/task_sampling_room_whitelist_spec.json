@@ -1,0 +1,26 @@
+{
+  "room_types": [
+    "kitchen"
+  ],
+  "scene_models": [
+    "Wainscott_0_int"
+  ],
+  "skip_synsets": [
+    "agent.n.01",
+    "floor.n.01",
+    "water.n.06",
+    "liquid_soap.n.01"
+  ],
+  "whitelist": {
+    "stove.n.01": {
+      "stove": [
+        "igwqpj"
+      ]
+    }
+  },
+  "scenes": {
+    "Wainscott_0_int": {
+      "blacklist": {}
+    }
+  }
+}

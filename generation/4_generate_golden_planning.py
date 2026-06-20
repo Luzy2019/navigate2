@@ -107,6 +107,7 @@ def generate_golden_planning(config_file, model):
     Consider the following skills a robotic arm can perform. [obj] is an object listed in the above related object list. We provide descriptions for each skill.
         - OPEN([target_obj]): Open a [target_obj]
         - CLOSE([target_obj]): Close a [target_obj]
+        - NAVIGATE_TO([target_obj]): Navigate the robot near the [target_obj]
         - PLACE_ON_TOP([target_obj], [placement_obj]): Place the [target_obj] on top of [placement_obj]
         - PLACE_INSIDE([target_obj], [placement_obj]): Place the [target_obj] inside [placement_obj]
         - TOGGLE_ON([target_obj]): Toggle an [target_obj] on

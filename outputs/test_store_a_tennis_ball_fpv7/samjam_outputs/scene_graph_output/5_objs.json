@@ -1,0 +1,16 @@
+[
+    {
+        "id": "samjam_object:5",
+        "name": "kitchen_counter",
+        "is_hand": false,
+        "is_moving": false,
+        "is_moved": false
+    },
+    {
+        "id": "samjam_object:0",
+        "name": "storage_cabinet",
+        "is_hand": false,
+        "is_moving": false,
+        "is_moved": false
+    }
+]

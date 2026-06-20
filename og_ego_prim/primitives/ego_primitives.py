@@ -16,6 +16,7 @@ from omnigibson.robots.robot_base import BaseRobot
 from omnigibson.systems import BaseSystem
 from omnigibson.transition_rules import SlicingRule
 from omnigibson.utils.constants import PrimType
+import omnigibson.utils.transform_utils as T
 import torch
 
 from .object_states_utils import (
@@ -40,6 +41,8 @@ from .object_states_utils import (
     get_obj_with_state,
     is_target_object_predicate_with_obj
 )
+from og_ego_prim.navigation import NavigationBackend, OmniGibsonNavigationBackend
+from .specs import EGO_VALID_PRIMITIVES
 
 
 class EgoSemanticActionPrimitiveSet(IntEnum):
@@ -61,34 +64,24 @@ class EgoSemanticActionPrimitiveSet(IntEnum):
     WAIT = auto(), "Wait for the object to change, such as waiting for the object to rise to room temperature."
     SPREAD = auto(), "Spread some particles onto some object, make object covered with these particles"
     WAIT_FOR_FROZEN = auto(), "Wait something in the refridge to frozen"
+    NAVIGATE_TO = auto(), "Navigate the robot near the target_obj"
 
 
-VALID_PRIMITIVES = {
-    "PLACE_ON_TOP": 2,
-    "PLACE_INSIDE": 2,
-    "OPEN": 1,
-    "CLOSE": 1,
-    "TOGGLE_ON": 1,
-    "TOGGLE_OFF": 1,
-    "WIPE": 2,
-    "CUT": 2,
-    "SOAK_INSIDE": 2,
-    "SOAK_UNDER": 2,
-    "FILL_WITH": 2,
-    "POUR_INTO": 2,
-    "SPREAD": 2,
-    "WAIT": 1,
-    "WAIT_FOR_COOKED": 1,
-    "WAIT_FOR_WASHED": 1,
-    "WAIT_FOR_FROZEN": 2,
-}
+VALID_PRIMITIVES = EGO_VALID_PRIMITIVES
 
 
 class EgoSemanticActionPrimitives(StarterSemanticActionPrimitives):
 
-    def __init__(self, env: Environment):
+    def __init__(
+        self,
+        env: Environment,
+        navigation_backend: Optional[NavigationBackend] = None,
+    ):
         super().__init__(env)
+        self.navigation_backend = navigation_backend or OmniGibsonNavigationBackend()
+        self.navigation_backend.reset(env)
         self.controller_functions = {
+            EgoSemanticActionPrimitiveSet.NAVIGATE_TO: self._navigate_to,
             EgoSemanticActionPrimitiveSet.PLACE_ON_TOP: self._place_on_top,
             EgoSemanticActionPrimitiveSet.PLACE_INSIDE: self._place_inside,
             EgoSemanticActionPrimitiveSet.OPEN: self._open,  # done
@@ -131,6 +124,9 @@ class EgoSemanticActionPrimitives(StarterSemanticActionPrimitives):
             yield from self._settle_robot()
         except ActionPrimitiveError:
             pass
+
+    def _navigate_to(self, target_obj: StatefulObject):
+        yield from self.navigation_backend.navigate_to_object(self, target_obj)
 
     def _open_or_close(self, target_obj: StatefulObject, should_open: bool):
         if object_states.Open not in target_obj.states:
@@ -239,8 +235,15 @@ class EgoSemanticActionPrimitives(StarterSemanticActionPrimitives):
                 check_open_before_placement(placement_obj)
 
         attachments = capture_attachments(target_obj, self.env)
-        
-        if object_states.HeatSourceOrSink in placement_obj.states and predicate == object_states.OnTop and \
+
+        placed_with_custom_pose = yield from self._try_task_specific_placement(
+            target_obj,
+            placement_obj,
+        )
+
+        if placed_with_custom_pose:
+            pass
+        elif object_states.HeatSourceOrSink in placement_obj.states and predicate == object_states.OnTop and \
               not placement_obj.states[object_states.HeatSourceOrSink].requires_inside:
             yield from self._sample_on_top_heat_source(target_obj, placement_obj)
 
@@ -265,9 +268,15 @@ class EgoSemanticActionPrimitives(StarterSemanticActionPrimitives):
                 target_obj.set_position_orientation(position=position)
                 yield from self._settle_robot()
 
+            if predicate == object_states.Inside:
+                yield from self._try_visible_cabinet_inside_placement(target_obj, placement_obj)
+
         if attachments:
             recover_attachments(attachments)
             yield from self._settle_robot()
+
+        if placed_with_custom_pose:
+            return
 
         # check
         error = ActionPrimitiveError(
@@ -283,6 +292,211 @@ class EgoSemanticActionPrimitives(StarterSemanticActionPrimitives):
                 raise error
         elif predicate == object_states.Overlaid and not target_obj.states[object_states.Touching].get_value(placement_obj):
                 raise error
+
+    def _try_task_specific_placement(self, target_obj: StatefulObject, placement_obj: StatefulObject):
+        """Place objects on sparse or narrow custom models using bbox-relative poses."""
+        target_key = (getattr(target_obj, "category", ""), getattr(target_obj, "model", ""))
+        placement_key = (getattr(placement_obj, "category", ""), getattr(placement_obj, "model", ""))
+
+        if target_key == ("half_banana", "xytkre") and placement_key == ("trash_can", "gvnfgj"):
+            relation = object_states.Inside
+            placement_kind = "inside"
+        elif target_key == ("dishtowel", "ltydgg") and placement_key == ("dish_rack", "kxuutl"):
+            relation = object_states.OnTop
+            placement_kind = "rack_top"
+        else:
+            return False
+
+        original_pose = target_obj.get_position_orientation()
+        bbox_center, bbox_orn, bbox_extent, _ = placement_obj.get_base_aligned_bbox()
+        _, _, target_extent, _ = target_obj.get_base_aligned_bbox()
+        width, depth, height = [float(value) for value in bbox_extent]
+        target_width, target_depth, target_height = [float(value) for value in target_extent]
+        bbox_pose = T.pose2mat((bbox_center, bbox_orn))
+
+        if placement_kind == "inside":
+            x_limit = max(0.0, (width - target_width) / 2.0 - 0.03)
+            y_limit = max(0.0, (depth - target_depth) / 2.0 - 0.03)
+            z_low = -height / 2.0 + target_height / 2.0 + 0.025
+            z_high = height / 2.0 - target_height / 2.0 - 0.025
+            z_candidates = [
+                z_low + height * 0.06,
+                z_low + height * 0.14,
+                -height * 0.12,
+                0.0,
+            ]
+            local_offsets = [
+                (x, y, min(max(z, z_low), z_high))
+                for z in z_candidates
+                for x, y in [
+                    (0.0, 0.0),
+                    (-x_limit * 0.25, 0.0),
+                    (x_limit * 0.25, 0.0),
+                    (0.0, -y_limit * 0.25),
+                    (0.0, y_limit * 0.25),
+                ]
+            ]
+            orientation = original_pose[1]
+        else:
+            top_z = height / 2.0 + target_height / 2.0
+            local_offsets = [
+                (x, y, top_z + z_margin)
+                for z_margin in (0.012, 0.025, 0.04)
+                for x, y in [
+                    (0.0, 0.0),
+                    (-width * 0.22, 0.0),
+                    (width * 0.22, 0.0),
+                    (0.0, -depth * 0.18),
+                    (0.0, depth * 0.18),
+                ]
+            ]
+            orientation = bbox_orn
+
+        for offset in local_offsets:
+            local_offset = torch.tensor(offset, dtype=torch.float32)
+            position = T.transform_points(local_offset.reshape(1, 3), bbox_pose)[0]
+            target_obj.set_position_orientation(position=position, orientation=orientation)
+            target_obj.keep_still()
+            yield from self._settle_robot()
+
+            if target_obj.states[relation].get_value(placement_obj):
+                print(
+                    f"[executor] adjusted {placement_kind} placement "
+                    f"for {target_obj.name} relative to {placement_obj.name}"
+                )
+                return True
+
+        target_obj.set_position_orientation(*original_pose)
+        target_obj.keep_still()
+        yield from self._settle_robot()
+        return False
+
+    def _try_visible_cabinet_inside_placement(self, target_obj: StatefulObject, placement_obj: StatefulObject):
+        """Prefer visible shelf/front placements for small objects stored in selected cabinets.
+
+        OmniGibson's Inside sampler may choose a logically valid point deep inside
+        the fillable volume. For the custom cabinet-storage scene, that can make
+        the object invisible even while the cabinet is open. Keep this scoped to
+        the cabinet models we intentionally use for that task.
+        """
+        target_category = getattr(target_obj, "category", "")
+        placement_category = getattr(placement_obj, "category", "")
+        placement_model = getattr(placement_obj, "model", "")
+
+        if target_category not in {"apple", "box_of_tissues", "box__of__tissue"}:
+            return False
+        if (placement_category, placement_model) not in {
+            ("bottom_cabinet_no_top", "spojpj"),
+            ("top_cabinet", "tactqn"),
+        }:
+            return False
+
+        original_pose = target_obj.get_position_orientation()
+        bbox_center, bbox_orn, bbox_extent, _ = placement_obj.get_base_aligned_bbox()
+        _, _, target_extent, _ = target_obj.get_base_aligned_bbox()
+
+        width, depth, height = [float(v) for v in bbox_extent]
+        target_width, target_depth, target_height = [float(v) for v in target_extent]
+        x_low = -width / 2.0 + target_width / 2.0 + 0.03
+        x_high = width / 2.0 - target_width / 2.0 - 0.03
+        y_low = -depth / 2.0 + target_depth / 2.0 + 0.03
+        y_high = depth / 2.0 - target_depth / 2.0 - 0.03
+        z_low = -height / 2.0 + target_height / 2.0 + 0.03
+        z_high = height / 2.0 - target_height / 2.0 - 0.03
+
+        if z_low > z_high:
+            return False
+
+        def clamp_axis(value, low, high):
+            if low > high:
+                return value
+            return min(max(value, low), high)
+
+        def clamp_z(z):
+            return min(max(z, z_low), z_high)
+
+        def unique_offsets(offsets):
+            seen = set()
+            unique = []
+            for x, y, z in offsets:
+                key = (round(float(x), 4), round(float(y), 4), round(float(z), 4))
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append(torch.tensor([x, y, z], dtype=torch.float32))
+            return unique
+
+        bbox_pose = T.pose2mat((bbox_center, bbox_orn))
+        local_offsets = []
+        if target_category in {"box_of_tissues", "box__of__tissue"}:
+            apple_obj = find_task_related_object(self.env, "apple")
+            if apple_obj is not None and apple_obj is not target_obj:
+                apple_pos = apple_obj.get_position_orientation()[0]
+                apple_local = T.transform_points(apple_pos.reshape(1, 3), T.pose_inv(bbox_pose))[0]
+                apple_x = float(apple_local[0])
+                apple_y = float(apple_local[1])
+                apple_z = float(apple_local[2])
+
+                x_candidates = [
+                    apple_x,
+                    apple_x - width * 0.04,
+                    apple_x + width * 0.04,
+                    width * 0.18,
+                    width * 0.10,
+                    0.0,
+                ]
+                y_candidates = [
+                    apple_y - depth * 0.18,
+                    apple_y - depth * 0.10,
+                    apple_y - depth * 0.06,
+                    apple_y,
+                    apple_y + depth * 0.06,
+                    apple_y + depth * 0.10,
+                    depth * 0.34,
+                    depth * 0.20,
+                    0.0,
+                ]
+                z_candidates = [
+                    clamp_z(apple_z),
+                    clamp_z(apple_z + height * 0.04),
+                    clamp_z(height * 0.12),
+                    clamp_z(0.0),
+                ]
+
+                for z in z_candidates:
+                    for y in y_candidates:
+                        for x in x_candidates:
+                            local_offsets.append(
+                                (
+                                    clamp_axis(x, x_low, x_high),
+                                    clamp_axis(y, y_low, y_high),
+                                    z,
+                                )
+                            )
+
+        for z in [clamp_z(height * 0.12), clamp_z(0.0), clamp_z(-height * 0.18)]:
+            for y in [depth * 0.34, depth * 0.20, 0.0, -depth * 0.20]:
+                for x in [0.0, -width * 0.18, width * 0.18]:
+                    local_offsets.append((x, y, z))
+
+        local_offsets = unique_offsets(local_offsets)
+        for local_offset in local_offsets:
+            position = T.transform_points(local_offset.reshape(1, 3), bbox_pose)[0]
+            target_obj.set_position_orientation(position=position)
+            target_obj.keep_still()
+            yield from self._settle_robot()
+
+            if target_obj.states[object_states.Inside].get_value(placement_obj):
+                print(
+                    "[executor] adjusted visible inside placement "
+                    f"for {target_obj.name} in {placement_obj.name}"
+                )
+                return True
+
+        target_obj.set_position_orientation(*original_pose)
+        target_obj.keep_still()
+        yield from self._settle_robot()
+        return False
 
     def _toggle(self, target_obj: StatefulObject, value: bool):
         if object_states.ToggledOn not in target_obj.states:

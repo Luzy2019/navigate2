@@ -6,9 +6,9 @@ import json
 import multiprocessing
 import os
 import subprocess
-import sys
 import time
 import warnings
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from tqdm import tqdm
@@ -27,6 +27,12 @@ parser.add_argument('--num_retry', type=int, default=3)
 parser.add_argument('--local_llm_serve', action='store_true')
 parser.add_argument('--local_serve_ip', type=str, default=None)
 parser.add_argument('--draw_bbox_2d', action='store_true')
+parser.add_argument(
+    '--primitive_type',
+    choices=('ego', 'starter', 'symbolic'),
+    default='ego',
+)
+parser.add_argument('--show_robot', action='store_true')
 parser.add_argument('--use_initial_setup', action='store_true')
 parser.add_argument('--use_self_caption', action='store_true')
 parser.add_argument('--prompt_setting', type=str, default='default')
@@ -54,8 +60,7 @@ def get_all_tasks(
     if task_list is None:
         task_list = all_supported_tasks
     elif not os.path.exists(task_list):
-        warnings.warn(f'args.task_list "{task_list}" not exists, using all tasks under "data/tasks".')
-        task_list = all_supported_tasks
+        raise FileNotFoundError(f'task list does not exist: "{task_list}"')
     else:
         with open(task_list, 'r') as f:
             task_list = [task.strip() for task in f.readlines() if task.strip()]
@@ -107,6 +112,8 @@ def get_launcher(
     work_dir: str = None,
     online_object_sampling: bool=None,
     draw_bbox_2d: bool=None,
+    primitive_type: str='ego',
+    show_robot: bool=False,
     use_initial_setup: bool=None,
     use_self_caption: bool=None,
     local_llm_serve: bool=None,
@@ -125,9 +132,8 @@ def get_launcher(
         num_gpu_per_task = os.environ.get('NUM_GPUS', 1)
         entrypoint.extend([
             'srun', '-p', partition,
-            # '--debug',
             f'--gres=gpu:{num_gpu_per_task}',
-            '-N', f'{num_gpu_per_task}'
+            '-N', '1'
         ])
 
     if 'APPTAINER_IMAGE' in os.environ:
@@ -138,8 +144,12 @@ def get_launcher(
         image = os.environ['APPTAINER_IMAGE']
         entrypoint.append(image)
     
-    entrypoint.extend([
-        'python', '-m', 'og_ego_prim.cli.online_benchmark_once', 
+    repo_root = Path(__file__).resolve().parents[2]
+    python_launcher = repo_root / "entrypoints" / "omnigibson_python.sh"
+    python_command = [str(python_launcher)] if python_launcher.exists() else ["python"]
+
+    entrypoint.extend(python_command + [
+        '-m', 'og_ego_prim.cli.online_benchmark_once',
         '--task', task_name, 
         '--scene', scene_name,
     ])
@@ -151,6 +161,10 @@ def get_launcher(
         entrypoint.extend(['--online_object_sampling', 'True'])
     if draw_bbox_2d is not None and draw_bbox_2d:
         entrypoint.extend(['--draw_bbox_2d'])
+    if primitive_type is not None:
+        entrypoint.extend(['--primitive_type', primitive_type])
+    if show_robot:
+        entrypoint.extend(['--show_robot'])
     if use_initial_setup is not None and use_initial_setup:
         entrypoint.extend(['--use_initial_setup'])
     if use_self_caption is not None and use_self_caption:
@@ -173,7 +187,7 @@ def get_launcher(
     return entrypoint
 
 
-def worker(task_name: str, scene_name: str, model: str, work_dir: str, online_object_sampling: bool, retry: int, draw_bbox_2d: bool, use_initial_setup: bool, use_self_caption: bool, local_llm_serve: bool, local_serve_ip: str, prompt_setting: str, not_eval_process_safety: bool, not_eval_termination_safety: bool, not_eval_awareness: bool, not_eval_execution: bool):
+def worker(task_name: str, scene_name: str, model: str, work_dir: str, online_object_sampling: bool, retry: int, draw_bbox_2d: bool, primitive_type: str, show_robot: bool, use_initial_setup: bool, use_self_caption: bool, local_llm_serve: bool, local_serve_ip: str, prompt_setting: str, not_eval_process_safety: bool, not_eval_termination_safety: bool, not_eval_awareness: bool, not_eval_execution: bool, stream_logs: bool):
     worker_id = multiprocessing.current_process()._identity[0]
     time.sleep(worker_id * 0.5)
     print(f'[{get_time_tag()}][worker_{worker_id}] Processing "{task_name}___{scene_name}"')
@@ -186,22 +200,55 @@ def worker(task_name: str, scene_name: str, model: str, work_dir: str, online_ob
     time_tag = get_time_tag()
     log_file = os.path.join(log_dir, f'benchmark_{benchmark_tag}_{model_tag}_{time_tag}.log')
 
-    launcher = get_launcher(task_name, scene_name, model, work_dir, online_object_sampling, draw_bbox_2d, use_initial_setup, use_self_caption, local_llm_serve, local_serve_ip, prompt_setting, not_eval_process_safety, not_eval_termination_safety, not_eval_awareness, not_eval_execution)
+    launcher = get_launcher(
+        task_name,
+        scene_name,
+        model,
+        work_dir,
+        online_object_sampling,
+        draw_bbox_2d,
+        primitive_type,
+        show_robot,
+        use_initial_setup,
+        use_self_caption,
+        local_llm_serve,
+        local_serve_ip,
+        prompt_setting,
+        not_eval_process_safety,
+        not_eval_termination_safety,
+        not_eval_awareness,
+        not_eval_execution,
+    )
     envs = os.environ.copy()
     envs['OMNIGIBSON_HEADLESS'] = '1'
 
     with open(log_file, 'w') as outfile:
-        result = subprocess.run(
-            ' '.join(launcher),
-            env=envs,
-            stdout=outfile,
-            stderr=outfile,
-            text=True,
-            check=False,
-            shell=True,
-        )
+        if stream_logs:
+            process = subprocess.Popen(
+                launcher,
+                env=envs,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            for line in process.stdout:
+                outfile.write(line)
+                outfile.flush()
+                print(line, end='', flush=True)
+            return_code = process.wait()
+        else:
+            result = subprocess.run(
+                launcher,
+                env=envs,
+                stdout=outfile,
+                stderr=outfile,
+                text=True,
+                check=False,
+            )
+            return_code = result.returncode
 
-    return task_name, scene_name, result, retry
+    return task_name, scene_name, return_code, retry, log_file
 
 
 def benchmark_all(
@@ -213,6 +260,8 @@ def benchmark_all(
     online_object_sampling: bool,
     num_retry: int,
     draw_bbox_2d: bool,
+    primitive_type: str,
+    show_robot: bool,
     use_initial_setup: bool,
     use_self_caption: bool, 
     local_llm_serve: bool, 
@@ -248,6 +297,8 @@ def benchmark_all(
                     online_object_sampling, 
                     retry, 
                     draw_bbox_2d,
+                    primitive_type,
+                    show_robot,
                     use_initial_setup,
                     use_self_caption, 
                     local_llm_serve, 
@@ -256,11 +307,17 @@ def benchmark_all(
                     not_eval_process_safety, 
                     not_eval_termination_safety, 
                     not_eval_awareness,
-                    not_eval_execution
+                    not_eval_execution,
+                    data_parallel == 1,
                 ))
 
             for future in as_completed(dispatched):
-                task_name, scene_name, _, retry = future.result()
+                task_name, scene_name, return_code, retry, log_file = future.result()
+                if return_code != 0:
+                    tqdm.write(
+                        f'[{get_time_tag()}][error] "{task_name}___{scene_name}" '
+                        f'exited with code {return_code}. See {log_file}'
+                    )
                 do_retry = read_benchmark_report(task_name, scene_name, model, work_dir, metric)
 
                 if do_retry and retry < num_retry:
@@ -297,6 +354,8 @@ if __name__ == '__main__':
         online_object_sampling=args.online_object_sampling,
         num_retry = args.num_retry,
         draw_bbox_2d = args.draw_bbox_2d,
+        primitive_type = args.primitive_type,
+        show_robot = args.show_robot,
         use_initial_setup = args.use_initial_setup, 
         use_self_caption = args.use_self_caption,
         local_llm_serve = args.local_llm_serve,

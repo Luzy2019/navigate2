@@ -7,7 +7,8 @@ from typing import Generator, List, Tuple, Optional
 from og_ego_prim.models.hf_inference import HFClient
 from og_ego_prim.models.server_inference import ServerClient
 from og_ego_prim.models.base_client import BaseClient
-from og_ego_prim.primitives import VALID_PRIMITIVES
+from og_ego_prim.primitives import get_valid_primitives
+from og_ego_prim.primitives.specs import PrimitiveType
 from og_ego_prim.benchmark.tracker import EvalTracker
 from og_ego_prim.utils.constants import WORK_DIR
 from og_ego_prim.utils.prompts import *
@@ -54,6 +55,7 @@ class PlanningAgent:
         local_serve_ip: str,
         local_serve_key: str,
         prompt_setting: str,
+        primitive_type: PrimitiveType = "ego",
         use_initial_setup: bool = False,
         use_self_caption: bool = False,
         retry: int = 3,
@@ -78,6 +80,8 @@ class PlanningAgent:
         self.local_serve_ip = local_serve_ip
         self.local_serve_key = local_serve_key
         self.prompt_setting = prompt_setting
+        self.primitive_type = primitive_type
+        self.valid_primitives = get_valid_primitives(primitive_type)
         self.use_initial_setup = use_initial_setup
         self.use_self_caption = use_self_caption
 
@@ -142,6 +146,32 @@ class PlanningAgent:
         if self.current_step > 0:
             history_plans = '\n'.join(
                 [history['history_text'] for history in self.tracker.plans]
+            )
+
+        if self.primitive_type == "starter":
+            scene_description = None
+            if self.use_initial_setup:
+                scene_description = self.initial_setup_str
+            elif self.use_self_caption:
+                assert self.tracker.caption is not None and 'content' in self.tracker.caption
+                scene_description = self.tracker.caption['content']
+
+            awareness = None
+            if self.prompt_setting == "v2":
+                assert self.tracker.awareness is not None and 'content' in self.tracker.awareness
+                awareness = self.tracker.awareness['content']
+
+            return build_starter_step_prompt(
+                objects_str=self.objects_str,
+                task_instruction=self.task_instruction,
+                object_abilities_str=self.object_abilities_str,
+                task_goals=self.goal_bddl_str,
+                wash_rules_str=self.wash_rules_str,
+                history_actions=history_plans,
+                prompt_setting=self.prompt_setting,
+                scene_description=scene_description,
+                awareness=awareness,
+                safety_tips=self.safety_tips_str,
             )
             
         if not self.use_initial_setup and not self.use_self_caption:
@@ -255,7 +285,7 @@ class PlanningAgent:
             caution = plan.get('caution', None)
             return 'done', '', caution
 
-        pattern = r'(?:\d+\.\s+)?([a-zA-Z_]+)\(([^)]+)\)'
+        pattern = r'(?:\d+\.\s+)?([a-zA-Z_]+)\(([^)]*)\)'
         matches = re.findall(pattern, action)
         if len(matches) >= 1:
             operator, params = matches[-1]
@@ -263,12 +293,12 @@ class PlanningAgent:
             return None
         
         operator = operator.strip()
-        if operator.upper() not in VALID_PRIMITIVES.keys():
+        if operator.upper() not in self.valid_primitives:
             return None
 
         params = params.strip().lower()
-        objects = [obj.strip() for obj in params.split(',')]
-        if len(objects) != VALID_PRIMITIVES[operator.upper()]:
+        objects = [] if not params else [obj.strip() for obj in params.split(',')]
+        if len(objects) != self.valid_primitives[operator.upper()]:
             return None
         for obj in objects:
             if obj not in self.objects_str:

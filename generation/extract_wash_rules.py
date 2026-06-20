@@ -181,7 +181,7 @@ def extract_wash_rules(
     benchmark = build_benchmark(
         task=task, 
         scene=scene, 
-        ego_view=True, 
+        ego_view=False, 
         online_object_sampling=False, 
         debug=True
     )

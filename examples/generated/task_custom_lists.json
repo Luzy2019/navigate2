@@ -1,0 +1,117 @@
+{
+  "cook_tofu_and_vegetables__with_lighter": {
+    "Wainscott_0_int": {
+      "blacklist": {},
+      "whitelist": {
+        "banana.n.02": {
+          "banana": {
+            "verqwv": null
+          }
+        },
+        "beefsteak_tomato.n.01": {
+          "beefsteak_tomato": {
+            "altlfz": null
+          }
+        },
+        "bok_choy.n.02": {
+          "bok_choy": {
+            "bbvcji": null
+          }
+        },
+        "bowl.n.01": {
+          "bowl": {
+            "adciys": null
+          }
+        },
+        "chopping_board.n.01": {
+          "chopping_board": {
+            "afwefw": null
+          }
+        },
+        "cigar_lighter.n.01": {
+          "lighter": {
+            "zsxfjz": null
+          }
+        },
+        "compost_bin.n.01": {
+          "compost_bin": {
+            "fvkdos": null
+          }
+        },
+        "countertop.n.01": {
+          "countertop": {
+            "epaijd": null
+          }
+        },
+        "dish_rack.n.01": {
+          "dish_rack": {
+            "kxuutl": null
+          }
+        },
+        "frying_pan.n.01": {
+          "frying_pan": {
+            "aewpzn": null
+          }
+        },
+        "lemon_peel.n.01": {
+          "lemon_peel": {
+            "mrvvpr": null
+          }
+        },
+        "liquid_soap__bottle.n.01": {
+          "liquid_soap_bottle": {
+            "hazvbh": null
+          }
+        },
+        "mushroom.n.05": {
+          "mushroom": {
+            "jnfabw": null
+          }
+        },
+        "orange.n.01": {
+          "orange": {
+            "cwcefi": null
+          }
+        },
+        "paper_towel_holder.n.01": {
+          "paper_towel_holder": {
+            "rntefx": null
+          }
+        },
+        "plate.n.04": {
+          "plate": {
+            "aewthq": null
+          }
+        },
+        "sink.n.01": {
+          "sink": {
+            "awvzkn": null
+          }
+        },
+        "stove.n.01": {
+          "stove": {
+            "igwqpj": null
+          }
+        },
+        "tofu.n.02": {
+          "tofu": {
+            "bklygk": null
+          }
+        },
+        "wall_socket.n.01": {
+          "wall_socket": {
+            "hocerb": null
+          }
+        },
+        "water_glass.n.02": {
+          "water_glass": {
+            "cdteyb": null
+          }
+        }
+      }
+    },
+    "room_types": [
+      "kitchen"
+    ]
+  }
+}

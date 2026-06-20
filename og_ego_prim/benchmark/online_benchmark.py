@@ -1,7 +1,7 @@
 import json
 import os
 import random
-from typing import Dict, Generator, List, Literal, Optional
+from typing import Dict, Generator, List, Optional
 import yaml
 
 import bddl
@@ -22,11 +22,14 @@ from og_ego_prim.benchmark.base_benchmark import Benchmark
 from og_ego_prim.benchmark.evaluator.evaluator import Evaluator
 from og_ego_prim.benchmark.tracker.online_tracker import OnlineEvalTracker
 from og_ego_prim.primitives import Executor
+from og_ego_prim.primitives.executor import LowLevelStepContext
+from og_ego_prim.primitives.specs import PrimitiveType, starter_evaluation_action
 from og_ego_prim.primitives.object_states_utils import (
     is_target_object_predicate_with_obj, 
     find_task_related_object,
     get_visible_task_related_objects,
 )
+from og_ego_prim.scene_graph import PerceptionSceneGraphUpdater, SceneGraphUpdater
 from og_ego_prim.utils.constants import CAMERAS, SCENES
 from og_ego_prim.utils.types import PoseCoord, StepwisePlan
 
@@ -44,6 +47,7 @@ class OnlineBenchmark(Benchmark):
     executor: Executor
     evaluator: Evaluator
     tracker: OnlineEvalTracker
+    scene_graph_updater: SceneGraphUpdater
 
     def __init__(
         self,
@@ -53,6 +57,9 @@ class OnlineBenchmark(Benchmark):
         debug: bool,
         ego_view: bool, 
         draw_bbox_2d: bool,
+        primitive_type: PrimitiveType,
+        scene_graph_step_interval: int,
+        scene_graph_backend: str,
         use_initial_setup: bool,
         use_self_caption: bool,
         eval_process_safety: bool,
@@ -60,11 +67,18 @@ class OnlineBenchmark(Benchmark):
         eval_awareness: bool, 
         eval_execution: bool,
     ):
-        super().__init__(task, scene, config, debug, False)
+        super().__init__(task, scene, config, debug, False, primitive_type=primitive_type)
 
+        self._configure_scene_graph_sensors(scene_graph_backend)
         self.env = og.Environment(configs=self.env_config)
+        self._apply_robot_initial_pose(config)
         self.ego_view = ego_view
         self.draw_bbox_2d = draw_bbox_2d
+        self.primitive_type = primitive_type
+        self._starter_grasped_object = None
+        if scene_graph_step_interval < 0:
+            raise ValueError("scene_graph_step_interval must be greater than or equal to zero")
+        self.scene_graph_step_interval = scene_graph_step_interval
         self.use_initial_setup = use_initial_setup
         self.use_self_caption = use_self_caption
             
@@ -82,12 +96,23 @@ class OnlineBenchmark(Benchmark):
                 self.surrounding_poses.append(
                     (torch.tensor(pose_dict['pos']), torch.tensor(pose_dict['quat']))
                 )
+        self._add_task_specific_surrounding_poses()
 
         self.tracker = OnlineEvalTracker()
         self.tracker.task = self.task_name
         self.tracker.scene = self.scene_name
+        self.tracker.primitive_type = primitive_type
+
+        self.scene_graph_updater = PerceptionSceneGraphUpdater(backend_name=scene_graph_backend)
+        initial_scene_graph = self.scene_graph_updater.reset(self.env)
+        self.tracker.track_scene_graph(initial_scene_graph, force=True)
         
-        self.executor = Executor(self.env, primitive_type='ego', debug=debug)
+        self.executor = Executor(
+            self.env,
+            primitive_type=primitive_type,
+            debug=debug,
+            step_callback=self._on_low_level_step if self.scene_graph_step_interval > 0 else None,
+        )
         self.evaluator = Evaluator(
             self.env, config, self.tracker,
             eval_process_safety, 
@@ -101,6 +126,112 @@ class OnlineBenchmark(Benchmark):
 
         self.set_viewer()
         self._add_extra_init_states()
+        self._refresh_scene_graph(force=True)
+
+    def _configure_scene_graph_sensors(self, backend_name: str):
+        backend_name = backend_name.strip().lower()
+        if backend_name in {'none', 'disabled', 'truth', 'omnigibson_truth', 'unigoal_memory'}:
+            return
+
+        required_modalities = {'rgb', 'depth', 'depth_linear', 'camera_params'}
+        image_height = int(os.environ.get('ISBENCH_SCENE_GRAPH_IMAGE_HEIGHT', '256'))
+        image_width = int(os.environ.get('ISBENCH_SCENE_GRAPH_IMAGE_WIDTH', '256'))
+        if image_height <= 0 or image_width <= 0:
+            raise ValueError('ISBENCH_SCENE_GRAPH_IMAGE_HEIGHT/WIDTH must be greater than zero')
+
+        robot_configs = self.env_config.get('robots', [])
+        if isinstance(robot_configs, dict):
+            robot_configs = robot_configs.values()
+
+        for robot_config in robot_configs:
+            obs_modalities = robot_config.get('obs_modalities', [])
+            if obs_modalities != 'all':
+                if isinstance(obs_modalities, str):
+                    obs_modalities = [obs_modalities]
+                robot_config['obs_modalities'] = sorted(set(obs_modalities) | required_modalities)
+
+            sensor_config = robot_config.setdefault('sensor_config', {})
+            vision_config = sensor_config.setdefault('VisionSensor', {})
+            if vision_config is None:
+                vision_config = {}
+                sensor_config['VisionSensor'] = vision_config
+            if vision_config.get('modalities') != 'all':
+                modalities = vision_config.get('modalities')
+                if modalities is not None:
+                    if isinstance(modalities, str):
+                        modalities = [modalities]
+                    vision_config['modalities'] = sorted(set(modalities) | required_modalities)
+
+            sensor_kwargs = vision_config.setdefault('sensor_kwargs', {})
+            sensor_kwargs['image_height'] = image_height
+            sensor_kwargs['image_width'] = image_width
+
+    def _on_low_level_step(self, context: LowLevelStepContext):
+        if self.scene_graph_step_interval <= 0:
+            return
+        if context.step_index % self.scene_graph_step_interval != 0:
+            return
+        snapshot = self.scene_graph_updater.update(context)
+        self.tracker.track_scene_graph(snapshot)
+
+    def _refresh_scene_graph(self, force: bool = False):
+        snapshot = self.scene_graph_updater.update()
+        self.tracker.track_scene_graph(snapshot, force=force)
+
+    def _sync_starter_grasped_object(self):
+        obj_in_hand = self.executor.controller._get_obj_in_hand()
+        if obj_in_hand is None:
+            self._starter_grasped_object = None
+            return
+
+        for object_name, object_ref in self.env.task.object_scope.items():
+            if object_ref.wrapped_obj is obj_in_hand:
+                self._starter_grasped_object = object_name
+                return
+
+        self._starter_grasped_object = obj_in_hand.name
+
+    def _apply_robot_initial_pose(self, config: Dict):
+        robot_initial_pose = config.get('scene_info', {}).get('robot_initial_pose')
+        if not robot_initial_pose or not self.env.robots:
+            return
+
+        position = torch.tensor(robot_initial_pose['position'], dtype=torch.float32)
+        orientation = torch.tensor(robot_initial_pose['orientation'], dtype=torch.float32)
+        self.env.robots[0].set_position_orientation(position=position, orientation=orientation, frame='scene')
+        print(
+            'Applied task robot initial pose after env load: '
+            f"position={robot_initial_pose['position']} "
+            f"orientation={robot_initial_pose['orientation']}"
+        )
+
+    def _add_task_specific_surrounding_poses(self):
+        extra_poses = {
+            ('store_apple_and_tissue_box_in_bottom_cabinet', 'Wainscott_0_int'): [
+                {
+                    'pos': [5.15, 8.95, 1.55],
+                    'quat': [
+                        0.6360543966293335,
+                        0.0,
+                        0.0,
+                        0.7716442346572876,
+                    ],
+                },
+            ],
+        }.get((self.task_name, self.scene_name), [])
+
+        if not extra_poses:
+            return
+        if self.surrounding_poses is None:
+            self.surrounding_poses = []
+
+        for pose_dict in extra_poses:
+            self.surrounding_poses.append(
+                (
+                    torch.tensor(pose_dict['pos'], dtype=torch.float32),
+                    torch.tensor(pose_dict['quat'], dtype=torch.float32),
+                )
+            )
 
     def get_example_planning(self) -> Generator[str, None, None]:
         for i, plan in enumerate(self._example_planning):
@@ -110,9 +241,9 @@ class OnlineBenchmark(Benchmark):
                 return
 
     def set_viewer(self):
+        for robot in self.env.robots:
+            robot.visible = not self.ego_view
         if self.ego_view:
-            for i in range(len(self.env.robots)):
-                self.env.robots[i].visible = False
             self.executor._simulator_loop(5)
         
         if self.draw_bbox_2d:
@@ -153,11 +284,19 @@ class OnlineBenchmark(Benchmark):
         if isinstance(plan, str):
             plan: StepwisePlan = dict(action=plan, caution=None)
         
-        if plan['action'].upper().startswith('NAVIGATE'):
-            return True
+        evaluation_plan = plan
+        if self.primitive_type == "starter":
+            evaluation_plan = {
+                **plan,
+                "action": starter_evaluation_action(
+                    plan["action"],
+                    self._starter_grasped_object,
+                ),
+            }
 
-        self.evaluator.evaluate_process_safety_goal_condition(plan, 'before')
-        
+        self.evaluator.record_action(evaluation_plan["action"])
+        self.evaluator.evaluate_process_safety_goal_condition(evaluation_plan, 'before')
+
         if self.debug:
             self.executor.execute_plan(plan['action'])
         else:
@@ -170,7 +309,11 @@ class OnlineBenchmark(Benchmark):
                     msg=str(e)
                 )
 
-        self.evaluator.evaluate_process_safety_goal_condition(plan, 'after')
+        self.evaluator.evaluate_process_safety_goal_condition(evaluation_plan, 'after')
+        if self.primitive_type == "starter":
+            self._sync_starter_grasped_object()
+        if self.scene_graph_step_interval <= 0:
+            self._refresh_scene_graph()
         return True
 
     def evaluate_awareness(self, awareness: str):
@@ -258,6 +401,8 @@ class OnlineBenchmark(Benchmark):
             save_img_i = None if save_img is None else os.path.join(save_img, f'obs_{i}.png')
             obs_i = self.get_viewer_obs(pose, save_img_i)
             surrounding_obs.append(obs_i)
+        video_label = None if save_img is None else os.path.basename(save_img)
+        self.tracker.track_video_observations(surrounding_obs, label=video_label)
         return surrounding_obs
 
 
@@ -317,6 +462,16 @@ class OnlineBehaviorBenchmark(OnlineBenchmark):
         scene_file = os.path.join(SCENES, scene, 'json', f'{scene_file}.json')
         if not scene_info['online_object_sampling'] and os.path.exists(scene_file):
             env_config['scene']['scene_file'] = scene_file
+
+        robot_initial_pose = scene_info.get('robot_initial_pose')
+        if robot_initial_pose and env_config.get('robots'):
+            env_config['robots'][0]['position'] = robot_initial_pose['position']
+            env_config['robots'][0]['orientation'] = robot_initial_pose['orientation']
+            print(
+                'Using task robot initial pose: '
+                f"position={robot_initial_pose['position']} "
+                f"orientation={robot_initial_pose['orientation']}"
+            )
 
         return env_config
 

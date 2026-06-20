@@ -98,6 +98,33 @@ Our code supports api-based model with openai or google-genai format.
 bash entrypoints/eval_close.sh $MODEL_NAME $DATA_PARALLEL
 ```
 
+To evaluate a single task without retries:
+
+```bash
+NUM_RETRY=0 bash entrypoints/eval_close.sh $MODEL_NAME 1 clean_tennis_balls
+```
+
+The optional third argument accepts either one task name or a task-list file.
+
+To use OmniGibson's physical `StarterSemanticActionPrimitiveSet`, set:
+
+```bash
+PRIMITIVE_TYPE=starter NUM_RETRY=0 \
+  bash entrypoints/eval_close.sh $MODEL_NAME 1 store_a_tennis_ball
+```
+
+In starter mode, legacy placement actions are decomposed into
+`GRASP(object)` followed by `PLACE_INSIDE(container)` or
+`PLACE_ON_TOP(destination)`. The starter set only supports its native physical
+actions; custom actions such as `WIPE`, `CUT`, and `WAIT_FOR_COOKED` remain
+available only in the default `ego` mode.
+
+Each task saves a multi-view step-observation `video.mp4` next to its
+`report.json`. It shows the scene before and after each semantic action; it is
+not a continuous robot-control trajectory. The default playback rate is one
+evaluation step per second; set `ISBENCH_VIDEO_FPS` in `entrypoints/env.sh` to
+change it.
+
 ### Evaluate Open-Source Models
 
 1. Execute `entrypoints/vllm_serve.sh` to deploy a serve for the evaluated model and check the serve ip.

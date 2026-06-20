@@ -1,0 +1,30 @@
+[
+    {
+        "id": "samjam_object:1",
+        "name": "robot_arm",
+        "is_hand": false,
+        "is_moving": true,
+        "is_moved": true
+    },
+    {
+        "id": "samjam_object:11",
+        "name": "kitchen_counter",
+        "is_hand": false,
+        "is_moving": false,
+        "is_moved": false
+    },
+    {
+        "id": "samjam_object:0",
+        "name": "wooden_cabinet",
+        "is_hand": false,
+        "is_moving": false,
+        "is_moved": false
+    },
+    {
+        "id": "samjam_object:7",
+        "name": "chair",
+        "is_hand": false,
+        "is_moving": false,
+        "is_moved": true
+    }
+]

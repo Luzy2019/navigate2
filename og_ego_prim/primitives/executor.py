@@ -1,6 +1,7 @@
 import re
 import sys
-from typing import List, Literal, Optional, Generator
+from dataclasses import dataclass
+from typing import Callable, List, Optional, Generator
 
 import omnigibson as og
 from omnigibson.action_primitives.action_primitive_set_base import (
@@ -22,13 +23,29 @@ import torch
 from .ego_primitives import (
     EgoSemanticActionPrimitiveSet, 
     EgoSemanticActionPrimitives,
-    VALID_PRIMITIVES
 )
+from og_ego_prim.navigation import NavigationBackend
 from .primitive_utils import find_task_related_object
+from .specs import PrimitiveType, get_valid_primitives
 
 
 class BadExecutionPlanError(Exception):
     pass
+
+
+@dataclass
+class LowLevelStepContext:
+    raw_plan: str
+    primitive_name: str
+    step_index: int
+    action: torch.Tensor
+
+
+@dataclass
+class ParsedActionSequence:
+    raw_plan: str
+    primitive_name: str
+    action_seqs: Generator[torch.Tensor, None, None]
 
 
 PRIMITIVE_SET = {
@@ -49,19 +66,26 @@ class Executor:
     def __init__(
         self, 
         env: Environment, 
-        primitive_type: Literal['ego', 'starter', 'symbolic'] = 'ego', 
+        primitive_type: PrimitiveType = 'ego',
         verbose: bool = True,
         debug: bool = False,
+        navigation_backend: Optional[NavigationBackend] = None,
+        step_callback: Optional[Callable[[LowLevelStepContext], None]] = None,
     ):
         self.env = env
         self.verbose = verbose
         self.debug = debug
+        self.step_callback = step_callback
+        self.primitive_type = primitive_type
+        self.valid_primitives = get_valid_primitives(primitive_type)
 
         self.primitive_set = PRIMITIVE_SET[primitive_type]
 
         controller_kwargs = {}
         if primitive_type == 'starter':
             controller_kwargs.update(dict(enable_head_tracking=False))
+        if primitive_type == 'ego':
+            controller_kwargs.update(dict(navigation_backend=navigation_backend))
         self.controller = PRIMITIVES[primitive_type](env, **controller_kwargs)
 
     def execute_plans(self, plans: List[str]):
@@ -97,12 +121,12 @@ class Executor:
                     print(f'{debug_prompt}: ')
                     sys.stdout.flush()
 
-        action_seqs = self._parse_plan_to_action_seqs(plan)
-        if action_seqs is None:  # Done
+        parsed_action_seqs = self._parse_plan_to_action_seqs(plan)
+        if parsed_action_seqs is None:  # Done
             return
         
         try:
-            self._execute(action_seqs)
+            self._execute(parsed_action_seqs)
         except (ActionPrimitiveError, ActionPrimitiveErrorGroup) as e:
             if self.debug and gm.HEADLESS is False:
                 print(f'[executor] catch error: {e}')
@@ -111,11 +135,20 @@ class Executor:
             else:
                 raise e
         
-    def _execute(self, action_seqs: Generator[torch.Tensor, None, None]):
-        for action in action_seqs:
+    def _execute(self, parsed_action_seqs: ParsedActionSequence):
+        for step_index, action in enumerate(parsed_action_seqs.action_seqs):
             self.env.step(action)
+            if self.step_callback is not None:
+                self.step_callback(
+                    LowLevelStepContext(
+                        raw_plan=parsed_action_seqs.raw_plan,
+                        primitive_name=parsed_action_seqs.primitive_name,
+                        step_index=step_index,
+                        action=action,
+                    )
+                )
 
-    def _parse_plan_to_action_seqs(self, plan: str) -> Optional[Generator[torch.Tensor, None, None]]:
+    def _parse_plan_to_action_seqs(self, plan: str) -> Optional[ParsedActionSequence]:
         pattern = r'([\w\W_]+)\((.*)\)'
         result = re.search(pattern, plan.strip())
         if result is None:
@@ -129,8 +162,8 @@ class Executor:
             raise BadExecutionPlanError(f'invalid operator "{operator}", expected {self.primitive_set._member_names_}')
         primitive = self.primitive_set._member_map_[operator.upper()]
 
-        primitive_params = [param.strip() for param in params.split(',')]
-        if len(primitive_params) != VALID_PRIMITIVES[operator.upper()]:
+        primitive_params = [] if not params.strip() else [param.strip() for param in params.split(',')]
+        if len(primitive_params) != self.valid_primitives[operator.upper()]:
             raise BadExecutionPlanError(f'invalid params "{params}" for operator "{operator}"')
 
         object_refs = []
@@ -148,7 +181,11 @@ class Executor:
         except TypeError:
             raise BadExecutionPlanError(f'invalid params "{params}" for operator "{operator}"')
 
-        return action_seqs
+        return ParsedActionSequence(
+            raw_plan=plan,
+            primitive_name=operator.upper(),
+            action_seqs=action_seqs,
+        )
             
     def _simulator_loop(self, interval=None):
         if interval is not None and isinstance(interval, int) and interval > 0:
