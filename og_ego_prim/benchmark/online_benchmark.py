@@ -72,6 +72,7 @@ class OnlineBenchmark(Benchmark):
         self._configure_scene_graph_sensors(scene_graph_backend)
         self.env = og.Environment(configs=self.env_config)
         self._apply_robot_initial_pose(config)
+        self._apply_object_initial_poses(config)
         self.ego_view = ego_view
         self.draw_bbox_2d = draw_bbox_2d
         self.primitive_type = primitive_type
@@ -205,6 +206,61 @@ class OnlineBenchmark(Benchmark):
             f"orientation={robot_initial_pose['orientation']}"
         )
 
+    def _apply_object_initial_poses(self, config: Dict):
+        object_initial_poses = config.get('scene_info', {}).get('object_initial_poses', {})
+        if not object_initial_poses:
+            return
+
+        for object_name, pose_config in object_initial_poses.items():
+            obj = self._resolve_initial_pose_object(object_name)
+            if obj is None:
+                print(
+                    '[benchmark][warning] Could not apply task object initial pose: '
+                    f'object={object_name!r} was not found'
+                )
+                continue
+
+            position = pose_config.get('position')
+            orientation = pose_config.get('orientation')
+            if position is None:
+                print(
+                    '[benchmark][warning] Could not apply task object initial pose: '
+                    f'object={object_name!r} has no position'
+                )
+                continue
+
+            position = torch.tensor(position, dtype=torch.float32)
+            orientation = (
+                None
+                if orientation is None
+                else torch.tensor(orientation, dtype=torch.float32)
+            )
+            if orientation is None:
+                obj.set_position_orientation(position=position)
+            else:
+                obj.set_position_orientation(position=position, orientation=orientation)
+            obj.keep_still()
+
+            print(
+                'Applied task object initial pose after env load: '
+                f"object={object_name} simulator_object={obj.name} "
+                f"category={getattr(obj, 'category', None)} "
+                f"model={getattr(obj, 'model', None)} "
+                f"position={pose_config['position']} "
+                f"orientation={pose_config.get('orientation')}"
+            )
+
+    def _resolve_initial_pose_object(self, object_name: str):
+        object_ref = self.env.task.object_scope.get(object_name)
+        if object_ref is not None:
+            return object_ref.wrapped_obj
+
+        obj = self.env.scene.object_registry('name', object_name)
+        if obj is not None:
+            return obj
+
+        return find_task_related_object(self.env, object_name)
+
     def _add_task_specific_surrounding_poses(self):
         extra_poses = {
             ('store_apple_and_tissue_box_in_bottom_cabinet', 'Wainscott_0_int'): [
@@ -297,24 +353,33 @@ class OnlineBenchmark(Benchmark):
         self.evaluator.record_action(evaluation_plan["action"])
         self.evaluator.evaluate_process_safety_goal_condition(evaluation_plan, 'before')
 
+        execution_succeeded = True
         if self.debug:
             self.executor.execute_plan(plan['action'])
         else:
             try:
                 self.executor.execute_plan(plan['action'])
             except Exception as e:
+                execution_succeeded = False
+                print(
+                    f"[benchmark][execution_error] action={plan['action']!r} "
+                    f"type={e.__class__.__name__} message={e}"
+                )
                 self.tracker.track_error(
                     action=plan['action'],
                     err_type=e.__class__.__name__,
                     msg=str(e)
                 )
+        self.tracker.track_execution_diagnostic(
+            self.executor.last_execution_diagnostics
+        )
 
         self.evaluator.evaluate_process_safety_goal_condition(evaluation_plan, 'after')
-        if self.primitive_type == "starter":
+        if self.primitive_type == "starter" and execution_succeeded:
             self._sync_starter_grasped_object()
         if self.scene_graph_step_interval <= 0:
             self._refresh_scene_graph()
-        return True
+        return execution_succeeded
 
     def evaluate_awareness(self, awareness: str):
         self.evaluator.evaluate_awareness(
@@ -390,6 +455,8 @@ class OnlineBenchmark(Benchmark):
         if self.surrounding_poses is None:
             return None
 
+        passive_start_state = self.executor.snapshot_passive_motion_state()
+
         if save_img is not None:
             if not os.path.exists(save_img):
                 os.makedirs(save_img)
@@ -403,6 +470,11 @@ class OnlineBenchmark(Benchmark):
             surrounding_obs.append(obs_i)
         video_label = None if save_img is None else os.path.basename(save_img)
         self.tracker.track_video_observations(surrounding_obs, label=video_label)
+        self.executor.log_passive_motion_diagnostic(
+            phase=f"surrounding_view_capture:{video_label or 'unsaved'}",
+            start_state=passive_start_state,
+            simulation_steps=len(self.surrounding_poses) * 5,
+        )
         return surrounding_obs
 
 
@@ -461,6 +533,7 @@ class OnlineBehaviorBenchmark(OnlineBenchmark):
         # use customized scene if scene_file exists
         scene_file = os.path.join(SCENES, scene, 'json', f'{scene_file}.json')
         if not scene_info['online_object_sampling'] and os.path.exists(scene_file):
+            scene_file = self._prepare_task_scene_file(scene_file, scene_info)
             env_config['scene']['scene_file'] = scene_file
 
         robot_initial_pose = scene_info.get('robot_initial_pose')
@@ -474,6 +547,61 @@ class OnlineBehaviorBenchmark(OnlineBenchmark):
             )
 
         return env_config
+
+    def _prepare_task_scene_file(self, scene_file: str, scene_info: Dict) -> str:
+        object_initial_poses = scene_info.get('object_initial_poses', {})
+        if not object_initial_poses:
+            return scene_file
+
+        with open(scene_file, 'r') as f:
+            scene_data = json.load(f)
+
+        inst_to_name = (
+            scene_data
+            .get('metadata', {})
+            .get('task', {})
+            .get('inst_to_name', {})
+        )
+        object_registry = scene_data.get('state', {}).get('object_registry', {})
+        init_info = scene_data.get('objects_info', {}).get('init_info', {})
+
+        changed = False
+        for object_name, pose_config in object_initial_poses.items():
+            simulator_object_name = inst_to_name.get(object_name, object_name)
+
+            object_state = object_registry.get(simulator_object_name, {}).get('root_link', {})
+            if 'position' in pose_config:
+                object_state['pos'] = pose_config['position']
+                changed = True
+            if 'orientation' in pose_config:
+                object_state['ori'] = pose_config['orientation']
+                changed = True
+
+            object_args = init_info.get(simulator_object_name, {}).get('args', {})
+            for override_key in ('category', 'model', 'scale'):
+                if override_key in pose_config:
+                    object_args[override_key] = pose_config[override_key]
+                    changed = True
+                    print(
+                        'Prepared task object override: '
+                        f"object={object_name} simulator_object={simulator_object_name} "
+                        f"{override_key}={pose_config[override_key]}"
+                    )
+
+        if not changed:
+            return scene_file
+
+        override_dir = os.path.join('/tmp', 'isbench_scene_overrides')
+        os.makedirs(override_dir, exist_ok=True)
+        override_file = os.path.join(
+            override_dir,
+            f"{os.path.splitext(os.path.basename(scene_file))[0]}__task_pose_overrides.json",
+        )
+        with open(override_file, 'w') as f:
+            json.dump(scene_data, f, indent=4)
+
+        print(f'Using task-customized scene file: {override_file}')
+        return override_file
 
 
 ONLINE_BENCHMARKS = {

@@ -1,6 +1,6 @@
 import json
 import os
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
 from og_ego_prim.utils.constants import TASKS
 from og_ego_prim.primitives.specs import PrimitiveType
@@ -9,12 +9,22 @@ if TYPE_CHECKING:
     from .base_benchmark import Benchmark
 
 
+def resolve_primitive_type(
+    task_config: dict,
+    override: Optional[PrimitiveType] = None,
+) -> PrimitiveType:
+    configured = task_config.get('task_info', {}).get('primitive_type', 'ego')
+    if configured not in {'ego', 'starter', 'symbolic'}:
+        raise ValueError(f"invalid primitive_type {configured!r} in task config")
+    return configured if override is None else override
+
+
 def build_benchmark(
     task: str, 
     scene: str = None, 
     ego_view: bool = False,
     draw_bbox_2d: bool = False,
-    primitive_type: PrimitiveType = "ego",
+    primitive_type: Optional[PrimitiveType] = None,
     scene_graph_step_interval: int = 0,
     scene_graph_backend: str = 'omnigibson_truth',
     use_initial_setup: bool = False,
@@ -33,6 +43,9 @@ def build_benchmark(
     assert os.path.exists(task_config), f'invalid task config "{task}"'
     with open(task_config, 'r') as f:
         task_config = json.load(f)
+
+    primitive_type = resolve_primitive_type(task_config, primitive_type)
+    print(f'primitive_type: {primitive_type}')
 
     if online_object_sampling is not None:
         task_config['scene_info']['online_object_sampling'] = online_object_sampling

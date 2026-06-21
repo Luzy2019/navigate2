@@ -24,6 +24,7 @@ class OnlineEvalTracker(EvalTracker):
         self.termination = None
 
         self.error_stack = []
+        self.execution_diagnostics = []
         self.latest_scene_graph = None
         self.scene_graph_history = []
         self.scene_graph_history_interval = int(os.environ.get('ISBENCH_SCENE_GRAPH_HISTORY_INTERVAL', '10'))
@@ -42,6 +43,10 @@ class OnlineEvalTracker(EvalTracker):
 
     def track_error(self, **kwargs):
         self.error_stack.append(dict(**kwargs))
+
+    def track_execution_diagnostic(self, diagnostic):
+        if diagnostic is not None:
+            self.execution_diagnostics.append(diagnostic)
 
     def track_process_safety_goal_condition(self, **kwargs):
         if 'process_safety_goal_condition' not in self.goal_condition:
@@ -194,6 +199,7 @@ class OnlineEvalTracker(EvalTracker):
             ],
             'termination': self.termination,
             'error_stack': self.error_stack,
+            'execution_diagnostics': self.execution_diagnostics,
         }
 
         if self.latest_scene_graph is not None:

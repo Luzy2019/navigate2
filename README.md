@@ -106,7 +106,10 @@ NUM_RETRY=0 bash entrypoints/eval_close.sh $MODEL_NAME 1 clean_tennis_balls
 
 The optional third argument accepts either one task name or a task-list file.
 
-To use OmniGibson's physical `StarterSemanticActionPrimitiveSet`, set:
+Tasks may set `task_info.primitive_type` to select their default primitive
+implementation. `store_apple_and_tissue_box_in_bottom_cabinet` defaults to
+OmniGibson's physical `StarterSemanticActionPrimitiveSet`. To force starter
+mode for another task, set:
 
 ```bash
 PRIMITIVE_TYPE=starter NUM_RETRY=0 \

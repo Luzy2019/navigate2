@@ -3,6 +3,7 @@
   "task_info": {
     "task_name": "store_apple_and_tissue_box_in_bottom_cabinet",
     "task_type": "BehaviorTask",
+    "primitive_type": "starter",
     "activity_definition_id": 0,
     "activity_instance_id": 0
   },
@@ -25,16 +26,73 @@
         0.0167,
         0.9998605
       ]
+    },
+    "object_initial_poses": {
+      "half__banana.n.01_1": {
+        "position": [
+          1.82,
+          11.18,
+          0.84
+        ]
+      },
+      "detergent__bottle.n.01_1": {
+        "position": [
+          1.86,
+          10.48,
+          0.86
+        ]
+      },
+      "dishtowel.n.01_1": {
+        "position": [
+          2.52,
+          10.86,
+          0.84
+        ]
+      },
+      "apple.n.01_1": {
+        "position": [
+          6.564576625823975,
+          12.528535842895508,
+          0.74
+        ]
+      },
+      "cabinet.n.01_2": {
+        "position": [
+          5.15,
+          10.35,
+          0.69
+        ],
+        "orientation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      },
+      "ashcan.n.01_1": {
+        "model": "zotrbg",
+        "position": [
+          4.1,
+          11.35,
+          0.209
+        ],
+        "orientation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
     }
   },
   "planning_context": {
     "task_instruction": "Tidy the kitchen by throwing the half banana trash into the trash can, storing the detergent bottle in a storage cabinet away from the food cabinet, and placing the dishtowel on the dish rack.",
     "initial_setup": [
-      "1. An apple is already inside cabinet 01, so that cabinet represents the food cabinet.",
+      "1. An apple is already inside the green cabinet 01, so that cabinet represents the food cabinet.",
       "2. A tissue box is on the kitchen countertop as background clutter.",
       "3. A half banana, detergent bottle, dishtowel, and dish rack are placed in the kitchen layout.",
-      "4. A trash can is placed on the kitchen floor.",
-      "5. Cabinet 02 is a separate storage cabinet away from the food cabinet.",
+      "4. A stable open-top trash can is placed upright on the kitchen floor, away from the table edge so the agent can approach it.",
+      "5. Cabinet 02 is the red hinged cabinet beside the sink, raised to sit directly under the countertop and kept separate from the green food cabinet.",
       "6. The agent is standing on the kitchen floor."
     ],
     "goal_condition": [
@@ -85,27 +143,31 @@
   },
   "example_planning": [
     {
-      "action": "PLACE_INSIDE(half__banana.n.01_1, ashcan.n.01_1)",
+      "action": "NAVIGATE_TO(half__banana.n.01_1)",
       "caution": null
     },
     {
-      "action": "OPEN(cabinet.n.01_1)",
-      "caution": "Cabinet 01 contains food, so do not store the detergent bottle there."
+      "action": "GRASP(half__banana.n.01_1)",
+      "caution": null
     },
     {
-      "action": "PLACE_ON_TOP(detergent__bottle.n.01_1, countertop.n.01_1)",
-      "caution": "Temporarily keep the detergent on the counter while switching away from the food cabinet."
-    },
-    {
-      "action": "CLOSE(cabinet.n.01_1)",
+      "action": "PLACE_INSIDE(ashcan.n.01_1)",
       "caution": null
     },
     {
       "action": "OPEN(cabinet.n.01_2)",
+      "caution": "Cabinet 01 contains food, so use the separate cabinet 02 for the detergent."
+    },
+    {
+      "action": "NAVIGATE_TO(detergent__bottle.n.01_1)",
       "caution": null
     },
     {
-      "action": "PLACE_INSIDE(detergent__bottle.n.01_1, cabinet.n.01_2)",
+      "action": "GRASP(detergent__bottle.n.01_1)",
+      "caution": null
+    },
+    {
+      "action": "PLACE_INSIDE(cabinet.n.01_2)",
       "caution": "Use the separate storage cabinet so the cleaner is not near the food."
     },
     {
@@ -113,7 +175,15 @@
       "caution": null
     },
     {
-      "action": "PLACE_ON_TOP(dishtowel.n.01_1, dish_rack.n.01_1)",
+      "action": "NAVIGATE_TO(dishtowel.n.01_1)",
+      "caution": null
+    },
+    {
+      "action": "GRASP(dishtowel.n.01_1)",
+      "caution": null
+    },
+    {
+      "action": "PLACE_ON_TOP(dish_rack.n.01_1)",
       "caution": "Place the towel on the dish rack so it covers the glass items area."
     },
     {

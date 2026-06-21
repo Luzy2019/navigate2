@@ -89,6 +89,10 @@ def expand_legacy_plan_for_starter(plan: Dict[str, Any]) -> List[Dict[str, Any]]
     primitive, target_obj, placement_obj = match.groups()
     return [
         {
+            "action": f"navigate_to({target_obj.strip()})",
+            "caution": None,
+        },
+        {
             "action": f"grasp({target_obj.strip()})",
             "caution": None,
         },

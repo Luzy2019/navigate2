@@ -29,8 +29,8 @@ parser.add_argument('--local_serve_ip', type=str, default=None)
 parser.add_argument('--draw_bbox_2d', action='store_true')
 parser.add_argument(
     '--primitive_type',
-    choices=('ego', 'starter', 'symbolic'),
-    default='ego',
+    choices=('auto', 'ego', 'starter', 'symbolic'),
+    default='auto',
 )
 parser.add_argument('--show_robot', action='store_true')
 parser.add_argument('--use_initial_setup', action='store_true')
@@ -112,7 +112,7 @@ def get_launcher(
     work_dir: str = None,
     online_object_sampling: bool=None,
     draw_bbox_2d: bool=None,
-    primitive_type: str='ego',
+    primitive_type: str='auto',
     show_robot: bool=False,
     use_initial_setup: bool=None,
     use_self_caption: bool=None,

@@ -51,9 +51,9 @@ parser.add_argument('--work_dir', type=str, default='./work_dir')
 parser.add_argument('--draw_bbox_2d', action='store_true')
 parser.add_argument(
     '--primitive_type',
-    choices=('ego', 'starter', 'symbolic'),
-    default='ego',
-    help='Semantic action implementation. Use starter for physical grasp/manipulation trajectories.',
+    choices=('auto', 'ego', 'starter', 'symbolic'),
+    default='auto',
+    help='Semantic action implementation. Auto reads task_info.primitive_type and falls back to ego.',
 )
 parser.add_argument(
     '--scene_graph_step_interval',
@@ -123,7 +123,7 @@ def online_benchmark_once(
         scene=scene, 
         ego_view=not show_robot,
         draw_bbox_2d=draw_bbox_2d,
-        primitive_type=primitive_type,
+        primitive_type=None if primitive_type == 'auto' else primitive_type,
         scene_graph_step_interval=scene_graph_step_interval,
         scene_graph_backend=scene_graph_backend,
         use_initial_setup=use_initial_setup,
@@ -137,6 +137,7 @@ def online_benchmark_once(
     )
     if debug and gm.HEADLESS is False:
         og.sim.enable_viewer_camera_teleoperation()
+    primitive_type = benchmark.primitive_type
 
     benchmark_tag = f'{benchmark.task_name}___{benchmark.scene_name}'
     model_tag = args.model.replace('/', '__') if args.model is not None else 'example'
@@ -154,7 +155,7 @@ def online_benchmark_once(
                 og.sim.enable_viewer_camera_teleoperation()
             try:
                 while True:
-                    action = torch.zeros(benchmark.env.robots[0].action_dim) if benchmark.env.robots else torch.empty(0)
+                    action = benchmark.executor.get_hold_action()
                     benchmark.env.step(action)
             except KeyboardInterrupt:
                 print('[keep_open_after_done] Exiting without clearing the viewer stage.')

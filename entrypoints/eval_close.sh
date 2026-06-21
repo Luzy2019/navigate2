@@ -54,7 +54,7 @@ python -m og_ego_prim.cli.online_benchmark_all \
     --task_list "$TASK_LIST" \
     --work_dir "$WORK_DIR" \
     --model "$MODEL_NAME" \
-    --primitive_type "${PRIMITIVE_TYPE:-ego}" \
+    --primitive_type "${PRIMITIVE_TYPE:-auto}" \
     "${SHOW_ROBOT_ARGS[@]}" \
     --draw_bbox_2d \
     --prompt_setting 'v1' \
