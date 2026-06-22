@@ -16,9 +16,18 @@ class OmniGibsonNavigationBackend(NavigationBackend):
     """Navigation backend that uses OmniGibson traversability maps and stepwise base control."""
 
     def __init__(self, allow_native_fallback: bool = True):
+        # 自定义导航在采样目标点、规划路径或跟踪路径时失败后，是否退回
+        # OmniGibson 原生的 _navigate_if_needed。ego 模式默认允许回退，
+        # starter 模式会关闭回退，以免原生站位采样再次在拥挤场景中失败。
         self.allow_native_fallback = allow_native_fallback
+
+        # 写入差速底盘 action 的归一化前进/旋转指令。这里控制的是每个仿真步
+        # 的动作强度，而不是直接以 m/s、rad/s 表示的物理速度。
         self.linear_command = float(os.environ.get("ISBENCH_NAV_LINEAR_COMMAND", "0.5"))
         self.angular_command = float(os.environ.get("ISBENCH_NAV_ANGULAR_COMMAND", "0.5"))
+
+        # 连续多少步没有明显缩短距离或角度误差，就认为底盘可能被碰撞体卡住。
+        # 后两个容差允许机器人已经非常接近目标时结束跟踪，避免物理抖动造成假失败。
         self.stuck_window = int(os.environ.get("ISBENCH_NAV_STUCK_WINDOW", "60"))
         self.stuck_angle_tolerance = float(
             os.environ.get("ISBENCH_NAV_STUCK_ANGLE_TOLERANCE", "0.25")
@@ -26,6 +35,10 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         self.stuck_waypoint_tolerance = float(
             os.environ.get("ISBENCH_NAV_STUCK_WAYPOINT_TOLERANCE", "0.10")
         )
+
+        # 机器人不能把底盘中心直接开到物体中心，因此按物体类型设置环形候选站位
+        # 的最小半径。容器和普通柜体需要较大间距来避免底盘碰撞；tactqn 柜体的
+        # 把手较低，需要允许 Fetch 站得更近，机械臂才能够到。
         self.container_min_goal_radius = float(
             os.environ.get("ISBENCH_NAV_CONTAINER_MIN_GOAL_RADIUS", "0.80")
         )
@@ -35,9 +48,15 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         self.tactqn_min_goal_radius = float(
             os.environ.get("ISBENCH_NAV_TACTQN_MIN_GOAL_RADIUS", "0.45")
         )
+
+        # prefer_target_reachable=True 时，会对路径可达的候选站位进一步做机械臂
+        # 可达性检查；限制检查数量可以避免 IK 计算拖慢每次导航。
         self.max_ik_goal_checks = int(
             os.environ.get("ISBENCH_NAV_MAX_IK_GOAL_CHECKS", "8")
         )
+
+        # verbose 输出候选点、路径和跟踪过程；last_navigation_result 则保留最近
+        # 一次导航的结构化诊断，供 Executor / tracker 写入评测报告。
         self.verbose = os.environ.get("ISBENCH_NAV_VERBOSE", "0").lower() in {
             "1",
             "true",
@@ -45,6 +64,9 @@ class OmniGibsonNavigationBackend(NavigationBackend):
             "on",
         }
         self.last_navigation_result = None
+
+        # 在环境初始化阶段尽早拒绝不合理配置。卡死容差不能比 OmniGibson 正常
+        # 到达阈值更严格，否则会出现“已停止进步、却永远达不到退出条件”的状态。
         if not 0.0 < self.linear_command <= 1.0:
             raise ValueError("ISBENCH_NAV_LINEAR_COMMAND must be in (0, 1]")
         if not 0.0 < self.angular_command <= 1.0:
@@ -61,6 +83,9 @@ class OmniGibsonNavigationBackend(NavigationBackend):
                 "ISBENCH_NAV_STUCK_WAYPOINT_TOLERANCE must be greater than or equal to "
                 "the default navigation distance threshold"
             )
+
+        # 0.45 m 是当前 Fetch 底盘和后续操作共同采用的安全下限；小于该值的
+        # 候选站位容易让底盘贴进目标物体或家具碰撞体。
         if self.container_min_goal_radius < 0.45:
             raise ValueError(
                 "ISBENCH_NAV_CONTAINER_MIN_GOAL_RADIUS must be at least 0.45"
