@@ -74,8 +74,12 @@ def _category_from_name(name: Optional[str]) -> str:
 
 
 def _canonical_object_name(name: Optional[str], is_hand: bool = False) -> str:
+    """Map noisy VLM / detector labels onto stable scene-graph categories."""
     normalized = _category_from_name(name)
     allow_human_hands = _env_bool("ISBENCH_SAMJAM_ALLOW_HUMAN_HANDS", False)
+
+    # SamJam may describe the Fetch arm with visual labels such as "blue arm".
+    # Keep those detections separate from the gripper / hand contact region.
     robot_arm_names = {
         "blue_arm",
         "blue_robotic_arm",
@@ -86,9 +90,16 @@ def _canonical_object_name(name: Optional[str], is_hand: bool = False) -> str:
     }
     if normalized in robot_arm_names or ("robot" in normalized and "arm" in normalized):
         return "robot_arm"
+
+    # In first-person robot videos, VLMs often call the gripper a human hand or
+    # person. Unless explicitly allowed for debugging, canonicalize those labels
+    # to the robot gripper so relations remain consistent across frames.
     if not allow_human_hands:
         if is_hand or "hand" in normalized or normalized in {"person", "human", "man", "woman"}:
             return "robot_gripper"
+
+    # Normalize common countertop variants so the memory graph does not split
+    # one physical support surface into multiple object nodes.
     if normalized in {"counter", "countertop", "kitchen_countertop"}:
         return "kitchen_counter"
     return normalized

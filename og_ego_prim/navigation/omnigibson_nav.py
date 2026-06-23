@@ -35,6 +35,12 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         self.stuck_waypoint_tolerance = float(
             os.environ.get("ISBENCH_NAV_STUCK_WAYPOINT_TOLERANCE", "0.10")
         )
+        self.stuck_final_waypoint_tolerance = float(
+            os.environ.get(
+                "ISBENCH_NAV_STUCK_FINAL_WAYPOINT_TOLERANCE",
+                str(max(self.stuck_waypoint_tolerance, 0.30)),
+            )
+        )
 
         # 机器人不能把底盘中心直接开到物体中心，因此按物体类型设置环形候选站位
         # 的最小半径。容器和普通柜体需要较大间距来避免底盘碰撞；tactqn 柜体的
@@ -47,6 +53,12 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         )
         self.tactqn_min_goal_radius = float(
             os.environ.get("ISBENCH_NAV_TACTQN_MIN_GOAL_RADIUS", "0.45")
+        )
+        self.goal_clearance_radius = float(
+            os.environ.get("ISBENCH_NAV_GOAL_CLEARANCE_RADIUS", "0.25")
+        )
+        self.max_floor_height_delta = float(
+            os.environ.get("ISBENCH_NAV_MAX_FLOOR_HEIGHT_DELTA", "0.35")
         )
 
         # prefer_target_reachable=True 时，会对路径可达的候选站位进一步做机械臂
@@ -83,6 +95,11 @@ class OmniGibsonNavigationBackend(NavigationBackend):
                 "ISBENCH_NAV_STUCK_WAYPOINT_TOLERANCE must be greater than or equal to "
                 "the default navigation distance threshold"
             )
+        if self.stuck_final_waypoint_tolerance < self.stuck_waypoint_tolerance:
+            raise ValueError(
+                "ISBENCH_NAV_STUCK_FINAL_WAYPOINT_TOLERANCE must be greater than or "
+                "equal to ISBENCH_NAV_STUCK_WAYPOINT_TOLERANCE"
+            )
 
         # 0.45 m 是当前 Fetch 底盘和后续操作共同采用的安全下限；小于该值的
         # 候选站位容易让底盘贴进目标物体或家具碰撞体。
@@ -98,6 +115,10 @@ class OmniGibsonNavigationBackend(NavigationBackend):
             raise ValueError(
                 "ISBENCH_NAV_TACTQN_MIN_GOAL_RADIUS must be at least 0.45"
             )
+        if self.goal_clearance_radius < 0.0:
+            raise ValueError("ISBENCH_NAV_GOAL_CLEARANCE_RADIUS must be non-negative")
+        if self.max_floor_height_delta <= 0.0:
+            raise ValueError("ISBENCH_NAV_MAX_FLOOR_HEIGHT_DELTA must be positive")
         if self.max_ik_goal_checks <= 0:
             raise ValueError("ISBENCH_NAV_MAX_IK_GOAL_CHECKS must be positive")
 
@@ -282,13 +303,18 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         floor = self._get_current_floor(controller)
         robot_pos = controller.robot.get_position_orientation()[0]
         source_world = robot_pos[:2]
+        candidate_goal_direction = preferred_goal_direction
+        if candidate_goal_direction is None:
+            candidate_goal_direction = self._normalize_goal_direction(
+                source_world - target_pos[:2]
+            )
 
         candidates = self._candidate_goal_positions_near_target(
             controller,
             floor,
             target_pos[:2],
             minimum_goal_radius=minimum_goal_radius,
-            preferred_goal_direction=preferred_goal_direction,
+            preferred_goal_direction=candidate_goal_direction,
         )
         first_traversable_pose = None
         first_traversable_path_length = None
@@ -480,7 +506,36 @@ class OmniGibsonNavigationBackend(NavigationBackend):
             return None
         if int(traversable[row, col]) != 255:
             return None
+        if not self._has_traversable_clearance(
+            traversable,
+            row,
+            col,
+            float(trav_map.map_resolution),
+        ):
+            return None
         return row, col
+
+    def _has_traversable_clearance(
+        self,
+        traversable: torch.Tensor,
+        row: int,
+        col: int,
+        map_resolution: float,
+    ) -> bool:
+        if self.goal_clearance_radius <= 0.0:
+            return True
+
+        radius_px = int(math.ceil(self.goal_clearance_radius / map_resolution))
+        height, width = traversable.shape
+        row_min = row - radius_px
+        row_max = row + radius_px + 1
+        col_min = col - radius_px
+        col_max = col + radius_px + 1
+        if row_min < 0 or col_min < 0 or row_max > height or col_max > width:
+            return False
+
+        window = traversable[row_min:row_max, col_min:col_max]
+        return bool(torch.all(window == 255).item())
 
     def _nearest_traversable_positions(
         self,
@@ -517,6 +572,23 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         distances = distances[valid_distance]
         if free_cells.numel() == 0:
             return []
+        if self.goal_clearance_radius > 0.0:
+            clearance_mask = torch.tensor(
+                [
+                    self._has_traversable_clearance(
+                        traversable,
+                        int(cell[0]),
+                        int(cell[1]),
+                        float(trav_map.map_resolution),
+                    )
+                    for cell in free_cells
+                ],
+                dtype=torch.bool,
+            )
+            free_cells = free_cells[clearance_mask]
+            distances = distances[clearance_mask]
+            if free_cells.numel() == 0:
+                return []
         sorted_indices = torch.argsort(distances)[:max_candidates]
         return [
             torch.as_tensor(trav_map.map_to_world(free_cells[idx]), dtype=torch.float32)
@@ -668,8 +740,18 @@ class OmniGibsonNavigationBackend(NavigationBackend):
             f"filtered_waypoints={len(filtered_waypoints)} "
             f"final_waypoint={self._to_float_list(waypoints[-1])}"
         )
-        for waypoint in filtered_waypoints:
-            yield from self._drive_towards_waypoint(controller, waypoint[:2])
+        for index, waypoint in enumerate(filtered_waypoints):
+            is_final_waypoint = index == len(filtered_waypoints) - 1
+            yield from self._drive_towards_waypoint(
+                controller,
+                waypoint[:2],
+                stuck_tolerance=(
+                    self.stuck_final_waypoint_tolerance
+                    if is_final_waypoint
+                    else self.stuck_waypoint_tolerance
+                ),
+                waypoint_kind="final" if is_final_waypoint else "intermediate",
+            )
 
         yield from self._rotate_to_yaw(controller, float(waypoints[-1][2]))
 
@@ -679,10 +761,20 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         self,
         controller,
         waypoint_xy: torch.Tensor,
+        stuck_tolerance: Optional[float] = None,
+        waypoint_kind: str = "intermediate",
     ) -> Generator[torch.Tensor, None, None]:
+        if stuck_tolerance is None:
+            stuck_tolerance = self.stuck_waypoint_tolerance
+
         best_distance = float("inf")
         steps_without_progress = 0
         for _ in range(m.MAX_STEPS_FOR_WAYPOINT_NAVIGATION):
+            self._raise_if_robot_left_floor(
+                controller,
+                phase="drive",
+                waypoint=waypoint_xy,
+            )
             robot_pos, robot_quat = controller.robot.get_position_orientation()
             delta_xy = waypoint_xy - robot_pos[:2]
             distance = torch.norm(delta_xy).item()
@@ -697,11 +789,12 @@ class OmniGibsonNavigationBackend(NavigationBackend):
             else:
                 steps_without_progress += 1
             if steps_without_progress >= self.stuck_window:
-                if distance <= self.stuck_waypoint_tolerance:
+                if distance <= stuck_tolerance:
                     self._log(
                         "waypoint "
                         f"accepted_after_stuck distance={distance:.3f} "
-                        f"tolerance={self.stuck_waypoint_tolerance:.3f} "
+                        f"tolerance={stuck_tolerance:.3f} "
+                        f"kind={waypoint_kind} "
                         f"waypoint={self._to_float_list(waypoint_xy)}"
                     )
                     empty_action = controller._empty_action()
@@ -714,7 +807,8 @@ class OmniGibsonNavigationBackend(NavigationBackend):
                         "waypoint": waypoint_xy.tolist(),
                         "remaining distance": distance,
                         "linear command": self.linear_command,
-                        "stuck waypoint tolerance": self.stuck_waypoint_tolerance,
+                        "waypoint kind": waypoint_kind,
+                        "stuck waypoint tolerance": stuck_tolerance,
                     },
                 )
 
@@ -753,6 +847,7 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         best_error = float("inf")
         steps_without_progress = 0
         for _ in range(m.MAX_STEPS_FOR_WAYPOINT_NAVIGATION):
+            self._raise_if_robot_left_floor(controller, phase="rotate")
             _, robot_quat = controller.robot.get_position_orientation()
             current_yaw = T.quat2euler(robot_quat)[2].item()
             yaw_error = self._normalize_angle(target_yaw - current_yaw)
@@ -808,6 +903,43 @@ class OmniGibsonNavigationBackend(NavigationBackend):
     @staticmethod
     def _normalize_angle(angle: float) -> float:
         return math.atan2(math.sin(angle), math.cos(angle))
+
+    def _raise_if_robot_left_floor(self, controller, phase: str, waypoint=None):
+        robot_pos = controller.robot.get_position_orientation()[0]
+        robot_z = float(robot_pos[2])
+        if not math.isfinite(robot_z):
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                "Robot base height became non-finite during navigation.",
+                {"phase": phase, "base position": self._to_float_list(robot_pos)},
+            )
+
+        floor_heights = getattr(self.env.scene.trav_map, "floor_heights", None)
+        expected_z = 0.0
+        floor = 0
+        if floor_heights:
+            floor = self._get_current_floor(controller)
+            expected_z = float(floor_heights[floor])
+
+        height_delta = robot_z - expected_z
+        if abs(height_delta) <= self.max_floor_height_delta:
+            return
+
+        details = {
+            "phase": phase,
+            "floor": floor,
+            "base position": self._to_float_list(robot_pos),
+            "expected floor height": expected_z,
+            "height delta": height_delta,
+            "max floor height delta": self.max_floor_height_delta,
+        }
+        if waypoint is not None:
+            details["waypoint"] = self._to_float_list(waypoint)
+        raise ActionPrimitiveError(
+            ActionPrimitiveError.Reason.EXECUTION_ERROR,
+            "Robot base left the traversable floor during navigation.",
+            details,
+        )
 
     @staticmethod
     def _safe_target_in_reach(controller, target_pose) -> bool:

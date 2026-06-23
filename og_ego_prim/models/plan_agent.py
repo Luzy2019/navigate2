@@ -121,11 +121,10 @@ class PlanningAgent:
 
     def _get_last_execution_info(self, use_obs=True):
         last_step, last_plan = 0, 'init'
-        for plan in reversed(self.tracker.plans):
-            if not plan['plan']['action'].startswith('navigate'):
-                last_step = plan['step']
-                last_plan = plan['plan']['action']
-                break
+        if self.tracker.plans:
+            last_record = self.tracker.plans[-1]
+            last_step = last_record['step']
+            last_plan = last_record['plan']['action']
         
         if not use_obs:
             observations = None
