@@ -9,6 +9,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from og_ego_prim.utils.omnigibson_runtime import maybe_reexec_with_omnigibson_python
+from og_ego_prim.utils.task_registry import get_task_config_path
 
 
 if hasattr(argparse, "BooleanOptionalAction"):
@@ -159,14 +160,8 @@ def parse_args():
     parser.add_argument(
         "--scene-graph-backend",
         default=os.environ.get("ISBENCH_SCENE_GRAPH_BACKEND", "unigoal_grounded_sam"),
-        choices=["unigoal_grounded_sam", "samjam_sam2", "truth", "disabled"],
+        choices=["unigoal_grounded_sam", "samjam_sam2", "samjam_unigoal", "truth", "disabled"],
         help="Scene graph backend used by OnlineBenchmark.",
-    )
-    parser.add_argument(
-        "--scene-graph-update-every",
-        type=int,
-        default=int(os.environ.get("ISBENCH_SCENE_GRAPH_UPDATE_EVERY", "5")),
-        help="Run heavy scene graph perception every N low-level steps.",
     )
     parser.add_argument(
         "--scene-graph-history-interval",
@@ -204,7 +199,7 @@ def parse_args():
         "--samjam-overlap-relations",
         action=BooleanOptionalAction,
         default=False,
-        help="For samjam_sam2, add bbox-overlap placeholder relation edges.",
+        help="For samjam_sam2/samjam_unigoal, add bbox-overlap placeholder relation edges.",
     )
     parser.add_argument(
         "--scene-graph-json-path",
@@ -219,7 +214,6 @@ if ARGS.headless:
     os.environ["OMNIGIBSON_HEADLESS"] = "1"
 
 os.environ["ISBENCH_SCENE_GRAPH_BACKEND"] = ARGS.scene_graph_backend
-os.environ["ISBENCH_SCENE_GRAPH_UPDATE_EVERY"] = str(ARGS.scene_graph_update_every)
 os.environ["ISBENCH_SCENE_GRAPH_HISTORY_INTERVAL"] = str(ARGS.scene_graph_history_interval)
 if ARGS.scene_graph_image_size is not None:
     os.environ["ISBENCH_SCENE_GRAPH_IMAGE_WIDTH"] = str(ARGS.scene_graph_image_size[0])
@@ -409,6 +403,12 @@ def save_scene_graph_json_if_requested(args, benchmark, output_dir: Path):
     )
     save_path.parent.mkdir(parents=True, exist_ok=True)
     latest = benchmark.tracker.latest_scene_graph
+    try:
+        from og_ego_prim.scene_graph.visualization import summarize_lifelong_scene_graph
+
+        lifelong_summary = summarize_lifelong_scene_graph(latest)
+    except Exception:
+        lifelong_summary = None
     report = {
         "task": args.task,
         "scene": args.scene,
@@ -416,6 +416,7 @@ def save_scene_graph_json_if_requested(args, benchmark, output_dir: Path):
         "scene_graph_backend": args.scene_graph_backend,
         "scene_graph_update_every": args.scene_graph_update_every,
         "latest_summary": summarize_scene_graph(latest),
+        "lifelong_summary": lifelong_summary,
         "latest_scene_graph": latest,
         "scene_graph_history": benchmark.tracker.scene_graph_history,
         "error_stack": benchmark.tracker.error_stack,
@@ -425,11 +426,133 @@ def save_scene_graph_json_if_requested(args, benchmark, output_dir: Path):
     print(f"saved scene graph json: {save_path}")
 
 
+def save_scene_graph_visualization(benchmark, output_dir: Path):
+    latest = benchmark.tracker.latest_scene_graph
+    if latest is None:
+        print("saved scene graph BEV: skipped because latest scene graph is empty")
+        return
+    try:
+        from og_ego_prim.scene_graph.visualization import (
+            save_lifelong_scene_graph_bev_visualization,
+            save_scene_graph_bev_video,
+            save_scene_graph_bev_visualization,
+            save_scene_graph_task_scene_bev_video,
+            save_scene_graph_task_scene_bev_visualization,
+        )
+
+        history = benchmark.tracker.scene_graph_history
+        metadata = save_scene_graph_bev_visualization(
+            latest,
+            output_dir,
+            env=benchmark.env,
+            execution_diagnostics=benchmark.tracker.execution_diagnostics,
+        )
+        video_metadata = save_scene_graph_bev_video(
+            history,
+            output_dir,
+            latest_snapshot=latest,
+            env=benchmark.env,
+            execution_diagnostics=benchmark.tracker.execution_diagnostics,
+        )
+        task_room = task_room_from_name(benchmark.task_name)
+        task_scene_metadata = save_scene_graph_task_scene_bev_visualization(
+            latest,
+            output_dir,
+            env=benchmark.env,
+            execution_diagnostics=benchmark.tracker.execution_diagnostics,
+            task_room=task_room,
+        )
+        task_scene_video_metadata = save_scene_graph_task_scene_bev_video(
+            history,
+            output_dir,
+            latest_snapshot=latest,
+            env=benchmark.env,
+            execution_diagnostics=benchmark.tracker.execution_diagnostics,
+            task_room=task_room,
+        )
+        lifelong_metadata = save_lifelong_scene_graph_bev_visualization(
+            latest,
+            output_dir,
+            env=benchmark.env,
+            execution_diagnostics=benchmark.tracker.execution_diagnostics,
+        )
+        if metadata is None:
+            print("saved scene graph BEV: skipped because latest scene graph is empty")
+        elif metadata.get("saved"):
+            print(f"saved scene graph BEV: {output_dir / 'scene_graph_bev.png'}")
+        else:
+            print(f"saved scene graph BEV: skipped ({metadata.get('reason')})")
+        if video_metadata is None:
+            print("saved scene graph BEV video: skipped because history is empty")
+        elif video_metadata.get("saved"):
+            print(
+                "saved scene graph BEV video: "
+                f"{output_dir / 'scene_graph_bev_history.mp4'}"
+            )
+        else:
+            print(
+                "saved scene graph BEV video: "
+                f"skipped ({video_metadata.get('reason')})"
+            )
+        if task_scene_metadata is None:
+            print("saved task-scene BEV: skipped because latest scene graph is empty")
+        elif task_scene_metadata.get("saved"):
+            print(
+                "saved task-scene BEV: "
+                f"{output_dir / 'scene_graph_bev_task_scene.png'}"
+            )
+        else:
+            print(
+                "saved task-scene BEV: "
+                f"skipped ({task_scene_metadata.get('reason')})"
+            )
+        if task_scene_video_metadata is None:
+            print("saved task-scene BEV video: skipped because history is empty")
+        elif task_scene_video_metadata.get("saved"):
+            print(
+                "saved task-scene BEV video: "
+                f"{output_dir / 'scene_graph_bev_task_scene_history.mp4'}"
+            )
+        else:
+            print(
+                "saved task-scene BEV video: "
+                f"skipped ({task_scene_video_metadata.get('reason')})"
+            )
+        if lifelong_metadata is None:
+            print("saved lifelong scene graph BEV: skipped because latest scene graph is empty")
+        elif lifelong_metadata.get("saved"):
+            print(
+                "saved lifelong scene graph BEV: "
+                f"{output_dir / 'lifelong_scene_graph_bev.png'}"
+            )
+        else:
+            print(
+                "saved lifelong scene graph BEV: "
+                f"skipped ({lifelong_metadata.get('reason')})"
+            )
+    except Exception as e:
+        benchmark.tracker.track_error(
+            action="save_scene_graph_visualization",
+            err_type=e.__class__.__name__,
+            msg=str(e),
+        )
+        print(f"save_scene_graph_visualization failed: {e.__class__.__name__}: {e}")
+
+
+def task_room_from_name(task_name):
+    try:
+        with get_task_config_path(task_name).open("r", encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception:
+        return None
+    return config.get("scene_info", {}).get("room")
+
+
 def main():
     args = ARGS
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    if args.scene_graph_backend == "samjam_sam2":
+    if args.scene_graph_backend in {"samjam_sam2", "samjam_unigoal"}:
         os.environ.setdefault("ISBENCH_SAMJAM_OUTPUT_DIR", str(output_dir / "samjam_outputs"))
     _maybe_patch_omnigibson_kit()
     default_capture_every = max(args.capture_every, 1)
@@ -551,6 +674,7 @@ def main():
         track_robot_rgb_video(robot, benchmark.tracker, args.output_size)
         save_video_if_requested(args, benchmark, output_dir)
     print_scene_graph_summary("final", benchmark)
+    save_scene_graph_visualization(benchmark, output_dir)
     save_scene_graph_json_if_requested(args, benchmark, output_dir)
     print("scene_graph_history:", len(benchmark.tracker.scene_graph_history))
 

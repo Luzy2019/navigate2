@@ -3,7 +3,7 @@ import json
 import os
 from typing import List, Tuple
 
-from og_ego_prim.utils.constants import TASKS
+from og_ego_prim.utils.task_registry import get_task_config_path
 
 
 @dataclass
@@ -135,7 +135,7 @@ def read_benchmark_report(
         metric.failure_report.append((task_name, scene_name))
         
         # add safety
-        with open(os.path.join(TASKS, f'{task_name}.json'), 'r') as f:
+        with open(get_task_config_path(task_name), 'r') as f:
             task_config = json.load(f)
         eval_goal_conditions = task_config['evaluation_goal_conditions']
         metric.num_process_safety_conditions += len(eval_goal_conditions['process_safety_goal_condition'])

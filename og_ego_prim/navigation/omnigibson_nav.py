@@ -42,6 +42,18 @@ class OmniGibsonNavigationBackend(NavigationBackend):
             )
         )
 
+        # 旋转过程中，连续停滞检测的每步最小进度阈值（弧度）。
+        # 取值过大时正常慢速旋转可能被误判为"卡死"。
+        self.stuck_angle_progress_threshold = float(
+            os.environ.get(
+                "ISBENCH_NAV_STUCK_ANGLE_PROGRESS_THRESHOLD",
+                "0.005",
+            )
+        )
+        self.final_approach_distance = float(
+            os.environ.get("ISBENCH_NAV_FINAL_APPROACH_DISTANCE", "0.35")
+        )
+
         # 机器人不能把底盘中心直接开到物体中心，因此按物体类型设置环形候选站位
         # 的最小半径。容器和普通柜体需要较大间距来避免底盘碰撞；tactqn 柜体的
         # 把手较低，需要允许 Fetch 站得更近，机械臂才能够到。
@@ -100,7 +112,6 @@ class OmniGibsonNavigationBackend(NavigationBackend):
                 "ISBENCH_NAV_STUCK_FINAL_WAYPOINT_TOLERANCE must be greater than or "
                 "equal to ISBENCH_NAV_STUCK_WAYPOINT_TOLERANCE"
             )
-
         # 0.45 m 是当前 Fetch 底盘和后续操作共同采用的安全下限；小于该值的
         # 候选站位容易让底盘贴进目标物体或家具碰撞体。
         if self.container_min_goal_radius < 0.45:
@@ -121,6 +132,8 @@ class OmniGibsonNavigationBackend(NavigationBackend):
             raise ValueError("ISBENCH_NAV_MAX_FLOOR_HEIGHT_DELTA must be positive")
         if self.max_ik_goal_checks <= 0:
             raise ValueError("ISBENCH_NAV_MAX_IK_GOAL_CHECKS must be positive")
+        if self.final_approach_distance < 0.0:
+            raise ValueError("ISBENCH_NAV_FINAL_APPROACH_DISTANCE must be non-negative")
 
     def navigate_to_object(
         self,
@@ -130,6 +143,10 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         prefer_target_reachable: bool = False,
         preferred_goal_direction=None,
         minimum_goal_radius_override=None,
+        maximum_goal_radius_override=None,
+        require_goal_direction_aligned: bool = False,
+        allow_unreachable_goal_fallback: bool = True,
+        skip_if_already_satisfied: bool = True,
     ) -> Generator[torch.Tensor, None, None]:
         if target_obj is None:
             raise ActionPrimitiveError(
@@ -145,6 +162,7 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         start_pos = controller.robot.get_position_orientation()[0]
         start_distance = torch.norm(start_pos[:2] - target_pos[:2]).item()
         start_reachable = self._safe_target_in_reach(controller, target_pose)
+        start_reach_satisfied = (not prefer_target_reachable) or start_reachable
         start_direction_aligned = self._goal_direction_aligned(
             start_pos[:2],
             target_pos[:2],
@@ -157,9 +175,26 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         )
         if minimum_goal_radius < 0.45:
             raise ValueError("minimum_goal_radius_override must be at least 0.45")
+        maximum_goal_radius = (
+            float(maximum_goal_radius_override)
+            if maximum_goal_radius_override is not None
+            else None
+        )
+        if (
+            maximum_goal_radius is not None
+            and maximum_goal_radius < minimum_goal_radius
+        ):
+            raise ValueError(
+                "maximum_goal_radius_override must be greater than or equal to "
+                "the effective minimum goal radius"
+            )
         start_radius_satisfied = (
             minimum_goal_radius_override is None
             or start_distance >= minimum_goal_radius - 0.03
+        )
+        start_max_radius_satisfied = (
+            maximum_goal_radius is None
+            or start_distance <= maximum_goal_radius + 0.03
         )
         self._log(
             "start "
@@ -168,10 +203,16 @@ class OmniGibsonNavigationBackend(NavigationBackend):
             f"base_pos={self._to_float_list(start_pos)} "
             f"base_target_xy_distance={start_distance:.3f} "
             f"already_reachable={start_reachable} "
+            f"reach_satisfied={start_reach_satisfied} "
             f"direction_aligned={start_direction_aligned} "
             f"radius_satisfied={start_radius_satisfied} "
+            f"max_radius_satisfied={start_max_radius_satisfied} "
             f"preferred_goal_direction={self._to_float_list(preferred_goal_direction)} "
-            f"prefer_target_reachable={prefer_target_reachable}"
+            f"prefer_target_reachable={prefer_target_reachable} "
+            f"maximum_goal_radius={maximum_goal_radius} "
+            f"require_goal_direction_aligned={require_goal_direction_aligned} "
+            f"allow_unreachable_goal_fallback={allow_unreachable_goal_fallback} "
+            f"skip_if_already_satisfied={skip_if_already_satisfied}"
         )
         self.last_navigation_result = {
             "target_object": target_obj.name,
@@ -179,8 +220,10 @@ class OmniGibsonNavigationBackend(NavigationBackend):
             "start_base_pos": self._to_float_list(start_pos),
             "start_base_target_xy_distance": round(start_distance, 6),
             "start_reachable": start_reachable,
+            "start_reach_satisfied": start_reach_satisfied,
             "start_direction_aligned": start_direction_aligned,
             "start_radius_satisfied": start_radius_satisfied,
+            "start_max_radius_satisfied": start_max_radius_satisfied,
             "preferred_goal_direction": self._to_float_list(
                 preferred_goal_direction
             ),
@@ -191,11 +234,64 @@ class OmniGibsonNavigationBackend(NavigationBackend):
                 if minimum_goal_radius_override is None
                 else round(float(minimum_goal_radius_override), 6)
             ),
+            "maximum_goal_radius": (
+                None if maximum_goal_radius is None else round(maximum_goal_radius, 6)
+            ),
+            "maximum_goal_radius_override": (
+                None
+                if maximum_goal_radius_override is None
+                else round(float(maximum_goal_radius_override), 6)
+            ),
+            "require_goal_direction_aligned": require_goal_direction_aligned,
+            "allow_unreachable_goal_fallback": allow_unreachable_goal_fallback,
+            "skip_if_already_satisfied": skip_if_already_satisfied,
             "status": "started",
         }
-        if start_reachable and start_direction_aligned and start_radius_satisfied:
-            self.last_navigation_result.update(status="skipped_already_reachable")
-            self._log(f"skip target={target_obj.name} reason=already_reachable")
+        if (
+            skip_if_already_satisfied
+            and start_reach_satisfied
+            and start_direction_aligned
+            and start_radius_satisfied
+            and start_max_radius_satisfied
+        ):
+            goal_pose_2d = self._goal_pose_2d_from_candidate(
+                start_pos[:2],
+                target_pos,
+            )
+            self.last_navigation_result.update(
+                status="rotating_already_reachable",
+                goal_pose_2d=self._to_float_list(goal_pose_2d),
+                sampled_goal_radius=round(start_distance, 6),
+                path_points=0,
+                path_length=0.0,
+                waypoints=0,
+            )
+            self._log(
+                f"skip target={target_obj.name} "
+                "reason=already_in_allowed_navigation_region "
+                "action=rotate_to_face_target"
+            )
+            yield from self._rotate_to_yaw(
+                controller,
+                float(goal_pose_2d[2]),
+                rotation_kind="already_reachable",
+            )
+            yield from controller._settle_robot()
+            end_pos = controller.robot.get_position_orientation()[0]
+            end_reachable = self._safe_target_in_reach(controller, target_pose)
+            end_distance = torch.norm(end_pos[:2] - target_pos[:2]).item()
+            end_direction_aligned = self._goal_direction_aligned(
+                end_pos[:2],
+                target_pos[:2],
+                preferred_goal_direction,
+            )
+            self.last_navigation_result.update(
+                status="skipped_already_reachable",
+                end_base_pos=self._to_float_list(end_pos),
+                end_base_target_xy_distance=round(end_distance, 6),
+                end_reachable=end_reachable,
+                end_direction_aligned=end_direction_aligned,
+            )
             return
 
         try:
@@ -205,7 +301,10 @@ class OmniGibsonNavigationBackend(NavigationBackend):
                 target_pose=target_pose,
                 prefer_target_reachable=prefer_target_reachable,
                 minimum_goal_radius=minimum_goal_radius,
+                maximum_goal_radius=maximum_goal_radius,
                 preferred_goal_direction=preferred_goal_direction,
+                require_goal_direction_aligned=require_goal_direction_aligned,
+                allow_unreachable_goal_fallback=allow_unreachable_goal_fallback,
             )
             path_world = self._plan_path_to_goal(controller, goal_pose_2d)
             self._log(
@@ -276,7 +375,10 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         target_pose=None,
         prefer_target_reachable: bool = False,
         minimum_goal_radius: float = 0.45,
+        maximum_goal_radius: Optional[float] = None,
         preferred_goal_direction=None,
+        require_goal_direction_aligned: bool = False,
+        allow_unreachable_goal_fallback: bool = True,
     ) -> torch.Tensor:
         target_pos = torch.as_tensor(
             (target_pose or target_obj.get_position_orientation())[0],
@@ -287,7 +389,10 @@ class OmniGibsonNavigationBackend(NavigationBackend):
             target_pos,
             target_pose=target_pose if prefer_target_reachable else None,
             minimum_goal_radius=minimum_goal_radius,
+            maximum_goal_radius=maximum_goal_radius,
             preferred_goal_direction=preferred_goal_direction,
+            require_goal_direction_aligned=require_goal_direction_aligned,
+            allow_unreachable_goal_fallback=allow_unreachable_goal_fallback,
         )
         return goal_pose_2d
 
@@ -297,7 +402,10 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         target_pos: torch.Tensor,
         target_pose=None,
         minimum_goal_radius: float = 0.45,
+        maximum_goal_radius: Optional[float] = None,
         preferred_goal_direction=None,
+        require_goal_direction_aligned: bool = False,
+        allow_unreachable_goal_fallback: bool = True,
     ) -> torch.Tensor:
         trav_map = self.env.scene.trav_map
         floor = self._get_current_floor(controller)
@@ -314,14 +422,24 @@ class OmniGibsonNavigationBackend(NavigationBackend):
             floor,
             target_pos[:2],
             minimum_goal_radius=minimum_goal_radius,
+            maximum_goal_radius=maximum_goal_radius,
             preferred_goal_direction=candidate_goal_direction,
         )
         first_traversable_pose = None
         first_traversable_path_length = None
         num_path_reachable = 0
         num_ik_reachable = 0
+        num_direction_rejected = 0
 
         for candidate_xy in candidates:
+            if require_goal_direction_aligned and not self._goal_direction_aligned(
+                candidate_xy,
+                target_pos[:2],
+                candidate_goal_direction,
+            ):
+                num_direction_rejected += 1
+                continue
+
             path_world, _ = trav_map.get_shortest_path(
                 floor=floor,
                 source_world=source_world,
@@ -354,7 +472,7 @@ class OmniGibsonNavigationBackend(NavigationBackend):
                     self._log(
                         "candidate "
                         f"ik_check_limit_reached={self.max_ik_goal_checks} "
-                        "using_first_traversable_goal=True"
+                        f"using_first_traversable_goal={allow_unreachable_goal_fallback}"
                     )
                     break
 
@@ -373,7 +491,7 @@ class OmniGibsonNavigationBackend(NavigationBackend):
                     )
                     return goal_pose_2d
 
-        if first_traversable_pose is not None:
+        if first_traversable_pose is not None and allow_unreachable_goal_fallback:
             self._log(
                 "candidate "
                 f"selected_goal={self._to_float_list(first_traversable_pose)} "
@@ -384,10 +502,29 @@ class OmniGibsonNavigationBackend(NavigationBackend):
             )
             return first_traversable_pose
 
+        if first_traversable_pose is not None:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PLANNING_ERROR,
+                "Could not find an IK-reachable traversable goal near the target "
+                "object, and unreachable-goal fallback is disabled.",
+                {
+                    "target pos": target_pos.tolist(),
+                    "minimum goal radius": minimum_goal_radius,
+                    "maximum goal radius": maximum_goal_radius,
+                    "path reachable candidates": num_path_reachable,
+                    "direction rejected candidates": num_direction_rejected,
+                },
+            )
+
         raise ActionPrimitiveError(
             ActionPrimitiveError.Reason.PLANNING_ERROR,
             "Could not find a reachable traversable goal near the target object.",
-            {"target pos": target_pos.tolist()},
+            {
+                "target pos": target_pos.tolist(),
+                "minimum goal radius": minimum_goal_radius,
+                "maximum goal radius": maximum_goal_radius,
+                "direction rejected candidates": num_direction_rejected,
+            },
         )
 
     def _candidate_goal_positions_near_target(
@@ -396,6 +533,7 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         floor: int,
         target_xy: torch.Tensor,
         minimum_goal_radius: float = 0.45,
+        maximum_goal_radius: Optional[float] = None,
         preferred_goal_direction=None,
     ) -> List[torch.Tensor]:
         trav_map = self.env.scene.trav_map
@@ -404,7 +542,7 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         seen_map_cells: Set[Tuple[int, int]] = set()
 
         min_radius = minimum_goal_radius
-        max_radius = 2.25
+        max_radius = 2.25 if maximum_goal_radius is None else maximum_goal_radius
         radius_step = 0.15
         num_angles = 32
         angle_offsets = self._ordered_angle_offsets(
@@ -658,7 +796,18 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         floor = self._get_current_floor(controller)
         robot_pos = controller.robot.get_position_orientation()[0]
         source_world = robot_pos[:2]
-        target_world = torch.as_tensor(goal_pose_2d[:2], dtype=torch.float32)
+        goal_pose_2d = torch.as_tensor(goal_pose_2d, dtype=torch.float32)
+        target_world = goal_pose_2d[:2]
+
+        final_approach_path = self._plan_path_with_final_approach(
+            controller,
+            floor,
+            source_world,
+            goal_pose_2d,
+        )
+        if final_approach_path is not None:
+            return final_approach_path
+
         path_world, _ = self.env.scene.trav_map.get_shortest_path(
             floor=floor,
             source_world=source_world,
@@ -674,6 +823,134 @@ class OmniGibsonNavigationBackend(NavigationBackend):
             )
 
         return torch.as_tensor(path_world, dtype=torch.float32)
+
+    def _plan_path_with_final_approach(
+        self,
+        controller,
+        floor: int,
+        source_world: torch.Tensor,
+        goal_pose_2d: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        """Plan to an approach point, then enter the final pose facing the target.
+
+        The traversability planner reasons mostly about base-center xy.  If the
+        shortest path reaches the final xy from the target side, Fetch can arrive
+        almost exactly 180 degrees away from the desired manipulation/perception
+        yaw and then fail while trying to spin in place in a narrow spot.  This
+        method inserts a short final segment aligned with the requested final yaw
+        so the robot turns before entering the tight goal pose.
+        """
+        if self.final_approach_distance <= 0.0:
+            return None
+
+        trav_map = self.env.scene.trav_map
+        goal_xy = goal_pose_2d[:2]
+        final_yaw = float(goal_pose_2d[2])
+        final_direction = torch.tensor(
+            [math.cos(final_yaw), math.sin(final_yaw)],
+            dtype=torch.float32,
+        )
+        approach_xy = goal_xy - final_direction * self.final_approach_distance
+        traversable = self._eroded_floor_map(controller, floor)
+
+        if (
+            self._valid_traversable_map_cell(
+                trav_map,
+                traversable,
+                approach_xy,
+            )
+            is None
+        ):
+            self._log(
+                "plan final_approach_unavailable "
+                "reason=approach_cell_not_traversable "
+                f"approach_xy={self._to_float_list(approach_xy)}"
+            )
+            return None
+
+        if not self._line_segment_traversable(
+            trav_map,
+            traversable,
+            approach_xy,
+            goal_xy,
+        ):
+            self._log(
+                "plan final_approach_unavailable "
+                "reason=approach_segment_not_traversable "
+                f"approach_xy={self._to_float_list(approach_xy)} "
+                f"goal_xy={self._to_float_list(goal_xy)}"
+            )
+            return None
+
+        path_to_approach, _ = trav_map.get_shortest_path(
+            floor=floor,
+            source_world=source_world,
+            target_world=approach_xy,
+            entire_path=True,
+            robot=controller.robot,
+        )
+        if path_to_approach is None:
+            self._log(
+                "plan final_approach_unavailable "
+                "reason=no_path_to_approach "
+                f"approach_xy={self._to_float_list(approach_xy)}"
+            )
+            return None
+
+        path_world = torch.as_tensor(path_to_approach, dtype=torch.float32)
+        if path_world.ndim == 1:
+            path_world = path_world.unsqueeze(0)
+
+        if (
+            torch.norm(path_world[-1, :2] - approach_xy).item()
+            > m.DEFAULT_DIST_THRESHOLD
+        ):
+            path_world = torch.cat((path_world, approach_xy.unsqueeze(0)), dim=0)
+        if (
+            torch.norm(path_world[-1, :2] - goal_xy).item()
+            > m.DEFAULT_DIST_THRESHOLD
+        ):
+            path_world = torch.cat((path_world, goal_xy.unsqueeze(0)), dim=0)
+
+        self._log(
+            "plan final_approach_selected "
+            f"approach_xy={self._to_float_list(approach_xy)} "
+            f"goal_xy={self._to_float_list(goal_xy)} "
+            f"final_yaw={final_yaw:.3f} "
+            f"approach_distance={self.final_approach_distance:.3f}"
+        )
+        return path_world
+
+    def _line_segment_traversable(
+        self,
+        trav_map,
+        traversable: torch.Tensor,
+        start_xy: torch.Tensor,
+        end_xy: torch.Tensor,
+    ) -> bool:
+        start_xy = torch.as_tensor(start_xy, dtype=torch.float32)[:2]
+        end_xy = torch.as_tensor(end_xy, dtype=torch.float32)[:2]
+        delta_xy = end_xy - start_xy
+        distance = torch.norm(delta_xy).item()
+        if distance < 1e-6:
+            return True
+
+        map_resolution = max(float(trav_map.map_resolution), 1e-6)
+        step = max(map_resolution * 0.5, 0.025)
+        num_segments = max(1, int(math.ceil(distance / step)))
+        for index in range(num_segments + 1):
+            alpha = float(index) / float(num_segments)
+            sample_xy = start_xy + delta_xy * alpha
+            if (
+                self._valid_traversable_map_cell(
+                    trav_map,
+                    traversable,
+                    sample_xy,
+                )
+                is None
+            ):
+                return False
+        return True
 
     def _path_world_to_waypoints(
         self,
@@ -753,7 +1030,11 @@ class OmniGibsonNavigationBackend(NavigationBackend):
                 waypoint_kind="final" if is_final_waypoint else "intermediate",
             )
 
-        yield from self._rotate_to_yaw(controller, float(waypoints[-1][2]))
+        yield from self._rotate_to_yaw(
+            controller,
+            float(waypoints[-1][2]),
+            rotation_kind="final",
+        )
 
         yield from controller._settle_robot()
 
@@ -816,7 +1097,11 @@ class OmniGibsonNavigationBackend(NavigationBackend):
             current_yaw = T.quat2euler(robot_quat)[2].item()
             yaw_error = self._normalize_angle(target_yaw - current_yaw)
             if abs(yaw_error) > m.DEFAULT_ANGLE_THRESHOLD:
-                yield from self._rotate_to_yaw(controller, target_yaw)
+                yield from self._rotate_to_yaw(
+                    controller,
+                    target_yaw,
+                    rotation_kind=f"{waypoint_kind}_drive_alignment",
+                )
                 continue
 
             action = controller._empty_action()
@@ -843,56 +1128,95 @@ class OmniGibsonNavigationBackend(NavigationBackend):
         self,
         controller,
         target_yaw: float,
+        rotation_kind: str = "intermediate",
     ) -> Generator[torch.Tensor, None, None]:
-        best_error = float("inf")
-        steps_without_progress = 0
-        for _ in range(m.MAX_STEPS_FOR_WAYPOINT_NAVIGATION):
-            self._raise_if_robot_left_floor(controller, phase="rotate")
-            _, robot_quat = controller.robot.get_position_orientation()
-            current_yaw = T.quat2euler(robot_quat)[2].item()
-            yaw_error = self._normalize_angle(target_yaw - current_yaw)
-            if abs(yaw_error) < m.DEFAULT_ANGLE_THRESHOLD:
-                empty_action = controller._empty_action()
-                yield controller._postprocess_action(empty_action)
-                return
+        """Rotate the robot base in-place to @target_yaw.
 
-            abs_error = abs(yaw_error)
-            if abs_error < best_error - 0.01:
-                best_error = abs_error
-                steps_without_progress = 0
-            else:
-                steps_without_progress += 1
-            if steps_without_progress >= self.stuck_window:
-                if abs_error <= self.stuck_angle_tolerance:
+        If the shorter rotation direction gets stuck (no angular progress for
+        ``stuck_window`` consecutive steps), the method automatically tries the
+        opposite (longer) direction before raising an error.  This avoids
+        false-positive failures when one side of the robot is blocked by
+        furniture.
+        """
+        first_direction = None  # recorded on first attempt
+        for direction_attempt in range(2):
+            best_error = float("inf")
+            steps_without_progress = 0
+            reversed_direction = direction_attempt > 0
+            if reversed_direction:
+                self._log(
+                    "rotation "
+                    f"reversing_direction kind={rotation_kind} "
+                    f"reason=stuck_in_original_direction"
+                )
+            for _ in range(m.MAX_STEPS_FOR_WAYPOINT_NAVIGATION):
+                self._raise_if_robot_left_floor(controller, phase="rotate")
+                _, robot_quat = controller.robot.get_position_orientation()
+                current_yaw = T.quat2euler(robot_quat)[2].item()
+                yaw_error = self._normalize_angle(target_yaw - current_yaw)
+                if abs(yaw_error) < m.DEFAULT_ANGLE_THRESHOLD:
                     empty_action = controller._empty_action()
                     yield controller._postprocess_action(empty_action)
+                    if reversed_direction:
+                        self._log(
+                            "rotation "
+                            f"succeeded_after_reverse kind={rotation_kind}"
+                        )
                     return
-                raise ActionPrimitiveError(
-                    ActionPrimitiveError.Reason.EXECUTION_ERROR,
-                    "Robot base is not making rotational progress toward the waypoint.",
-                    {
-                        "target yaw": target_yaw,
-                        "current yaw": current_yaw,
-                        "yaw error": yaw_error,
-                        "angular command": self.angular_command,
-                    },
-                )
 
-            action = controller._empty_action()
-            base_action = action[controller.robot.controller_action_idx["base"]]
-            if base_action.numel() != 2:
-                raise ActionPrimitiveError(
-                    ActionPrimitiveError.Reason.EXECUTION_ERROR,
-                    "This navigation backend currently only supports 2D differential-drive base actions.",
-                    {"base action size": int(base_action.numel())},
-                )
+                abs_error = abs(yaw_error)
+                if abs_error < best_error - self.stuck_angle_progress_threshold:
+                    best_error = abs_error
+                    steps_without_progress = 0
+                else:
+                    steps_without_progress += 1
+                if steps_without_progress >= self.stuck_window:
+                    if abs_error <= self.stuck_angle_tolerance:
+                        empty_action = controller._empty_action()
+                        yield controller._postprocess_action(empty_action)
+                        return
+                    # If we haven't tried the reverse direction yet, break out
+                    # of this inner loop and try the opposite.
+                    if not reversed_direction:
+                        break
+                    raise ActionPrimitiveError(
+                        ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                        "Robot base is not making rotational progress toward the waypoint.",
+                        {
+                            "target yaw": target_yaw,
+                            "current yaw": current_yaw,
+                            "yaw error": yaw_error,
+                            "angular command": self.angular_command,
+                        },
+                    )
 
-            direction = -1.0 if yaw_error < 0.0 else 1.0
-            ang_vel = self.angular_command * direction
-            base_action[0] = 0.0
-            base_action[1] = ang_vel
-            action[controller.robot.controller_action_idx["base"]] = base_action
-            yield controller._postprocess_action(action)
+                action = controller._empty_action()
+                base_action = action[controller.robot.controller_action_idx["base"]]
+                if base_action.numel() != 2:
+                    raise ActionPrimitiveError(
+                        ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                        "This navigation backend currently only supports 2D differential-drive base actions.",
+                        {"base action size": int(base_action.numel())},
+                    )
+
+                # First attempt: choose the shorter arc direction.  When the
+                # error is near +/-pi, the normalized sign can flip due to tiny
+                # yaw changes, so keep the initial direction until we move away
+                # from that ambiguous boundary.  Second attempt forces the
+                # opposite direction in case the first side is physically blocked.
+                if first_direction is None:
+                    first_direction = -1.0 if yaw_error < 0.0 else 1.0
+                if reversed_direction:
+                    direction = -first_direction
+                elif abs_error > math.pi - 0.05:
+                    direction = first_direction
+                else:
+                    direction = -1.0 if yaw_error < 0.0 else 1.0
+                ang_vel = self.angular_command * direction
+                base_action[0] = 0.0
+                base_action[1] = ang_vel
+                action[controller.robot.controller_action_idx["base"]] = base_action
+                yield controller._postprocess_action(action)
 
         raise ActionPrimitiveError(
             ActionPrimitiveError.Reason.EXECUTION_ERROR,

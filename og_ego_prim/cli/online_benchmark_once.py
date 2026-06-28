@@ -63,7 +63,7 @@ parser.add_argument(
 )
 parser.add_argument(
     '--scene_graph_backend',
-    choices=('omnigibson_truth', 'unigoal_grounded_sam', 'samjam_sam2'),
+    choices=('omnigibson_truth', 'unigoal_grounded_sam', 'samjam_sam2', 'samjam_unigoal'),
     default='omnigibson_truth',
     help='Scene graph source. GroundedSAM and SAM2 require their optional perception dependencies.',
 )

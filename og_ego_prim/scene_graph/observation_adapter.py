@@ -44,7 +44,37 @@ def _to_builtin_position(position):
     return [float(x) for x in position.tolist()]
 
 
+# ===================================================
+# OmniGibson robot.get_obs() 原始格式
+#         ↓
+# ISBenchObservationAdapter.observe(env)
+#         ↓
+# FrameObservation 统一格式
+#         ↓
+# SAMJAM / UniGoal / scene graph backend
+# ===================================================
+#
+# IS-Bench scene graph 感知的观测适配器，关键作用是通过 observe(env)
+# 从 OmniGibson 环境的第一个机器人读取相机观测，并统一封装成 FrameObservation。
+#
+# observe(env) 会完成以下事情：
+# 1. 确保机器人开启 rgb、depth、camera_params 等视觉观测模态。
+# 2. 从 robot.get_obs() 中选择一个 RGB 视觉传感器。
+# 3. 提取 RGB、depth、相机内参、相机位姿、机器人位置和传感器名称。
+# 4. 将这些信息打包成 FrameObservation，供后续 SAMJAM / UniGoal scene graph 后端使用。
+#
+# 使用方法：
+#     adapter = ISBenchObservationAdapter(sensor_name=None)
+#     adapter.reset()
+#     frame = adapter.observe(env)
+#
+# 使用位置：
+# - UniGoalGroundedSAMBackend 中创建 self.adapter，并在 observe(env) 中调用 self.adapter.observe(env)。
+# - SAMJAMSAM2Backend 中创建 self.adapter，并在 observe(env) 中调用 self.adapter.observe(env)。
+# - PerceptionSceneGraphUpdater._run_perception() 会调用 backend.observe(self.env)，间接触发这里的 observe(env)
+
 class ISBenchObservationAdapter:
+    
     def __init__(self, sensor_name: Optional[str] = None):
         self.sensor_name = sensor_name
         self.frame_index = 0
@@ -53,6 +83,11 @@ class ISBenchObservationAdapter:
         self.frame_index = 0
 
     def ensure_robot_sensor_modalities(self, env: Any):
+        '''
+            确保环境中的第一个机器人开启 scene graph 感知需要的观测模态。
+            这里会尝试添加 RGB、线性深度、普通深度和相机参数；如果环境没有机器人则直接返回，
+            如果某个模态不被当前机器人/传感器支持，则忽略异常并继续尝试其他模态。
+        '''
         if not getattr(env, "robots", None):
             return
         robot = env.robots[0]
@@ -62,6 +97,8 @@ class ISBenchObservationAdapter:
             except Exception:
                 continue
 
+    # env是OmniGibson环境
+    # self.env = og.Environment(configs=self.env_config)
     def observe(self, env: Any) -> FrameObservation:
         if not getattr(env, "robots", None):
             raise RuntimeError("ISBenchObservationAdapter requires at least one robot")
@@ -100,6 +137,11 @@ class ISBenchObservationAdapter:
         return frame
 
     def _select_vision_sensor(self, robot, obs):
+        '''
+        从 robot.get_obs() 返回的观测字典中选择用于 scene graph 感知的视觉传感器。
+        如果初始化时指定了 self.sensor_name，则只使用指定传感器；否则自动选择第一个包含 rgb 的传感器。
+        使用位置：由 ISBenchObservationAdapter.observe() 调用，用来得到 sensor_name、sensor_obs 和 sensor 对象。
+        '''
         sensors = getattr(robot, "sensors", {})
         if self.sensor_name is not None:
             if self.sensor_name not in obs:
@@ -113,6 +155,11 @@ class ISBenchObservationAdapter:
         raise RuntimeError(f"no rgb vision sensor found in robot obs keys: {list(obs.keys())}")
 
     def _get_intrinsics(self, sensor):
+        '''
+        读取视觉传感器的相机内参矩阵，并转换成 numpy.float32 格式。
+        使用位置：由 ISBenchObservationAdapter.observe() 调用，结果写入 FrameObservation.intrinsics，
+        供 UniGoal / SAMJAM 等 scene graph 后端做几何投影或空间关系估计。
+        '''
         if sensor is None:
             return None
         try:
@@ -121,6 +168,13 @@ class ISBenchObservationAdapter:
             return None
 
     def _get_camera_pose(self, sensor, sensor_obs):
+        '''
+        获取相机在场景中的 4x4 位姿矩阵。
+        优先从 sensor_obs["camera_params"]["cameraViewTransform"] 求逆得到相机位姿；
+        如果没有 camera_params，则退化为只记录传感器位置的位姿矩阵。
+        使用位置：由 ISBenchObservationAdapter.observe() 调用，结果写入 FrameObservation.camera_pose，
+        供 scene graph 后端记录相机位置并辅助估计空间关系。
+        '''
         camera_params = sensor_obs.get("camera_params") if isinstance(sensor_obs, dict) else None
         if isinstance(camera_params, dict) and "cameraViewTransform" in camera_params:
             view_transform = _to_numpy(camera_params["cameraViewTransform"])
@@ -142,6 +196,11 @@ class ISBenchObservationAdapter:
         return pose
 
     def _get_robot_position(self, robot):
+        '''
+        读取机器人当前在场景中的位置，并转换成普通 Python list。
+        使用位置：由 ISBenchObservationAdapter.observe() 调用，结果写入 FrameObservation.robot_position，
+        供 perception backend / scene graph metadata 记录机器人所在位置。
+        '''
         try:
             position, _ = robot.get_position_orientation()
         except Exception:

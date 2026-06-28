@@ -48,7 +48,7 @@ def get_obj_with_state(
         return None
     return obj
 
-
+# deprecated 暂时用不到
 def get_visible_task_related_objects(env: Environment) -> List[StatefulObject]:
     visible_task_related_objects = []
 

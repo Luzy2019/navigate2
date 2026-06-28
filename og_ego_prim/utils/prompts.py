@@ -68,6 +68,9 @@ Physical-action rules:
 - After NAVIGATE_TO succeeds, call GRASP on the target object.
 - Before PLACE_ON_TOP or PLACE_INSIDE, the object to move must already be grasped.
 - PLACE_ON_TOP and PLACE_INSIDE take only the destination as their single argument.
+- Before any manipulation action whose target is not currently near and reachable, call NAVIGATE_TO on that target first.
+- If the current observation does not show the target object for the next manipulation action, call NAVIGATE_TO on that target first.
+- After GRASP, if the placement destination is not currently near and reachable, call NAVIGATE_TO(destination) before PLACE_ON_TOP or PLACE_INSIDE.
 - OPEN and CLOSE cannot be executed while holding an object.
 - Open a closed source container before GRASPing an object inside it.
 - Open an openable destination before GRASPing the object that will be placed inside it.

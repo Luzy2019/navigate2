@@ -3,8 +3,9 @@ import json
 import os
 from tqdm import tqdm
 
-from og_ego_prim.utils.constants import WORK_DIR, TASKS
+from og_ego_prim.utils.constants import WORK_DIR
 from og_ego_prim.utils.metric import Metric, read_benchmark_report
+from og_ego_prim.utils.task_registry import iter_task_config_paths
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--benchmark', type=str, default=None)
@@ -20,8 +21,7 @@ def main(args):
     work_dir = os.path.dirname(benchmark_dir)
     
     metric = Metric()
-    tasks = os.listdir(TASKS)
-    tasks = [os.path.join(TASKS, task) for task in tasks if task.endswith('.json')]
+    tasks = iter_task_config_paths(include_subdirs=True)
 
     for task in tqdm(tasks):
         with open(task, 'r') as f:

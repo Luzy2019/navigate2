@@ -27,7 +27,8 @@ def _to_builtin(value: Any):
         return {key: _to_builtin(item) for key, item in value.items()}
     return value
 
-
+# 这个文件用不到
+# deprecated: 2024-06-05
 class OmniGibsonSceneGraphUpdater(SceneGraphUpdater):
 
     def __init__(self):

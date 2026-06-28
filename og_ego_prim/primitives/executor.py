@@ -62,6 +62,20 @@ PRIMITIVES = {
 
 
 class Executor:
+    '''
+    IS-Bench 的高层动作执行器。
+
+    关键职责：
+    1. 接收形如 "navigate_to(apple)" 的高层 primitive plan。
+    2. 将 plan 解析成 OmniGibson / IS-Bench 的 primitive enum 和 simulator object 引用。
+    3. 调用 self.controller.apply_ref(...) 生成低层 action tensor 序列。
+    4. 逐步执行 env.step(action)，并在每个 low-level step 后触发 step_callback。
+
+    使用示例：
+        executor = Executor(env, primitive_type="ego")
+        executor.execute_plan("navigate_to(apple)")
+        executor.execute_plan("grasp(apple)")
+    '''
 
     def __init__(
         self, 
@@ -72,6 +86,21 @@ class Executor:
         navigation_backend: Optional[NavigationBackend] = None,
         step_callback: Optional[Callable[[LowLevelStepContext], None]] = None,
     ):
+        '''
+        初始化 Executor，并根据 primitive_type 创建对应的 primitive controller。
+
+        controller 的作用是把高层语义动作转换成低层 action 序列：
+        - primitive_type="ego" 时使用 EgoSemanticActionPrimitives。
+        - primitive_type="starter" 时使用 PhysicalStarterSemanticActionPrimitives。
+        - primitive_type="symbolic" 时使用 OmniGibson 的 SymbolicSemanticActionPrimitives。
+
+        使用示例：
+            executor = Executor(
+                env,
+                primitive_type="ego",
+                step_callback=on_low_level_step,
+            )
+        '''
         self.env = env
         self.verbose = verbose
         self.debug = debug
@@ -91,27 +120,54 @@ class Executor:
                 )
             )
         elif primitive_type == 'ego':
-            controller_kwargs.update(dict(navigation_backend=navigation_backend))
+            controller_kwargs.update(
+                dict(
+                    navigation_backend=navigation_backend
+                )
+            )
         self.controller = PRIMITIVES[primitive_type](env, **controller_kwargs)
 
     def execute_plans(self, plans: List[str]):
+        '''
+        顺序执行多个高层 plan。
+
+        每个 plan 都会交给 execute_plan(...) 单独解析和执行；如果中途某个 plan 抛出异常，
+        后续 plan 不会继续执行，异常会向上传递给调用者。
+
+        使用示例：
+            executor.execute_plans([
+                "navigate_to(apple)",
+                "grasp(apple)",
+                "navigate_to(cabinet)",
+                "place_inside(apple, cabinet)",
+            ])
+        '''
         for plan in plans:
             self.execute_plan(plan)
-        
+
     def execute_plan(self, plan: str):
-        """
-            plan format: OPERATOR(OBJ@DESCRIPTOR, ...)
-            e.g., 
-                grasp(vegetables@inside the refrigerator)
-                close(regrigerator)
-        """
+        '''
+        执行单条高层 primitive plan。
+
+        这里会先把字符串 plan 解析成 primitive 和目标对象引用，再调用 _execute(...)
+        执行 controller 生成的低层 action 序列。执行完成或失败后，会把诊断信息写入
+        self.last_execution_diagnostics。
+
+        plan 格式：
+            OPERATOR(OBJ@DESCRIPTOR, ...)
+
+        使用示例：
+            executor.execute_plan("grasp(vegetables@inside the refrigerator)")
+            executor.execute_plan("close(refrigerator)")
+            executor.execute_plan("done()")
+        '''
         if self.verbose:
             print(f'[executor] -> executing {plan}')
             sys.stdout.flush()
 
         self.last_execution_diagnostics = {
             "plan": plan,
-            "primitive_type": self.primitive_type,
+            "primitive_type": self.primitive_type, # ego, starter, symbolic
             "status": "parsing",
         }
 
@@ -121,7 +177,7 @@ class Executor:
                 debug_prompt += ' or Simulator (s/S)'
             print(f'{debug_prompt}: ')
             sys.stdout.flush()
-             
+
             while cmd := input().upper() != "Y":
                 if cmd == 'S':
                     if gm.HEADLESS:
@@ -134,7 +190,9 @@ class Executor:
                     sys.stdout.flush()
 
         try:
+            
             parsed_action_seqs = self._parse_plan_to_action_seqs(plan)
+        
         except Exception as exc:
             self.last_execution_diagnostics.update(
                 status="parse_error",
@@ -143,12 +201,15 @@ class Executor:
             )
             self._log_execution_error(plan, exc)
             raise
+
         if parsed_action_seqs is None:  # Done
             self.last_execution_diagnostics.update(status="done", low_level_steps=0)
             return
-        
+
         try:
+
             self._execute(parsed_action_seqs)
+            
         except Exception as e:
             self._log_execution_error(plan, e)
             if self.debug and gm.HEADLESS is False:
@@ -157,8 +218,19 @@ class Executor:
                 self._simulator_loop()
             else:
                 raise e
-        
+
     def _execute(self, parsed_action_seqs: ParsedActionSequence):
+        '''
+        执行已经解析好的低层 action 序列。
+
+        parsed_action_seqs.action_seqs 是一个 generator，会不断 yield action tensor。
+        本函数逐个调用 env.step(action)，并在每个 low-level step 后触发 step_callback，
+        因此 scene graph 的 low-level step 更新也是从这里被触发的。
+
+        内部调用示例：
+            parsed = self._parse_plan_to_action_seqs("navigate_to(apple)")
+            self._execute(parsed)
+        '''
         start_state = self._snapshot_robot_state()
         action_stats: Dict[str, Dict[str, float | int]] = {}
         low_level_steps = 0
@@ -234,6 +306,15 @@ class Executor:
             sys.stdout.flush()
 
     def _snapshot_robot_state(self) -> Dict[str, Any]:
+        '''
+        截取当前机器人状态，用于执行前后诊断。
+
+        当前记录的信息包括机器人 base 位置/朝向、末端执行器位置，以及当前手中物体。
+        这些信息会被 _execute(...) 用来计算 base/eef 位移和执行诊断。
+
+        内部调用示例：
+            start_state = self._snapshot_robot_state()
+        '''
         if not self.env.robots:
             return {}
 
@@ -267,6 +348,15 @@ class Executor:
         return state
 
     def _snapshot_navigation_result(self) -> Optional[Dict[str, Any]]:
+        '''
+        读取 navigation backend 最近一次导航结果。
+
+        如果当前 controller 没有 navigation_backend，或者 backend 还没有产生导航结果，
+        则返回 None。该信息会被 _execute(...) 追加到 last_execution_diagnostics 中。
+
+        内部调用示例：
+            navigation_result = self._snapshot_navigation_result()
+        '''
         navigation_backend = getattr(self.controller, "navigation_backend", None)
         result = getattr(navigation_backend, "last_navigation_result", None)
         if result is None:
@@ -278,6 +368,17 @@ class Executor:
         action_stats: Dict[str, Dict[str, float | int]],
         action: torch.Tensor,
     ):
+        '''
+        统计当前低层 action 中各个 robot controller 的活跃情况。
+
+        它会根据 robot.controller_action_idx 把 action 切分到不同 controller，
+        记录每个 controller 有多少 step 发出了非零命令，以及最大命令幅度。
+        这些统计会写入 _execute(...) 的 action_groups 诊断字段。
+
+        内部调用示例：
+            action_stats = {}
+            self._update_action_stats(action_stats, action)
+        '''
         if not self.env.robots:
             return
 
@@ -299,6 +400,15 @@ class Executor:
 
     @staticmethod
     def _to_float_list(value) -> Optional[List[float]]:
+        '''
+        将 tensor / numpy array / list 等数值序列转换成普通 float list。
+
+        该函数主要用于把机器人位置、朝向、关节值等转成可 JSON 序列化的诊断信息，
+        并统一保留 6 位小数。
+
+        使用示例：
+            position = Executor._to_float_list(robot.get_position_orientation()[0])
+        '''
         if value is None:
             return None
         if hasattr(value, "detach"):
@@ -312,12 +422,29 @@ class Executor:
         start: Optional[List[float]],
         end: Optional[List[float]],
     ) -> Optional[float]:
+        '''
+        计算两个等长向量之间的欧氏距离。
+
+        如果输入为空或长度不一致，则返回 None。主要用于执行诊断中的 base_displacement
+        和 eef_displacement。
+
+        使用示例：
+            distance = Executor._distance([0, 0, 0], [1, 0, 0])
+        '''
         if start is None or end is None or len(start) != len(end):
             return None
         return round(sum((a - b) ** 2 for a, b in zip(start, end)) ** 0.5, 6)
 
     @staticmethod
     def _log_execution_error(plan: str, error: Exception):
+        '''
+        打印 plan 执行或解析失败时的错误信息。
+
+        该函数只负责日志输出，不会吞掉异常；调用方仍然会继续 raise 原始异常。
+
+        内部调用示例：
+            self._log_execution_error(plan, exc)
+        '''
         print(
             f"[executor][error] plan={plan!r} "
             f"type={error.__class__.__name__} message={error}"
@@ -325,6 +452,24 @@ class Executor:
         sys.stdout.flush()
 
     def _parse_plan_to_action_seqs(self, plan: str) -> Optional[ParsedActionSequence]:
+        '''
+        将字符串形式的高层 plan 解析成可执行的低层 action generator。
+
+        主要步骤：
+        1. 解析 OPERATOR(...) 格式，得到 operator 和参数。
+        2. 检查 operator 是否属于当前 primitive_type 支持的 primitive。
+        3. 根据任务 object_scope 将对象名解析成 simulator object 引用。
+        4. 调用 self.controller.apply_ref(...) 生成低层 action 序列。
+
+        返回值：
+        - ParsedActionSequence：可交给 _execute(...) 执行。
+        - None：表示 plan 是 done()，无需执行动作。
+
+        内部调用示例：
+            parsed = self._parse_plan_to_action_seqs("navigate_to(apple)")
+            if parsed is not None:
+                self._execute(parsed)
+        '''
         pattern = r'([\w\W_]+)\((.*)\)'
         result = re.search(pattern, plan.strip())
         if result is None:
@@ -333,7 +478,7 @@ class Executor:
 
         if operator == 'done':
             return None
-        
+
         if operator.upper() not in self.primitive_set._member_names_:
             raise BadExecutionPlanError(f'invalid operator "{operator}", expected {self.primitive_set._member_names_}')
         primitive = self.primitive_set._member_map_[operator.upper()]
@@ -348,7 +493,7 @@ class Executor:
                 obj, _ = prim_param.strip().split('@')
             else:
                 obj = prim_param
-            
+
             obj_ref = find_task_related_object(self.env, obj.strip())
             if obj_ref is None:
                 raise BadExecutionPlanError(
@@ -378,8 +523,17 @@ class Executor:
             primitive_name=operator.upper(),
             action_seqs=action_seqs,
         )
-            
+
     def _simulator_loop(self, interval=None):
+        '''
+        让仿真在 no-op action 下继续运行一段时间，常用于 debug 或等待物理状态稳定。
+
+        如果 interval 是正整数，则运行固定步数；否则进入无限循环，需要用户手动中断。
+        no-op action 由 get_hold_action() 生成，避免绝对位置控制器被错误地命令到 0。
+
+        内部调用示例：
+            self._simulator_loop(interval=5)
+        '''
         if interval is not None and isinstance(interval, int) and interval > 0:
             for _ in range(interval):
                 self.env.step(self.get_hold_action())
@@ -388,14 +542,17 @@ class Executor:
                 self.env.step(self.get_hold_action())
 
     def get_hold_action(self) -> torch.Tensor:
-        """Return a real no-op action that holds the robot's current state.
+        '''
+        生成真正的 no-op / hold action，让机器人保持当前状态。
 
-        A zero vector is only a no-op for delta / velocity controllers.  Fetch's
-        primitive config uses absolute position JointControllers, where zeros
-        command every controlled joint toward position zero.  Observation
-        capture advances physics between camera poses, so it must ask each
-        controller for its own no-op command instead of sending raw zeros.
-        """
+        注意：全零 action 不一定是真正的 no-op。对于绝对位置 JointController，
+        全零可能表示“把关节移动到 0 位置”。因此这里会逐个调用 robot controller 的
+        compute_no_op_action(control_dict)，生成各 controller 自己认可的保持动作。
+
+        使用示例：
+            hold_action = executor.get_hold_action()
+            env.step(hold_action)
+        '''
         if not self.env.robots:
             return torch.empty(0)
 
@@ -413,7 +570,18 @@ class Executor:
         return action
 
     def snapshot_passive_motion_state(self) -> Dict[str, Any]:
-        """Capture robot state used to audit non-task simulation phases."""
+        '''
+        截取 passive/no-op 仿真阶段的机器人状态。
+
+        相比 _snapshot_robot_state()，这里还会额外记录非 base 控制器对应的关节位置，
+        用于判断观察、等待、相机切换等非任务动作阶段是否让机器人意外移动。
+
+        使用示例：
+            start_state = executor.snapshot_passive_motion_state()
+            for _ in range(5):
+                env.step(executor.get_hold_action())
+            executor.log_passive_motion_diagnostic("camera_capture", start_state, 5)
+        '''
         state = self._snapshot_robot_state()
         if not self.env.robots:
             state["joint_positions"] = None
@@ -444,7 +612,23 @@ class Executor:
         start_state: Dict[str, Any],
         simulation_steps: int,
     ) -> Dict[str, Any]:
-        """Report whether a no-op phase moved the robot unexpectedly."""
+        '''
+        输出 passive/no-op 仿真阶段的运动诊断信息。
+
+        它会比较 start_state 和当前状态，计算 base 位移、末端执行器位移、
+        非 base 关节最大位移，以及手中物体是否变化，用来判断 no-op 阶段是否发生了
+        unexpected_motion。
+
+        使用示例：
+            start_state = executor.snapshot_passive_motion_state()
+            for _ in range(5):
+                env.step(executor.get_hold_action())
+            diagnostic = executor.log_passive_motion_diagnostic(
+                phase="between_actions",
+                start_state=start_state,
+                simulation_steps=5,
+            )
+        '''
         end_state = self.snapshot_passive_motion_state()
         base_displacement = self._distance(
             start_state.get("base_position"), end_state.get("base_position")
@@ -495,6 +679,15 @@ class Executor:
         start: Optional[List[float]],
         end: Optional[List[float]],
     ) -> Optional[float]:
+        '''
+        计算两个等长列表逐元素差值的最大绝对值。
+
+        主要用于 passive motion 诊断中的 max_joint_displacement。
+        如果输入为空或长度不一致，则返回 None；如果列表为空，则返回 0.0。
+
+        使用示例：
+            max_delta = Executor._max_abs_difference([0.1, 0.2], [0.1, 0.5])
+        '''
         if start is None or end is None or len(start) != len(end):
             return None
         if not start:

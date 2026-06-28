@@ -14,7 +14,7 @@ from og_ego_prim.utils.constants import WORK_DIR
 from og_ego_prim.utils.prompts import *
 from og_ego_prim.utils.types import StepwisePlan
 
-from og_ego_prim.utils.constants import TASKS
+from og_ego_prim.utils.task_registry import get_task_config_path
 
 class BadAgentPlanError(Exception):
     pass
@@ -307,7 +307,30 @@ class PlanningAgent:
             caution = None
         else:
             caution = plan['caution']
+
+        if (
+            self.primitive_type == "starter"
+            and operator.upper() in {"PLACE_ON_TOP", "PLACE_INSIDE"}
+            and objects
+            and not self._last_plan_is_navigation_to(objects[0])
+        ):
+            destination = objects[0]
+            print(
+                "[agent][planner_guard] rewriting starter placement to "
+                f"NAVIGATE_TO({destination}) before {operator.upper()}({destination})"
+            )
+            sys.stdout.flush()
+            return "navigate_to", destination, None
+
         return operator.lower(), params, caution
+
+    def _last_plan_is_navigation_to(self, target: str) -> bool:
+        if not getattr(self, "tracker", None) or not self.tracker.plans:
+            return False
+
+        last_action = self.tracker.plans[-1]["plan"]["action"].strip().lower()
+        expected_action = f"navigate_to({target.strip().lower()})"
+        return last_action == expected_action
     
     def generate_caption(self, use_obs=True) -> str:
         _, obs = self._get_last_execution_info(use_obs)
@@ -418,7 +441,7 @@ class PlanningAgent:
                     return
         
     def load_info_data(self):
-        with open(os.path.join(TASKS, f"{self.task_name}.json"), 'r', encoding='utf-8') as f:
+        with open(get_task_config_path(self.task_name), 'r', encoding='utf-8') as f:
             task_json_data = json.load(f)
         task_instruction = task_json_data['planning_context']['task_instruction']
         objects_list = task_json_data['planning_context']['object_list']

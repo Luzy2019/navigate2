@@ -1,8 +1,7 @@
 import json
-import os
 from typing import Optional, TYPE_CHECKING
 
-from og_ego_prim.utils.constants import TASKS
+from og_ego_prim.utils.task_registry import get_task_config_path
 from og_ego_prim.primitives.specs import PrimitiveType
 
 if TYPE_CHECKING:
@@ -39,9 +38,8 @@ def build_benchmark(
 ) -> 'Benchmark':
     from .custom_behavior_task import CustomBehaviorTask  # register customized BehaviorTask
     
-    task_config = os.path.join(TASKS, f'{task}.json')
-    assert os.path.exists(task_config), f'invalid task config "{task}"'
-    with open(task_config, 'r') as f:
+    task_config_path = get_task_config_path(task)
+    with open(task_config_path, 'r') as f:
         task_config = json.load(f)
 
     primitive_type = resolve_primitive_type(task_config, primitive_type)

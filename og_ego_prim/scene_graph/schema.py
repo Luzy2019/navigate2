@@ -62,6 +62,16 @@ class SceneGraphSnapshot:
         }
 
     def to_prompt_context(self) -> str:
+        '''
+            它主要给 planner / LLM 使用：
+            scene graph 本身是结构化对象，但 LLM prompt 更适合读自然语言/文本，
+            所以这个函数就是把 scene graph 快速压缩成 prompt context。
+
+            - apple: visible, Inside=False, Open=False
+            - cabinet: visible, Open=True
+            - apple in cabinet
+        '''
+    
         lines = []
         for node in self.nodes:
             state_text = ", ".join(

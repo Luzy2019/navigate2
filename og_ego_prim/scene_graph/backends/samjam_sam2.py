@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -23,7 +24,6 @@ from .utils import (
     bbox_from_mask,
     ensure_path_exists,
     insert_sys_path,
-    mask_center_world,
     model_root,
     repo_root,
     room_lookup_from_env,
@@ -105,16 +105,6 @@ def _canonical_object_name(name: Optional[str], is_hand: bool = False) -> str:
     return normalized
 
 
-def _position_distance(a: Optional[List[float]], b: Optional[List[float]]) -> Optional[float]:
-    if a is None or b is None:
-        return None
-    a_np = np.asarray(a, dtype=np.float32).reshape(-1)
-    b_np = np.asarray(b, dtype=np.float32).reshape(-1)
-    if len(a_np) < 3 or len(b_np) < 3:
-        return None
-    return float(np.linalg.norm(a_np[:3] - b_np[:3]))
-
-
 def _extract_json_object(text: str) -> Dict[str, Any]:
     try:
         parsed = json.loads(text)
@@ -179,6 +169,9 @@ class SAMJAMOutputWriter:
         candidates: List[MaskCandidate],
         objects: List[PerceivedObject],
         relations: List[PerceivedRelation],
+        scene_graph: Optional[Dict[str, Any]] = None,
+        room_graph: Optional[Dict[str, Any]] = None,
+        group_graph: Optional[Dict[str, Any]] = None,
     ) -> None:
         stage = "start"
         try:
@@ -191,7 +184,7 @@ class SAMJAMOutputWriter:
             stage = "save_scene_graph_json"
             objs_json = [
                 {
-                    "id": obj.object_id,
+                    "id": self._native_object_id(obj),
                     "name": obj.name,
                     "is_hand": bool(obj.attributes.get("is_hand", False)),
                     "is_moving": bool(obj.attributes.get("is_moving", False)),
@@ -199,8 +192,9 @@ class SAMJAMOutputWriter:
                 }
                 for obj in objects
             ]
+            object_map = {obj.object_id: obj for obj in objects}
             rels_json = {
-                f"{rel.source_id},{rel.target_id}": rel.relation
+                f"{self._native_relation_id(rel.source_id, object_map)},{self._native_relation_id(rel.target_id, object_map)}": rel.relation
                 for rel in relations
             }
             (self.scene_graph_dir / f"{frame_index}_objs.json").write_text(
@@ -211,6 +205,8 @@ class SAMJAMOutputWriter:
                 json.dumps(rels_json, ensure_ascii=False, indent=4),
                 encoding="utf-8",
             )
+            # Keep this directory aligned with SAMJAM's native debug artifacts.
+            # Persistent IS-Bench/UniGoal graphs are written by the benchmark report.
 
             stage = "draw_vlm_bbox"
             self._draw_vlm_bbox(
@@ -311,8 +307,11 @@ class SAMJAMOutputWriter:
         output_path: Path,
     ) -> None:
         canvas = image.copy()
-        object_map = {obj.object_id: obj for obj in objects}
-        for obj in objects:
+        visible_objects = [
+            obj for obj in objects if obj.attributes.get("currently_visible", True)
+        ]
+        object_map = {obj.object_id: obj for obj in visible_objects}
+        for obj in visible_objects:
             if obj.bbox is None:
                 continue
             color = self._color(obj.object_id)
@@ -331,6 +330,16 @@ class SAMJAMOutputWriter:
             if obj.get("id") == object_id:
                 return obj
         return None
+
+    def _native_object_id(self, obj: PerceivedObject) -> Any:
+        return obj.attributes.get("samjam_id", obj.object_id)
+
+    def _native_relation_id(self, object_id: str, object_map: Dict[str, PerceivedObject]) -> Any:
+        obj = object_map.get(object_id)
+        if obj is not None:
+            return self._native_object_id(obj)
+        match = re.match(r"samjam_object:(\d+)$", str(object_id))
+        return int(match.group(1)) if match else object_id
 
     def _relation_line(self, image: np.ndarray, source_bbox: List[float], target_bbox: List[float], label: str) -> None:
         import cv2
@@ -541,26 +550,26 @@ class SAMJAMSAM2Backend:
         self.adapter = ISBenchObservationAdapter(sensor_name=sensor_name)
         self.env = None
         self.mask_generator = None
+        self.video_predictor = None
+        self.samjam_object_type = None
         self.vlm_adapter: Optional[SAMJAMVLMAdapter] = None
         self.room_lookup = None
-        self.memory: Dict[str, PerceivedObject] = {}
-        self.memory_relations: List[PerceivedRelation] = []
         self.output_writer: Optional[SAMJAMOutputWriter] = None
         self.pending_debug: Optional[Dict[str, Any]] = None
-        self.next_object_id = 0
         self.last_result: Optional[PerceptionResult] = None
+        self._native_video_tmp: Optional[tempfile.TemporaryDirectory] = None
+        self._native_video_dir: Optional[Path] = None
+        self._reset_native_state()
 
     def reset(self, env: Any) -> None:
         self.env = env
         self.adapter.reset()
         self.adapter.ensure_robot_sensor_modalities(env)
         self.room_lookup = room_lookup_from_env(env)
-        self.memory.clear()
-        self.memory_relations.clear()
         self.pending_debug = None
         output_dir = os.environ.get("ISBENCH_SAMJAM_OUTPUT_DIR")
         self.output_writer = SAMJAMOutputWriter(Path(output_dir)) if output_dir else None
-        self.next_object_id = 0
+        self._reset_native_state()
         self.last_result = None
 
     def observe(self, env: Any) -> FrameObservation:
@@ -568,21 +577,25 @@ class SAMJAMSAM2Backend:
 
     def detect(self, frame: FrameObservation) -> PerceptionResult:
         generator = self._ensure_mask_generator()
+        self._store_native_frame(frame)
         masks = generator.generate(frame.rgb)
         vlm_enabled = self._vlm_enabled()
-        vlm_scene_graph = None
+        vlm_scene_graph = {"objects": [], "relationships": []}
         match_summary: Dict[str, Any] = {}
-        candidates: List[MaskCandidate] = []
+        candidates = self._mask_candidates(frame, masks)
         if vlm_enabled:
             vlm_scene_graph = self._ensure_vlm_adapter().generate(frame)
-            objects, relations, match_summary, candidates = self._objects_from_vlm_and_masks(
-                frame,
-                vlm_scene_graph,
-                masks,
-            )
+            match_summary = self._update_native_samjam(frame, vlm_scene_graph, candidates)
+            objects, relations = self._native_objects_and_relations(frame)
         else:
             objects = self._objects_from_masks(frame, masks)
             relations = self._relations_from_overlaps(objects)
+            match_summary = {
+                "matched_object_count": len(objects),
+                "unmatched_vlm_object_count": 0,
+                "unmatched_mask_count": 0,
+                "rejected_vlm_objects": [],
+            }
 
         result = PerceptionResult(
             backend=self.name,
@@ -615,16 +628,24 @@ class SAMJAMSAM2Backend:
                 "depth_shape": None if frame.depth is None else list(frame.depth.shape),
                 "mask_count": len(masks),
                 "vendor": "SAMJAM/sam2",
+                "graph_mode": "samjam_native_video_sgg",
+                "identity_tracking": (
+                    "sam2_video_predictor" if vlm_enabled else "none_vlm_disabled"
+                ),
                 "vlm_enabled": vlm_enabled,
-                "vlm_object_count": 0 if vlm_scene_graph is None else len(vlm_scene_graph.get("objects", [])),
-                "vlm_relation_count": 0 if vlm_scene_graph is None else len(vlm_scene_graph.get("relationships", [])),
+                "vlm_object_count": len(vlm_scene_graph.get("objects", [])),
+                "vlm_relation_count": len(vlm_scene_graph.get("relationships", [])),
                 "matched_object_count": match_summary.get("matched_object_count", 0),
                 "unmatched_vlm_object_count": match_summary.get("unmatched_vlm_object_count", 0),
                 "unmatched_mask_count": match_summary.get("unmatched_mask_count", 0),
-                "match_iou_threshold": _env_float("ISBENCH_SAMJAM_MATCH_IOU", 0.25),
+                "match_iou_threshold": _env_float("ISBENCH_SAMJAM_NATIVE_MATCH_IOU", 0.1),
                 "rejected_vlm_objects": match_summary.get("rejected_vlm_objects", []),
                 "vlm_scene_graph": self._compact_vlm_scene_graph(vlm_scene_graph),
                 "overlap_relations_enabled": self._overlap_relations_enabled(),
+                "samjam_total_object_count": len(self.samjam_total_objs),
+                "samjam_current_object_count": len(self.samjam_cur_objs),
+                "samjam_relation_count": len(self.samjam_rels),
+                "samjam_local_frame_index": len(self.samjam_frame_indices) - 1,
             },
         )
         self.pending_debug = {
@@ -638,87 +659,390 @@ class SAMJAMSAM2Backend:
         return result
 
     def update_memory(self, result: PerceptionResult) -> PerceptionResult:
-        visible_objects = []
-        id_map = {}
-        matched_memory_ids = set()
-        for obj in result.objects:
-            memory_id = self._match_memory_object(obj)
-            if memory_id is None:
-                memory_id = f"samjam_object:{self.next_object_id}"
-                self.next_object_id += 1
-            previous = self.memory.get(memory_id)
-            id_map[obj.object_id] = memory_id
-            matched_memory_ids.add(memory_id)
-            previous_attributes = {} if previous is None else previous.attributes
-            is_moving = bool(obj.attributes.get("is_moving", False))
-            merged = PerceivedObject(
-                object_id=memory_id,
-                name=obj.name,
-                category=obj.category,
-                bbox=obj.bbox,
-                mask=obj.mask,
-                position=obj.position,
-                room_id=obj.room_id,
-                confidence=obj.confidence,
-                attributes={
-                    **obj.attributes,
-                    "first_seen_frame": previous_attributes.get("first_seen_frame", result.frame_index),
-                    "last_seen_frame": result.frame_index,
-                    "seen_count": previous_attributes.get("seen_count", 0) + 1,
-                    "currently_visible": True,
-                    "missing_count": 0,
-                    "is_moved": bool(previous_attributes.get("is_moved", False) or is_moving),
-                },
-            )
-            self.memory[memory_id] = merged
-            visible_objects.append(merged)
+        if self.pending_debug is None:
+            raise RuntimeError("SAMJAM update_memory requires a preceding detect call")
+        self._write_samjam_outputs(result)
+        self.last_result = result
+        return result
 
-        pruned_ids = self._mark_stale_and_prune_memory(result.frame_index, matched_memory_ids)
-        memory_objects = list(self.memory.values())
-        mapped_relations = []
-        for relation in result.relations:
-            source_id = id_map.get(relation.source_id)
-            target_id = id_map.get(relation.target_id)
-            if source_id is None or target_id is None or source_id == target_id:
+    def _reset_native_state(self) -> None:
+        if self._native_video_tmp is not None:
+            self._native_video_tmp.cleanup()
+        self._native_video_tmp = None
+        self._native_video_dir = None
+        self.samjam_total_objs: Dict[int, Any] = {}
+        self.samjam_cur_objs: Dict[int, Any] = {}
+        self.samjam_rels: Dict[str, str] = {}
+        self.samjam_next_id = 0
+        self.samjam_frame_indices: List[int] = []
+
+    def _update_native_samjam(
+        self,
+        frame: FrameObservation,
+        vlm_scene_graph: Dict[str, Any],
+        candidates: List[MaskCandidate],
+    ) -> Dict[str, Any]:
+        local_frame_idx = len(self.samjam_frame_indices) - 1
+        if local_frame_idx == 0:
+            initial_objs = self._samjam_objects_from_candidates(candidates, local_frame_idx)
+            matched_objs, rels, summary = self._match_samjam_objects(
+                vlm_scene_graph,
+                initial_objs,
+                local_frame_idx,
+                frame.rgb.shape,
+            )
+            self.samjam_total_objs = dict(matched_objs)
+            self.samjam_cur_objs = dict(matched_objs)
+            self.samjam_rels = dict(rels)
+            return summary
+
+        propagated_objs, propagated_region = self._propagate_native_masks(
+            previous_local_frame_idx=local_frame_idx - 1,
+            current_local_frame_idx=local_frame_idx,
+            image_shape=frame.rgb.shape,
+        )
+        sampled_objs = self._samjam_objects_from_candidates(
+            candidates,
+            local_frame_idx,
+            exclude_region=propagated_region,
+        )
+        next_objs = {**propagated_objs, **sampled_objs}
+        matched_objs, next_rels, summary = self._match_samjam_objects(
+            vlm_scene_graph,
+            next_objs,
+            local_frame_idx,
+            frame.rgb.shape,
+        )
+
+        next_cur_objs = {}
+        for native_id, matched_obj in matched_objs.items():
+            if native_id not in self.samjam_total_objs:
+                self.samjam_total_objs[native_id] = matched_obj
+            else:
+                total_obj = self.samjam_total_objs[native_id]
+                total_obj.name = matched_obj.name
+                total_obj.is_hand = getattr(matched_obj, "is_hand", False)
+                if (
+                    getattr(total_obj, "is_moving", False)
+                    or getattr(matched_obj, "is_moving", False)
+                ):
+                    self._remove_native_relations(native_id)
+                    total_obj.is_moving = getattr(matched_obj, "is_moving", False)
+                    if getattr(matched_obj, "is_moving", False):
+                        total_obj.is_moved = True
+                if local_frame_idx in matched_obj.frames:
+                    total_obj.frames[local_frame_idx] = matched_obj.frames[local_frame_idx]
+            next_cur_objs[native_id] = self.samjam_total_objs[native_id]
+
+        self.samjam_cur_objs = next_cur_objs
+        self.samjam_rels.update(next_rels)
+        return summary
+
+    def _samjam_objects_from_candidates(
+        self,
+        candidates: List[MaskCandidate],
+        local_frame_idx: int,
+        exclude_region: Optional[np.ndarray] = None,
+    ) -> Dict[int, Any]:
+        objects = {}
+        for candidate in candidates:
+            mask = np.asarray(candidate.mask, dtype=bool)
+            if exclude_region is not None and mask.any():
+                overlap_ratio = float(np.logical_and(mask, exclude_region).sum()) / float(mask.sum())
+                if overlap_ratio >= 0.5:
+                    continue
+            obj = self._new_samjam_object()
+            obj.add_frame_seg(local_frame_idx, mask, [float(value) for value in candidate.bbox])
+            native_id = self.samjam_next_id
+            objects[native_id] = obj
+            self.samjam_next_id += 1
+        return objects
+
+    def _propagate_native_masks(
+        self,
+        previous_local_frame_idx: int,
+        current_local_frame_idx: int,
+        image_shape: Tuple[int, ...],
+    ) -> Tuple[Dict[int, Any], np.ndarray]:
+        height, width = int(image_shape[0]), int(image_shape[1])
+        propagated_region = np.zeros((height, width), dtype=bool)
+        if not self.samjam_cur_objs:
+            return {}, propagated_region
+
+        predictor = self._ensure_video_predictor()
+        inference_state = predictor.init_state(video_path=str(self._native_video_dir))
+        try:
+            for native_id, obj in self.samjam_cur_objs.items():
+                if previous_local_frame_idx not in obj.frames:
+                    continue
+                predictor.add_new_mask(
+                    inference_state=inference_state,
+                    frame_idx=previous_local_frame_idx,
+                    obj_id=native_id,
+                    mask=np.asarray(obj.frames[previous_local_frame_idx]["seg"], dtype=bool),
+                )
+
+            next_objs = {}
+            for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(
+                inference_state,
+                start_frame_idx=current_local_frame_idx,
+                max_frame_num_to_track=0,
+            ):
+                if out_frame_idx != current_local_frame_idx:
+                    continue
+                for index, out_obj_id in enumerate(out_obj_ids):
+                    out_mask = (
+                        out_mask_logits[index] > 0.0
+                    ).cpu().numpy().reshape((height, width))
+                    if not out_mask.any():
+                        continue
+                    bbox = bbox_from_mask(out_mask)
+                    if bbox is None or out_obj_id not in self.samjam_total_objs:
+                        continue
+                    propagated_region |= out_mask
+                    self.samjam_total_objs[out_obj_id].add_frame_seg(
+                        out_frame_idx,
+                        out_mask,
+                        bbox,
+                    )
+                    obj = self._new_samjam_object()
+                    total_obj = self.samjam_total_objs[out_obj_id]
+                    obj.name = total_obj.name
+                    obj.is_hand = total_obj.is_hand
+                    obj.is_moving = getattr(total_obj, "is_moving", False)
+                    obj.is_moved = getattr(total_obj, "is_moved", False)
+                    obj.add_frame_seg(out_frame_idx, out_mask, bbox)
+                    next_objs[out_obj_id] = obj
+                break
+            return next_objs, propagated_region
+        finally:
+            try:
+                predictor.reset_state(inference_state)
+            except Exception:
+                pass
+
+    def _match_samjam_objects(
+        self,
+        vlm_scene_graph: Dict[str, Any],
+        samjam_objs: Dict[int, Any],
+        local_frame_idx: int,
+        image_shape: Tuple[int, ...],
+    ) -> Tuple[Dict[int, Any], Dict[str, str], Dict[str, Any]]:
+        id_map = {}
+        matched_objs = {}
+        unmatched_vlm_ids = []
+        rejected_vlm_objects = []
+        match_threshold = _env_float("ISBENCH_SAMJAM_NATIVE_MATCH_IOU", 0.1)
+
+        for vlm_index, vlm_obj in enumerate(vlm_scene_graph.get("objects", [])):
+            vlm_bbox = _vlm_bbox_to_xyxy(vlm_obj.get("bbox"), image_shape)
+            vlm_id = vlm_obj.get("id", vlm_index)
+            if vlm_bbox is None:
+                unmatched_vlm_ids.append(vlm_id)
+                rejected_vlm_objects.append(
+                    {"id": vlm_id, "name": vlm_obj.get("name"), "reason": "invalid_bbox"}
+                )
                 continue
-            mapped_relations.append(
+
+            best_iou = 0.0
+            best_obj_id = None
+            best_sam_obj = None
+            for native_id, sam_obj in samjam_objs.items():
+                frame_data = sam_obj.frames.get(local_frame_idx)
+                if frame_data is None:
+                    continue
+                iou = _bbox_iou(vlm_bbox, frame_data.get("bbox"))
+                if iou >= best_iou:
+                    best_iou = iou
+                    best_obj_id = native_id
+                    best_sam_obj = sam_obj
+            if best_sam_obj is None or best_iou < match_threshold:
+                unmatched_vlm_ids.append(vlm_id)
+                rejected_vlm_objects.append(
+                    {
+                        "id": vlm_id,
+                        "name": vlm_obj.get("name"),
+                        "reason": "low_iou",
+                        "best_iou": float(best_iou),
+                    }
+                )
+                continue
+
+            try:
+                vlm_id_int = int(vlm_id)
+            except (TypeError, ValueError):
+                vlm_id_int = vlm_index
+            raw_name = str(vlm_obj.get("name") or f"object_{vlm_id_int}")
+            raw_is_hand = bool(vlm_obj.get("is_hand", False))
+            best_sam_obj.name = _canonical_object_name(raw_name, raw_is_hand)
+            best_sam_obj.is_hand = bool(
+                raw_is_hand and _env_bool("ISBENCH_SAMJAM_ALLOW_HUMAN_HANDS", False)
+            )
+            best_sam_obj.is_moving = bool(vlm_obj.get("is_moving", False))
+            if best_sam_obj.is_moving:
+                best_sam_obj.is_moved = True
+            id_map[vlm_id_int] = best_obj_id
+            matched_objs[best_obj_id] = best_sam_obj
+
+        rels = {}
+        for rel in vlm_scene_graph.get("relationships", []):
+            source_id = id_map.get(rel.get("subj_id"))
+            target_id = id_map.get(rel.get("obj_id"))
+            predicate = str(rel.get("predicate") or "").strip()
+            if source_id is None or target_id is None or not predicate:
+                continue
+            rels[f"{source_id},{target_id}"] = predicate
+
+        return (
+            matched_objs,
+            rels,
+            {
+                "matched_object_count": len(matched_objs),
+                "unmatched_vlm_object_count": len(unmatched_vlm_ids),
+                "unmatched_mask_count": max(0, len(samjam_objs) - len(matched_objs)),
+                "unmatched_vlm_ids": unmatched_vlm_ids,
+                "rejected_vlm_objects": rejected_vlm_objects,
+            },
+        )
+
+    def _remove_native_relations(self, native_id: int) -> None:
+        for key in list(self.samjam_rels):
+            source_id, target_id = key.split(",", 1)
+            if int(source_id) == int(native_id) or int(target_id) == int(native_id):
+                self.samjam_rels.pop(key, None)
+
+    def _native_objects_and_relations(
+        self,
+        frame: FrameObservation,
+    ) -> Tuple[List[PerceivedObject], List[PerceivedRelation]]:
+        local_frame_idx = len(self.samjam_frame_indices) - 1
+        objects = [
+            self._perceived_from_samjam_object(native_id, obj, local_frame_idx)
+            for native_id, obj in sorted(self.samjam_total_objs.items())
+        ]
+        relations = []
+        object_ids = {obj.object_id for obj in objects}
+        for key, predicate in sorted(self.samjam_rels.items()):
+            try:
+                source_native, target_native = [int(value) for value in key.split(",", 1)]
+            except ValueError:
+                continue
+            source_id = f"samjam_object:{source_native}"
+            target_id = f"samjam_object:{target_native}"
+            if source_id not in object_ids or target_id not in object_ids:
+                continue
+            relations.append(
                 PerceivedRelation(
                     source_id=source_id,
                     target_id=target_id,
-                    relation=relation.relation,
-                    confidence=relation.confidence,
-                    source=relation.source,
+                    relation=str(predicate),
+                    confidence=1.0,
+                    source=f"{self.name}:native_vlm",
                 )
             )
-        self.memory_relations = mapped_relations
-        result.relations = list(self.memory_relations)
-        result.objects = list(visible_objects)
-        result.metadata["current_frame_object_count"] = len(visible_objects)
-        result.metadata["memory_object_count"] = len(memory_objects)
-        result.metadata["visible_memory_object_count"] = len(visible_objects)
-        result.metadata["visible_only_scene_graph"] = True
-        result.metadata["memory_objects"] = [self._compact_object(obj) for obj in memory_objects]
-        result.metadata["pruned_object_ids"] = pruned_ids
-        result.metadata["memory_relation_count"] = len(result.relations)
-        result.scene_graph["nodes"] = [
-            {
-                "id": obj.object_id,
-                "name": obj.name,
-                "position": obj.position,
-                "category": obj.category,
-                "bbox": obj.bbox,
-                "visible": bool(obj.attributes.get("currently_visible", True)),
-            }
-            for obj in result.objects
-        ]
-        result.scene_graph["edges"] = [
-            {"source": rel.source_id, "target": rel.target_id, "type": rel.relation}
-            for rel in result.relations
-        ]
-        result.room_graph = self._room_graph(result.objects)
-        result.group_graph = self._group_graph(result.objects, result.relations)
-        self._write_samjam_outputs(result)
-        return result
+        return objects, relations
+
+    def _perceived_from_samjam_object(
+        self,
+        native_id: int,
+        obj: Any,
+        local_frame_idx: int,
+    ) -> PerceivedObject:
+        frame_data = obj.frames.get(local_frame_idx)
+        visible = frame_data is not None
+        if frame_data is None and obj.frames:
+            latest_frame_idx = max(obj.frames)
+            frame_data = obj.frames[latest_frame_idx]
+        else:
+            latest_frame_idx = local_frame_idx
+        mask = None if frame_data is None else np.asarray(frame_data.get("seg"), dtype=bool)
+        bbox = None if frame_data is None else [float(value) for value in frame_data.get("bbox")]
+        mask_area = 0 if mask is None else int(mask.sum())
+        name = str(getattr(obj, "name", "") or f"object_{native_id}")
+        return PerceivedObject(
+            object_id=f"samjam_object:{native_id}",
+            name=name,
+            category=_category_from_name(name),
+            bbox=bbox,
+            mask=mask if visible else None,
+            position=None,
+            room_id="unknown_room",
+            confidence=1.0,
+            attributes={
+                "source": "samjam_native",
+                "samjam_id": native_id,
+                "currently_visible": visible,
+                "latest_local_frame_index": latest_frame_idx,
+                "external_frame_index": self.samjam_frame_indices[local_frame_idx],
+                "is_hand": bool(getattr(obj, "is_hand", False)),
+                "is_moving": bool(getattr(obj, "is_moving", False)),
+                "is_moved": bool(getattr(obj, "is_moved", False)),
+                "mask_area": mask_area,
+                "tracking": "sam2_video_predictor",
+            },
+        )
+
+    def _new_samjam_object(self):
+        if self.samjam_object_type is None:
+            vendor_root = repo_root() / "og_ego_prim" / "scene_graph" / "vendor" / "samjam"
+            insert_sys_path([vendor_root])
+            from Object import Object
+
+            self.samjam_object_type = Object
+        return self.samjam_object_type()
+
+    def _store_native_frame(self, frame: FrameObservation) -> None:
+        if self._native_video_dir is None:
+            if self.output_writer is not None:
+                self._native_video_dir = self.output_writer.output_dir / "native_video_frames"
+            else:
+                self._native_video_tmp = tempfile.TemporaryDirectory(prefix="isbench_samjam_")
+                self._native_video_dir = Path(self._native_video_tmp.name)
+            self._native_video_dir.mkdir(parents=True, exist_ok=True)
+        local_frame_idx = len(self.samjam_frame_indices)
+        self.samjam_frame_indices.append(frame.frame_index)
+        image = np.asarray(frame.rgb)[:, :, :3]
+        if image.dtype != np.uint8:
+            if image.max(initial=0) <= 1.0:
+                image = image * 255.0
+            image = np.clip(image, 0, 255).astype(np.uint8)
+        image_path = self._native_video_dir / f"{local_frame_idx:06d}.jpg"
+        import cv2
+
+        ok = cv2.imwrite(str(image_path), np.ascontiguousarray(image[:, :, ::-1]))
+        if not ok:
+            raise RuntimeError(f"cv2.imwrite returned False for {image_path}")
+
+    def _ensure_video_predictor(self):
+        if self.video_predictor is not None:
+            return self.video_predictor
+
+        vendor_root = repo_root() / "og_ego_prim" / "scene_graph" / "vendor" / "samjam"
+        insert_sys_path([vendor_root])
+        checkpoint = model_root() / "samjam" / "sam2.1_hiera_large.pt"
+        config = "configs/sam2.1/sam2.1_hiera_l.yaml"
+        ensure_path_exists(checkpoint, "SAM2 checkpoint")
+
+        try:
+            import torch
+            import iopath.common.file_io  # noqa: F401
+            from sam2.build_sam import build_sam2_video_predictor
+        except ImportError as exc:
+            raise ImportError(
+                "SAMJAM video tracking requires vendored sam2 plus hydra-core / "
+                "omegaconf / torch / iopath."
+            ) from exc
+
+        device = os.environ.get(
+            "ISBENCH_SCENE_GRAPH_DEVICE",
+            "cuda" if torch.cuda.is_available() else "cpu",
+        )
+        self.video_predictor = build_sam2_video_predictor(
+            config,
+            str(checkpoint),
+            device=device,
+        )
+        return self.video_predictor
 
     def _ensure_vlm_adapter(self) -> SAMJAMVLMAdapter:
         if self.vlm_adapter is None:
@@ -787,16 +1111,14 @@ class SAMJAMSAM2Backend:
                 bbox_xyxy = bbox_from_mask(mask)
             if bbox_xyxy is None:
                 continue
-            position = mask_center_world(mask, frame.depth, frame.intrinsics, frame.camera_pose)
-            room_id = self.room_lookup(position) if self.room_lookup is not None else "unknown_room"
             confidence = float(mask_info.get("predicted_iou", mask_info.get("stability_score", 1.0)) or 1.0)
             candidates.append(
                 MaskCandidate(
                     index=index,
                     mask=mask,
                     bbox=bbox_xyxy,
-                    position=position,
-                    room_id=room_id,
+                    position=None,
+                    room_id="unknown_room",
                     confidence=confidence,
                     attributes={
                         "source": self.name,
@@ -967,64 +1289,6 @@ class SAMJAMSAM2Backend:
             "rejected_vlm_objects": rejected_vlm_objects,
         }
         return objects, relations, match_summary, candidates
-
-    def _match_memory_object(self, obj: PerceivedObject) -> Optional[str]:
-        best_id = None
-        best_score = -1.0
-        iou_threshold = _env_float("ISBENCH_SAMJAM_MEMORY_IOU", 0.35)
-        distance_threshold = _env_float("ISBENCH_SAMJAM_MEMORY_DISTANCE", 0.75)
-        obj_name = _normalize_name(obj.name)
-        for memory_id, memory_obj in self.memory.items():
-            memory_name = _normalize_name(memory_obj.name)
-            iou = _bbox_iou(obj.bbox, memory_obj.bbox)
-            distance = _position_distance(obj.position, memory_obj.position)
-            name_match = bool(obj_name and memory_name and obj_name == memory_name)
-            position_close = distance is not None and distance <= distance_threshold
-            bbox_close = iou >= iou_threshold
-            if not ((name_match and (bbox_close or position_close)) or (bbox_close and position_close)):
-                continue
-            distance_score = 0.0 if distance is None else max(0.0, 1.0 - distance / distance_threshold)
-            score = iou + distance_score + (1.0 if name_match else 0.0)
-            if score > best_score:
-                best_score = score
-                best_id = memory_id
-        return best_id
-
-    def _mark_stale_and_prune_memory(self, frame_index: int, matched_memory_ids: set) -> List[str]:
-        pruned_ids = []
-        ttl = _env_int("ISBENCH_SAMJAM_MEMORY_TTL", 30)
-        for memory_id, memory_obj in list(self.memory.items()):
-            if memory_id in matched_memory_ids:
-                continue
-            attributes = dict(memory_obj.attributes)
-            missing_count = int(attributes.get("missing_count", 0)) + 1
-            attributes["missing_count"] = missing_count
-            attributes["currently_visible"] = False
-            attributes.setdefault("last_seen_frame", frame_index - missing_count)
-            stable_seen_count = _env_int("ISBENCH_SAMJAM_STABLE_SEEN_COUNT", 2)
-            seen_count = int(attributes.get("seen_count", 0))
-            if (bool(attributes.get("transient", False)) or seen_count < stable_seen_count) and missing_count > ttl:
-                pruned_ids.append(memory_id)
-                del self.memory[memory_id]
-                continue
-            self.memory[memory_id] = PerceivedObject(
-                object_id=memory_obj.object_id,
-                name=memory_obj.name,
-                category=memory_obj.category,
-                bbox=memory_obj.bbox,
-                mask=None,
-                position=memory_obj.position,
-                room_id=memory_obj.room_id,
-                confidence=memory_obj.confidence,
-                attributes=attributes,
-            )
-        if pruned_ids:
-            self.memory_relations = [
-                rel
-                for rel in self.memory_relations
-                if rel.source_id not in pruned_ids and rel.target_id not in pruned_ids
-            ]
-        return pruned_ids
 
     def _write_samjam_outputs(self, result: PerceptionResult) -> None:
         if self.output_writer is None or self.pending_debug is None:

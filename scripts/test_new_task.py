@@ -17,6 +17,34 @@ from og_ego_prim.primitives.specs import get_valid_primitives
 from og_ego_prim.utils.task_registry import get_task_config_path
 
 
+class TeeTextStream:
+    def __init__(self, terminal_stream, log_stream):
+        self.terminal_stream = terminal_stream
+        self.log_stream = log_stream
+
+    def write(self, text):
+        self.terminal_stream.write(text)
+        self.log_stream.write(text)
+        self.flush()
+        return len(text)
+
+    def flush(self):
+        self.terminal_stream.flush()
+        self.log_stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.terminal_stream, name)
+
+
+def install_run_log(output_dir):
+    log_path = output_dir / "run.log"
+    log_stream = log_path.open("a", encoding="utf-8", buffering=1)
+    sys.stdout = TeeTextStream(sys.stdout, log_stream)
+    sys.stderr = TeeTextStream(sys.stderr, log_stream)
+    print(f"run log: {log_path.resolve()}")
+    return log_stream
+
+
 if hasattr(argparse, "BooleanOptionalAction"):
     BooleanOptionalAction = argparse.BooleanOptionalAction
 else:
@@ -77,6 +105,408 @@ def parse_output_size(value):
     return width, height
 
 
+PARTICLE_LIKE_CATEGORY_KEYWORDS = (
+    "water",
+    "soap",
+    "stain",
+    "dust",
+    "dirt",
+    "oil",
+    "disinfectant",
+    "detergent",
+    "bunchgrass",
+)
+
+SYMBOLIC_SMOKE_DIRECT_PRIMITIVES = {
+    "OPEN",
+    "CLOSE",
+    "TOGGLE_ON",
+    "TOGGLE_OFF",
+}
+SYMBOLIC_SMOKE_PLACEMENT_PRIMITIVES = {
+    "PLACE_ON_TOP",
+    "PLACE_INSIDE",
+}
+SYMBOLIC_SMOKE_TOOL_PRIMITIVES = {
+    "SOAK_UNDER": (0, 1),
+    "WIPE": (1, 0),
+    "CUT": (1, 0),
+}
+SYMBOLIC_SMOKE_UNSUPPORTED_PRIMITIVES = {
+    "FILL_WITH",
+    "POUR_INTO",
+    "SPREAD",
+    "SOAK_INSIDE",
+    "WAIT",
+    "WAIT_FOR_COOKED",
+    "WAIT_FOR_FROZEN",
+    "WAIT_FOR_WASHED",
+}
+SYMBOLIC_SMOKE_UNSUPPORTED_REASONS = {
+    "SOAK_INSIDE": (
+        "native OmniGibson symbolic SOAK_INSIDE is incompatible with this "
+        "installed FluidSystem API"
+    ),
+}
+SYMBOLIC_SMOKE_ACTION_PATTERN = re.compile(r"^\s*([A-Za-z_]+)\s*\((.*)\)\s*$")
+
+NEW_TASK_INROOM_OBJECT_OVERRIDES = {
+    "lifelong__morning_kitchen_routine": {
+        # This is the countertop used by the validated Wainscott pour-tea cache.
+        "countertop.n.01_1": "countertop_tpuwys_5",
+    },
+}
+
+
+def cli_option_present(*option_names):
+    for arg in sys.argv[1:]:
+        for option_name in option_names:
+            if arg == option_name or arg.startswith(f"{option_name}="):
+                return True
+    return False
+
+
+def parse_bddl_object_categories(bddl_path):
+    object_categories = {}
+    in_objects = False
+    for raw_line in bddl_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(";"):
+            continue
+        if line.startswith("(:objects"):
+            in_objects = True
+            continue
+        if not in_objects:
+            continue
+        if line.startswith(")"):
+            break
+        if " - " not in line:
+            continue
+        names_text, category = line.split(" - ", 1)
+        category = category.strip()
+        for object_name in names_text.split():
+            object_categories[object_name.strip()] = category
+    return object_categories
+
+
+def get_task_resource_profile(config, bddl_path):
+    object_categories = parse_bddl_object_categories(bddl_path)
+    bddl_text = bddl_path.read_text(encoding="utf-8")
+    substance_objects = set(
+        match.group(2)
+        for match in re.finditer(
+            r"\((covered|filled|insource|saturated)\s+[^\s()]+\s+([^\s()]+)",
+            bddl_text,
+        )
+    )
+    particle_like_objects = sorted(
+        object_name
+        for object_name, category in object_categories.items()
+        if object_name in substance_objects
+        if any(keyword in category for keyword in PARTICLE_LIKE_CATEGORY_KEYWORDS)
+    )
+    particle_state_predicates = sorted(
+        set(re.findall(r"\((covered|filled|insource|saturated)\s+", bddl_text))
+    )
+    return {
+        "online_object_sampling": config["scene_info"].get("online_object_sampling"),
+        "particle_like_objects": particle_like_objects,
+        "particle_state_predicates": particle_state_predicates,
+    }
+
+
+def format_task_resource_profile(profile):
+    particles = profile["particle_like_objects"]
+    predicates = profile["particle_state_predicates"]
+    particle_text = ",".join(particles) if particles else "none"
+    predicate_text = ",".join(predicates) if predicates else "none"
+    return (
+        "task_resource_profile: "
+        f"online_object_sampling={profile['online_object_sampling']} "
+        f"particle_like_objects={particle_text} "
+        f"particle_state_predicates={predicate_text}"
+    )
+
+
+def parse_plan_action(action):
+    action = action.strip()
+    if action.upper() == "DONE":
+        return "DONE", []
+
+    match = SYMBOLIC_SMOKE_ACTION_PATTERN.fullmatch(action)
+    if match is None:
+        raise ValueError(f"invalid action syntax: {action!r}")
+    operator, raw_params = match.groups()
+    params = [] if not raw_params.strip() else [part.strip() for part in raw_params.split(",")]
+    return operator.upper(), params
+
+
+def build_symbolic_smoke_plan(plans):
+    """Convert ego syntax to the installed OmniGibson symbolic contract."""
+    converted = []
+    skipped = []
+    inserted = []
+    held_object = None
+    tools_with_skipped_soak = set()
+
+    def append_action(action, caution=None):
+        converted.append({"action": action.lower(), "caution": caution})
+
+    def release_if_holding(reason):
+        nonlocal held_object
+        if held_object is None:
+            return
+        append_action("release()")
+        inserted.append(
+            {
+                "action": "RELEASE()",
+                "reason": reason,
+                "object": held_object,
+            }
+        )
+        held_object = None
+
+    def grasp_if_needed(object_name, reason):
+        nonlocal held_object
+        if held_object == object_name:
+            return
+        release_if_holding(f"switching held object before {reason}")
+        append_action(f"grasp({object_name})")
+        inserted.append(
+            {
+                "action": f"GRASP({object_name})",
+                "reason": reason,
+            }
+        )
+        held_object = object_name
+
+    for index, plan in enumerate(plans, start=1):
+        action = plan["action"]
+        caution = plan.get("caution")
+        operator, params = parse_plan_action(action)
+
+        if operator == "DONE":
+            append_action("done()", caution)
+            continue
+
+        if operator == "NAVIGATE_TO":
+            skipped.append(
+                {
+                    "index": index,
+                    "action": action,
+                    "reason": "navigation disabled for symbolic smoke",
+                }
+            )
+            continue
+
+        if operator in SYMBOLIC_SMOKE_UNSUPPORTED_PRIMITIVES:
+            if operator == "SOAK_INSIDE" and params:
+                tools_with_skipped_soak.add(params[0])
+            skipped.append(
+                {
+                    "index": index,
+                    "action": action,
+                    "reason": SYMBOLIC_SMOKE_UNSUPPORTED_REASONS.get(
+                        operator,
+                        "primitive is unavailable in OmniGibson symbolic mode",
+                    ),
+                }
+            )
+            continue
+
+        if operator in SYMBOLIC_SMOKE_PLACEMENT_PRIMITIVES:
+            if len(params) != 2:
+                raise ValueError(f"{operator} expects source and target: {action!r}")
+            source, target = params
+            grasp_if_needed(source, f"preparing {operator}")
+            append_action(f"{operator}({target})", caution)
+            held_object = None
+            continue
+
+        if operator in SYMBOLIC_SMOKE_TOOL_PRIMITIVES:
+            if len(params) != 2:
+                raise ValueError(f"{operator} expects tool and target objects: {action!r}")
+            tool_index, target_index = SYMBOLIC_SMOKE_TOOL_PRIMITIVES[operator]
+            tool = params[tool_index]
+            target = params[target_index]
+            if operator == "WIPE" and tool in tools_with_skipped_soak:
+                skipped.append(
+                    {
+                        "index": index,
+                        "action": action,
+                        "reason": (
+                            "dependent WIPE skipped because the required "
+                            f"SOAK_INSIDE setup for {tool} was skipped"
+                        ),
+                    }
+                )
+                continue
+            grasp_if_needed(tool, f"preparing {operator}")
+            append_action(f"{operator}({target})", caution)
+            continue
+
+        if operator == "GRASP":
+            if len(params) != 1:
+                raise ValueError(f"GRASP expects one object: {action!r}")
+            grasp_if_needed(params[0], "preserving explicit GRASP")
+            continue
+
+        if operator == "RELEASE":
+            release_if_holding("preserving explicit RELEASE")
+            continue
+
+        if operator in SYMBOLIC_SMOKE_DIRECT_PRIMITIVES:
+            if len(params) != 1:
+                raise ValueError(f"{operator} expects one object: {action!r}")
+            release_if_holding(f"{operator} requires an empty hand")
+            append_action(f"{operator}({params[0]})", caution)
+            continue
+
+        skipped.append(
+            {
+                "index": index,
+                "action": action,
+                "reason": "no safe symbolic smoke conversion is defined",
+            }
+        )
+
+    return converted, skipped, inserted
+
+
+def validate_symbolic_smoke_plan(plans):
+    valid_primitives = get_valid_primitives("symbolic")
+    for index, plan in enumerate(plans, start=1):
+        operator, params = parse_plan_action(plan["action"])
+        if operator == "DONE":
+            continue
+        if operator == "NAVIGATE_TO":
+            raise ValueError("symbolic smoke plan must not contain NAVIGATE_TO")
+        if operator not in valid_primitives:
+            raise ValueError(
+                f"symbolic smoke action #{index} uses unsupported primitive {operator}"
+            )
+        expected = valid_primitives[operator]
+        if len(params) != expected:
+            raise ValueError(
+                f"symbolic smoke action #{index} {operator} expects {expected} params, "
+                f"got {len(params)}"
+            )
+
+
+def print_symbolic_smoke_summary(original_count, converted, skipped, inserted):
+    print(
+        "symbolic_smoke_plan: "
+        f"original_actions={original_count} "
+        f"executable_actions={len(converted)} "
+        f"inserted_actions={len(inserted)} "
+        f"skipped_actions={len(skipped)} navigation_actions=0"
+    )
+    for item in skipped:
+        print(
+            "symbolic_smoke_skip: "
+            f"source_step={item['index']} action={item['action']!r} "
+            f"reason={item['reason']}"
+        )
+
+
+def get_available_ram_gb():
+    meminfo_path = Path("/proc/meminfo")
+    if not meminfo_path.is_file():
+        return None
+    for line in meminfo_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if line.startswith("MemAvailable:"):
+            parts = line.split()
+            if len(parts) >= 2:
+                return int(parts[1]) / (1024 * 1024)
+    return None
+
+
+def get_gpu_memory_rows():
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,memory.free,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+    except FileNotFoundError:
+        return None, "nvidia-smi not found"
+    except subprocess.TimeoutExpired:
+        return None, "nvidia-smi timed out"
+    if result.returncode != 0:
+        error = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+        return None, error
+
+    rows = []
+    for line in result.stdout.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 3:
+            continue
+        try:
+            rows.append(
+                {
+                    "index": int(parts[0]),
+                    "free_mb": int(parts[1]),
+                    "total_mb": int(parts[2]),
+                }
+            )
+        except ValueError:
+            continue
+    if not rows:
+        return None, "no parseable nvidia-smi rows"
+    return rows, None
+
+
+def run_resource_guard(args):
+    if args.skip_resource_check:
+        print("resource_guard: skipped by --skip-resource-check")
+        return
+
+    available_ram_gb = get_available_ram_gb()
+    if available_ram_gb is None:
+        print("resource_guard: RAM availability check unavailable")
+    else:
+        print(
+            "resource_guard: available_ram={:.1f}GB min_required={:.1f}GB".format(
+                available_ram_gb, args.min_free_ram_gb
+            )
+        )
+        if args.min_free_ram_gb > 0 and available_ram_gb < args.min_free_ram_gb:
+            raise SystemExit(
+                "resource preflight failed: available RAM is below "
+                f"{args.min_free_ram_gb:.1f}GB; refusing to launch OmniGibson"
+            )
+
+    gpu_rows, gpu_error = get_gpu_memory_rows()
+    if gpu_rows is None:
+        print(f"resource_guard: GPU memory check unavailable ({gpu_error})")
+        if args.min_free_gpu_mb > 0:
+            raise SystemExit(
+                "resource preflight failed: GPU memory is unavailable; refusing to "
+                "launch OmniGibson. Use --min-free-gpu-mb 0 only if you explicitly "
+                "want to bypass this guard."
+            )
+        return
+
+    gpu_text = ", ".join(
+        f"gpu{row['index']}={row['free_mb']}/{row['total_mb']}MB free"
+        for row in gpu_rows
+    )
+    print(f"resource_guard: {gpu_text} min_required={args.min_free_gpu_mb}MB")
+    if args.min_free_gpu_mb > 0 and not any(
+        row["free_mb"] >= args.min_free_gpu_mb for row in gpu_rows
+    ):
+        raise SystemExit(
+            "resource preflight failed: no GPU has at least "
+            f"{args.min_free_gpu_mb}MB free; refusing to launch OmniGibson"
+        )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
@@ -118,6 +548,15 @@ def parse_args():
         choices=("auto", "ego", "starter", "symbolic"),
         default="auto",
         help="Primitive set used by both the benchmark and PlanningAgent.",
+    )
+    parser.add_argument(
+        "--symbolic-smoke",
+        action="store_true",
+        help=(
+            "Run the fixed example plan with the installed OmniGibson symbolic "
+            "primitive contract while skipping navigation. Legacy two-object "
+            "actions are converted to GRASP plus a one-object symbolic action."
+        ),
     )
     parser.add_argument(
         "--prompt-setting",
@@ -173,6 +612,41 @@ def parse_args():
         help="Initialize OmniGibson and the task, then exit before executing the plan.",
     )
     parser.add_argument(
+        "--low-resource",
+        action="store_true",
+        help=(
+            "Use conservative defaults for new-task smoke tests: disable scene graph "
+            "unless explicitly requested, disable video/action capture, and lower saved image size."
+        ),
+    )
+    parser.add_argument(
+        "--online-object-sampling",
+        action=BooleanOptionalAction,
+        default=None,
+        help=(
+            "Override scene_info.online_object_sampling. Leaving this unset uses "
+            "the task JSON value."
+        ),
+    )
+    parser.add_argument(
+        "--task-relevant-only",
+        action=BooleanOptionalAction,
+        default=None,
+        help=(
+            "Load only task-relevant scene objects. This is off by default because "
+            "online BDDL sampling still needs fixed scene candidates such as kitchen appliances."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-object-categories",
+        default=None,
+        help=(
+            "Comma-separated scene object categories to add to not_load_object_categories. "
+            "Defaults to table_lamp for --init-only / --low-resource to avoid a known "
+            "Wainscott table_lamp NaN transform during online sampling. Use 'none' to disable."
+        ),
+    )
+    parser.add_argument(
         "--timestamp-output",
         action=BooleanOptionalAction,
         default=True,
@@ -200,7 +674,7 @@ def parse_args():
         "--save-step-images",
         action=BooleanOptionalAction,
         default=True,
-        help="Save one robot FPV png after each high-level action.",
+        help="Save robot FPV images before and after each high-level action.",
     )
     parser.add_argument(
         "--save-video",
@@ -213,12 +687,51 @@ def parse_args():
         default=None,
         help="Path for the output mp4. Defaults to OUTPUT_DIR/nav_rgb.mp4.",
     )
-    parser.add_argument("--video-fps", type=float, default=30.0)
+    parser.add_argument("--video-fps", type=float, default=10.0)
     parser.add_argument(
         "--headless",
         action=BooleanOptionalAction,
         default=True,
         help="Launch OmniGibson headlessly.",
+    )
+    parser.add_argument(
+        "--disable-gpu-dynamics",
+        action="store_true",
+        help=(
+            "Set gm.USE_GPU_DYNAMICS=False before creating the OmniGibson environment. "
+            "This can reduce GPU pressure but may break particle-heavy tasks."
+        ),
+    )
+    parser.add_argument(
+        "--min-free-gpu-mb",
+        type=int,
+        default=int(os.environ.get("ISBENCH_MIN_FREE_GPU_MB", "4096")),
+        help=(
+            "Refuse to launch OmniGibson unless at least one GPU has this much free "
+            "memory. Use 0 to disable this guard."
+        ),
+    )
+    parser.add_argument(
+        "--min-free-ram-gb",
+        type=float,
+        default=float(os.environ.get("ISBENCH_MIN_FREE_RAM_GB", "8")),
+        help=(
+            "Refuse to launch OmniGibson unless system MemAvailable is at least "
+            "this many GB. Use 0 to disable this guard."
+        ),
+    )
+    parser.add_argument(
+        "--skip-resource-check",
+        action="store_true",
+        help="Skip RAM/GPU resource checks before launching OmniGibson.",
+    )
+    parser.add_argument(
+        "--resource-check-only",
+        action="store_true",
+        help=(
+            "Validate the task and run RAM/GPU resource checks, then exit before "
+            "launching OmniGibson."
+        ),
     )
     parser.add_argument(
         "--clear-on-exit",
@@ -227,7 +740,7 @@ def parse_args():
     )
     parser.add_argument(
         "--scene-graph-backend",
-        default=os.environ.get("ISBENCH_SCENE_GRAPH_BACKEND", "samjam_unigoal"),
+        default=os.environ.get("ISBENCH_SCENE_GRAPH_BACKEND", "omnigibson_truth"),
         choices=[
             "omnigibson_truth",
             "truth",
@@ -306,15 +819,58 @@ def parse_args():
     )
     parser.add_argument(
         "--show-robot",
-        action=BooleanOptionalAction,
-        default=False,
-        help="Show robot in viewer-style captures.",
+        action="store_true",
+        help="Keep robot visible in viewer-style captures.",
     )
     args = parser.parse_args()
+    if args.symbolic_smoke:
+        if args.model:
+            parser.error("--symbolic-smoke only supports the fixed example plan; omit --model")
+        if args.primitive_type not in {"auto", "symbolic"}:
+            parser.error(
+                "--symbolic-smoke cannot be combined with "
+                f"--primitive-type {args.primitive_type}"
+            )
+        args.primitive_type = "symbolic"
+        args.low_resource = True
+        if not cli_option_present("--stop-on-error", "--no-stop-on-error"):
+            args.stop_on_error = True
+    scene_graph_explicit = cli_option_present("--scene-graph-backend")
+    if args.init_only and not scene_graph_explicit:
+        args.scene_graph_backend = "disabled"
+    if args.low_resource:
+        if not scene_graph_explicit:
+            args.scene_graph_backend = "disabled"
+        if not cli_option_present("--save-video", "--no-save-video"):
+            args.save_video = args.symbolic_smoke
+        if not cli_option_present("--capture-during-actions", "--no-capture-during-actions"):
+            args.capture_during_actions = args.symbolic_smoke
+        if not cli_option_present("--save-step-images", "--no-save-step-images"):
+            args.save_step_images = args.symbolic_smoke
+        if not cli_option_present("--output-size"):
+            args.output_size = parse_output_size("256x256")
+    if args.task_relevant_only is None:
+        args.task_relevant_only = False
+    if args.exclude_object_categories is None:
+        args.exclude_object_categories = (
+            "table_lamp" if args.init_only or args.low_resource else ""
+        )
+    if args.exclude_object_categories.strip().lower() in {"", "none"}:
+        args.exclude_object_categories = []
+    else:
+        args.exclude_object_categories = [
+            category.strip()
+            for category in args.exclude_object_categories.split(",")
+            if category.strip()
+        ]
     if args.local_llm_serve and not args.model:
         parser.error("--local-llm-serve requires --model")
     if args.plan_max_steps is not None and args.plan_max_steps <= 0:
         parser.error("--plan-max-steps must be greater than zero")
+    if args.min_free_gpu_mb < 0:
+        parser.error("--min-free-gpu-mb must be zero or greater")
+    if args.min_free_ram_gb < 0:
+        parser.error("--min-free-ram-gb must be zero or greater")
     return args
 
 
@@ -332,7 +888,7 @@ def validate_and_normalize_task(args):
 
     task_info = config["task_info"]
     task_name = task_info["task_name"]
-    primitive_type = task_info.get("primitive_type", "starter") # { ego, starter, symbolic }
+    primitive_type = task_info.get("primitive_type", "ego")
     valid_primitives = get_valid_primitives(primitive_type)
 
     scene_info = config["scene_info"]
@@ -443,22 +999,84 @@ def validate_and_normalize_task(args):
     if args.output_dir is None:
         args.output_dir = f"outputs/test_{task_name}_full"
 
-    return task_config_path, bddl_path, primitive_type, len(bddl_objects)
+    return (
+        task_config_path,
+        bddl_path,
+        primitive_type,
+        len(bddl_objects),
+        get_task_resource_profile(config, bddl_path),
+    )
 
 
 try:
-    TASK_CONFIG_PATH, BDDL_PATH, TASK_PRIMITIVE_TYPE, TASK_OBJECT_COUNT = validate_and_normalize_task(ARGS)
+    (
+        TASK_CONFIG_PATH,
+        BDDL_PATH,
+        TASK_PRIMITIVE_TYPE,
+        TASK_OBJECT_COUNT,
+        TASK_RESOURCE_PROFILE,
+    ) = validate_and_normalize_task(ARGS)
 except Exception as exc:
     raise SystemExit(f"task preflight failed: {exc}") from exc
 
-if ARGS.validate_only or os.environ.get("ISBENCH_OMNIGIBSON_X11_FIX") == "1":
+print(
+    f"task preflight passed: task={ARGS.task} scene={ARGS.scene} "
+    f"primitive={TASK_PRIMITIVE_TYPE} objects={TASK_OBJECT_COUNT} "
+    f"config={TASK_CONFIG_PATH} bddl={BDDL_PATH}"
+)
+print(format_task_resource_profile(TASK_RESOURCE_PROFILE))
+if ARGS.init_only and TASK_RESOURCE_PROFILE["particle_like_objects"]:
     print(
-        f"task preflight passed: task={ARGS.task} scene={ARGS.scene} "
-        f"primitive={TASK_PRIMITIVE_TYPE} objects={TASK_OBJECT_COUNT} "
-        f"config={TASK_CONFIG_PATH} bddl={BDDL_PATH}"
+        "resource_warning: this task has particle-like BDDL systems; "
+        "--init-only still launches OmniGibson and may be slow."
+    )
+if ARGS.low_resource:
+    print(
+        "low_resource: enabled "
+        f"scene_graph_backend={ARGS.scene_graph_backend} "
+        f"save_video={ARGS.save_video} "
+            f"capture_during_actions={ARGS.capture_during_actions} "
+            f"save_step_images={ARGS.save_step_images} "
+            f"output_size={ARGS.output_size} "
+            f"task_relevant_only={ARGS.task_relevant_only} "
+            f"exclude_object_categories={ARGS.exclude_object_categories}"
+        )
+else:
+    print(
+        "new_task_options: "
+        f"task_relevant_only={ARGS.task_relevant_only} "
+        f"exclude_object_categories={ARGS.exclude_object_categories}"
     )
 
+if ARGS.symbolic_smoke:
+    with TASK_CONFIG_PATH.open("r", encoding="utf-8") as f:
+        symbolic_smoke_config = json.load(f)
+    symbolic_preview_source = symbolic_smoke_config.get("example_planning", [])
+    symbolic_preview_plan, symbolic_preview_skipped, symbolic_preview_inserted = (
+        build_symbolic_smoke_plan(symbolic_preview_source)
+    )
+    validate_symbolic_smoke_plan(symbolic_preview_plan)
+    print_symbolic_smoke_summary(
+        len(symbolic_preview_source),
+        symbolic_preview_plan,
+        symbolic_preview_skipped,
+        symbolic_preview_inserted,
+    )
+    print(
+        "symbolic_smoke_notice: OmniGibson still loads the scene and settles state "
+        "changes, but physical navigation and manipulation trajectories are disabled."
+    )
+    if symbolic_preview_skipped:
+        print(
+            "symbolic_smoke_notice: final BDDL task success is not expected because "
+            "unsupported actions are intentionally skipped."
+        )
+
 if ARGS.validate_only:
+    raise SystemExit(0)
+
+if ARGS.resource_check_only:
+    run_resource_guard(ARGS)
     raise SystemExit(0)
 
 if ARGS.headless:
@@ -468,19 +1086,32 @@ if ARGS.scene_graph_backend in {"samjam_sam2", "samjam_unigoal"}:
     ARGS.scene_graph_update_every = 1
 
 os.environ["ISBENCH_SCENE_GRAPH_BACKEND"] = ARGS.scene_graph_backend
-os.environ["ISBENCH_SCENE_GRAPH_HISTORY_INTERVAL"] = str(ARGS.scene_graph_history_interval)
-
+os.environ["ISBENCH_SCENE_GRAPH_HISTORY_INTERVAL"] = str(
+    ARGS.scene_graph_history_interval
+)
 if ARGS.scene_graph_image_size is not None:
     os.environ["ISBENCH_SCENE_GRAPH_IMAGE_WIDTH"] = str(ARGS.scene_graph_image_size[0])
     os.environ["ISBENCH_SCENE_GRAPH_IMAGE_HEIGHT"] = str(ARGS.scene_graph_image_size[1])
 if ARGS.nav_stuck_waypoint_tolerance is not None:
-    os.environ["ISBENCH_NAV_STUCK_WAYPOINT_TOLERANCE"] = str(ARGS.nav_stuck_waypoint_tolerance)
+    os.environ["ISBENCH_NAV_STUCK_WAYPOINT_TOLERANCE"] = str(
+        ARGS.nav_stuck_waypoint_tolerance
+    )
 if ARGS.nav_stuck_final_waypoint_tolerance is not None:
-    os.environ["ISBENCH_NAV_STUCK_FINAL_WAYPOINT_TOLERANCE"] = str(ARGS.nav_stuck_final_waypoint_tolerance)
+    os.environ["ISBENCH_NAV_STUCK_FINAL_WAYPOINT_TOLERANCE"] = str(
+        ARGS.nav_stuck_final_waypoint_tolerance
+    )
 if ARGS.nav_goal_clearance_radius is not None:
-    os.environ["ISBENCH_NAV_GOAL_CLEARANCE_RADIUS"] = str(ARGS.nav_goal_clearance_radius)
+    os.environ["ISBENCH_NAV_GOAL_CLEARANCE_RADIUS"] = str(
+        ARGS.nav_goal_clearance_radius
+    )
 if ARGS.nav_max_floor_height_delta is not None:
-    os.environ["ISBENCH_NAV_MAX_FLOOR_HEIGHT_DELTA"] = str(ARGS.nav_max_floor_height_delta)
+    os.environ["ISBENCH_NAV_MAX_FLOOR_HEIGHT_DELTA"] = str(
+        ARGS.nav_max_floor_height_delta
+    )
+
+if os.environ.get("ISBENCH_RESOURCE_GUARD_DONE") != "1":
+    run_resource_guard(ARGS)
+    os.environ["ISBENCH_RESOURCE_GUARD_DONE"] = "1"
 
 maybe_reexec_with_omnigibson_python()
 
@@ -499,7 +1130,181 @@ from PIL import Image, ImageDraw
 from og_ego_prim.benchmark import build_benchmark
 from og_ego_prim.models import PlanningAgent
 
-gm.USE_GPU_DYNAMICS = True
+gm.USE_GPU_DYNAMICS = not ARGS.disable_gpu_dynamics
+print(f"omnigibson_runtime: USE_GPU_DYNAMICS={gm.USE_GPU_DYNAMICS}")
+
+
+def configure_native_symbolic_grasp(benchmark):
+    controller = benchmark.executor.controller
+    controller_type = type(controller)
+    if (
+        controller_type.__name__ != "SymbolicSemanticActionPrimitives"
+        or controller_type.__module__
+        != "omnigibson.action_primitives.symbolic_semantic_action_primitives"
+    ):
+        raise RuntimeError(
+            "symbolic smoke expected OmniGibson's native "
+            "SymbolicSemanticActionPrimitives, got "
+            f"{controller_type.__module__}.{controller_type.__name__}"
+        )
+
+    robot = controller.robot
+    previous = robot._disable_grasp_handling
+    robot._disable_grasp_handling = True
+    print(
+        "native_symbolic_grasp_config: "
+        f"controller={controller_type.__module__}.{controller_type.__name__} "
+        f"grasping_mode={robot.grasping_mode} "
+        f"disable_grasp_handling={previous}->True"
+    )
+
+
+def install_disabled_scene_graph_patch():
+    if ARGS.scene_graph_backend not in {"disabled", "none"}:
+        return
+
+    import og_ego_prim.scene_graph as scene_graph_module
+    from og_ego_prim.scene_graph.perception_scene_graph import (
+        PerceptionSceneGraphUpdater as OriginalPerceptionSceneGraphUpdater,
+    )
+    from og_ego_prim.scene_graph.schema import SceneGraphSnapshot
+
+    class DisabledSceneGraphUpdater:
+        def __init__(self, backend_name=None, update_every=None, sensor_name=None):
+            self.backend_name = backend_name or "disabled"
+            self.global_step_index = 0
+            self.snapshot = self._snapshot(context=None)
+            self.backend = None
+
+        def _snapshot(self, context=None):
+            primitive_name = None if context is None else context.primitive_name
+            raw_plan = None if context is None else context.raw_plan
+            step_index = self.global_step_index if context is None else context.step_index
+            return SceneGraphSnapshot(
+                step_index=step_index,
+                primitive_name=primitive_name,
+                raw_plan=raw_plan,
+                metadata={
+                    "source": "disabled",
+                    "ready": False,
+                    "perception_backend": self.backend_name,
+                    "global_step_index": self.global_step_index,
+                    "perception_skipped": True,
+                    "object_count": 0,
+                    "relation_count": 0,
+                    "membership_edge_count": 0,
+                    "total_edge_count": 0,
+                    "room_graph": {"rooms": []},
+                    "group_graph": {"groups": []},
+                    "perception_errors": [],
+                },
+            )
+
+        def reset(self, env):
+            self.global_step_index = 0
+            self.snapshot = self._snapshot(context=None)
+            return self.snapshot
+
+        def update(self, context=None):
+            self.snapshot = self._snapshot(context=context)
+            self.global_step_index += 1
+            return self.snapshot
+
+        def get_snapshot(self):
+            return self.snapshot
+
+        def to_prompt_context(self):
+            return ""
+
+    class NewTaskPerceptionSceneGraphUpdater:
+        def __new__(cls, backend_name=None, *args, **kwargs):
+            backend = backend_name or os.environ.get(
+                "ISBENCH_SCENE_GRAPH_BACKEND",
+                "omnigibson_truth",
+            )
+            if backend.lower() in {"disabled", "none"}:
+                return DisabledSceneGraphUpdater(
+                    backend_name=backend_name,
+                    update_every=kwargs.get("update_every"),
+                    sensor_name=kwargs.get("sensor_name"),
+                )
+            return OriginalPerceptionSceneGraphUpdater(
+                backend_name,
+                *args,
+                **kwargs,
+            )
+
+    scene_graph_module.PerceptionSceneGraphUpdater = NewTaskPerceptionSceneGraphUpdater
+
+
+def install_new_task_scene_patch():
+    if not ARGS.task_relevant_only and not ARGS.exclude_object_categories:
+        return
+
+    import og_ego_prim.benchmark.online_benchmark as online_benchmark_module
+    import og_ego_prim.benchmark.custom_behavior_task as custom_behavior_task_module
+
+    benchmark_cls = online_benchmark_module.OnlineBehaviorBenchmark
+    original_init_env_config = benchmark_cls.init_env_config
+
+    def new_task_init_env_config(self, task, scene, config):
+        env_config = original_init_env_config(self, task, scene, config)
+        scene_config = env_config.setdefault("scene", {})
+        if ARGS.task_relevant_only:
+            scene_config["load_task_relevant_only"] = True
+        not_load_categories = env_config["scene"].setdefault(
+            "not_load_object_categories",
+            [],
+        )
+        for category in [*ARGS.exclude_object_categories, "ceilings", "roof"]:
+            if category not in not_load_categories:
+                not_load_categories.append(category)
+        print(
+            "new_task_scene_config: "
+            f"load_task_relevant_only={scene_config.get('load_task_relevant_only')} "
+            f"not_load_object_categories={not_load_categories}"
+        )
+        return env_config
+
+    benchmark_cls.init_env_config = new_task_init_env_config
+
+    inroom_overrides = NEW_TASK_INROOM_OBJECT_OVERRIDES.get(ARGS.task, {})
+    if not inroom_overrides:
+        return
+
+    sampler_cls = custom_behavior_task_module.CustomBDDLSampler
+    original_build_inroom_object_scope = sampler_cls._build_inroom_object_scope
+
+    def new_task_build_inroom_object_scope(self):
+        result = original_build_inroom_object_scope(self)
+        if result:
+            return result
+
+        inroom_scope = getattr(self, "_inroom_object_scope", {})
+        for object_instance, simulator_name in inroom_overrides.items():
+            matched = False
+            available_names = []
+            for object_scopes in inroom_scope.values():
+                room_candidates = object_scopes.get(object_instance, {})
+                for room_instance, candidates in room_candidates.items():
+                    available_names.extend(obj.name for obj in candidates)
+                    selected = [obj for obj in candidates if obj.name == simulator_name]
+                    if selected:
+                        room_candidates[room_instance] = selected
+                        matched = True
+            if not matched:
+                raise RuntimeError(
+                    "new-task in-room override could not bind "
+                    f"{object_instance} to {simulator_name}; "
+                    f"available={sorted(set(available_names))}"
+                )
+            print(
+                "new_task_inroom_binding: "
+                f"object={object_instance} simulator_object={simulator_name}"
+            )
+        return result
+
+    sampler_cls._build_inroom_object_scope = new_task_build_inroom_object_scope
 
 
 def _to_numpy_image(frame):
@@ -558,8 +1363,10 @@ def save_robot_rgb_with_frame(robot, save_path: Path, output_size=None):
     return sensor_name, raw_shape, rgb.shape, rgb
 
 
-def track_robot_rgb_video(robot, tracker, output_size=None):
+def track_robot_rgb_video(robot, tracker, output_size=None, frame_annotator=None):
     sensor_name, rgb, raw_shape = get_robot_rgb(robot, output_size)
+    if frame_annotator is not None:
+        rgb = frame_annotator(rgb)
     tracker.track_video_rgb(rgb)
     return sensor_name, raw_shape, rgb.shape, rgb
 
@@ -624,12 +1431,6 @@ def print_scene_graph_summary(prefix, benchmark):
 def save_scene_graph_report(args, benchmark, output_dir: Path):
     save_path = output_dir / "scene_graph_report.json"
     latest = benchmark.tracker.latest_scene_graph
-    try:
-        from og_ego_prim.scene_graph.visualization import summarize_lifelong_scene_graph
-
-        lifelong_summary = summarize_lifelong_scene_graph(latest)
-    except Exception:
-        lifelong_summary = None
     report = {
         "task": args.task,
         "scene": args.scene,
@@ -637,7 +1438,6 @@ def save_scene_graph_report(args, benchmark, output_dir: Path):
         "scene_graph_step_interval": args.scene_graph_step_interval,
         "scene_graph_update_every": args.scene_graph_update_every,
         "latest_summary": summarize_scene_graph(latest),
-        "lifelong_summary": lifelong_summary,
         "latest_scene_graph": latest,
         "scene_graph_history": benchmark.tracker.scene_graph_history,
         "error_stack": benchmark.tracker.error_stack,
@@ -648,128 +1448,6 @@ def save_scene_graph_report(args, benchmark, output_dir: Path):
     with open(save_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
     print(f"saved scene graph json: {save_path}")
-
-
-def save_scene_graph_visualization(args, benchmark, output_dir: Path):
-    latest = benchmark.tracker.latest_scene_graph
-    if latest is None:
-        print("saved scene graph BEV: skipped because latest scene graph is empty")
-        return
-    try:
-        from og_ego_prim.scene_graph.visualization import (
-            save_lifelong_scene_graph_bev_visualization,
-            save_scene_graph_bev_video,
-            save_scene_graph_bev_visualization,
-            save_scene_graph_task_scene_bev_video,
-            save_scene_graph_task_scene_bev_visualization,
-        )
-
-        history = benchmark.tracker.scene_graph_history
-        metadata = save_scene_graph_bev_visualization(
-            latest,
-            output_dir,
-            env=benchmark.env,
-            execution_diagnostics=benchmark.tracker.execution_diagnostics,
-        )
-        video_metadata = save_scene_graph_bev_video(
-            history,
-            output_dir,
-            latest_snapshot=latest,
-            env=benchmark.env,
-            execution_diagnostics=benchmark.tracker.execution_diagnostics,
-        )
-        task_room = task_room_from_args(args)
-        task_scene_metadata = save_scene_graph_task_scene_bev_visualization(
-            latest,
-            output_dir,
-            env=benchmark.env,
-            execution_diagnostics=benchmark.tracker.execution_diagnostics,
-            task_room=task_room,
-        )
-        task_scene_video_metadata = save_scene_graph_task_scene_bev_video(
-            history,
-            output_dir,
-            latest_snapshot=latest,
-            env=benchmark.env,
-            execution_diagnostics=benchmark.tracker.execution_diagnostics,
-            task_room=task_room,
-        )
-        lifelong_metadata = save_lifelong_scene_graph_bev_visualization(
-            latest,
-            output_dir,
-            env=benchmark.env,
-            execution_diagnostics=benchmark.tracker.execution_diagnostics,
-        )
-        if metadata is None:
-            print("saved scene graph BEV: skipped because latest scene graph is empty")
-        elif metadata.get("saved"):
-            print(f"saved scene graph BEV: {output_dir / 'scene_graph_bev.png'}")
-        else:
-            print(f"saved scene graph BEV: skipped ({metadata.get('reason')})")
-        if video_metadata is None:
-            print("saved scene graph BEV video: skipped because history is empty")
-        elif video_metadata.get("saved"):
-            print(
-                "saved scene graph BEV video: "
-                f"{output_dir / 'scene_graph_bev_history.mp4'}"
-            )
-        else:
-            print(
-                "saved scene graph BEV video: "
-                f"skipped ({video_metadata.get('reason')})"
-            )
-        if task_scene_metadata is None:
-            print("saved task-scene BEV: skipped because latest scene graph is empty")
-        elif task_scene_metadata.get("saved"):
-            print(
-                "saved task-scene BEV: "
-                f"{output_dir / 'scene_graph_bev_task_scene.png'}"
-            )
-        else:
-            print(
-                "saved task-scene BEV: "
-                f"skipped ({task_scene_metadata.get('reason')})"
-            )
-        if task_scene_video_metadata is None:
-            print("saved task-scene BEV video: skipped because history is empty")
-        elif task_scene_video_metadata.get("saved"):
-            print(
-                "saved task-scene BEV video: "
-                f"{output_dir / 'scene_graph_bev_task_scene_history.mp4'}"
-            )
-        else:
-            print(
-                "saved task-scene BEV video: "
-                f"skipped ({task_scene_video_metadata.get('reason')})"
-            )
-        if lifelong_metadata is None:
-            print("saved lifelong scene graph BEV: skipped because latest scene graph is empty")
-        elif lifelong_metadata.get("saved"):
-            print(
-                "saved lifelong scene graph BEV: "
-                f"{output_dir / 'lifelong_scene_graph_bev.png'}"
-            )
-        else:
-            print(
-                "saved lifelong scene graph BEV: "
-                f"skipped ({lifelong_metadata.get('reason')})"
-            )
-    except Exception as e:
-        benchmark.tracker.track_error(
-            action="save_scene_graph_visualization",
-            err_type=e.__class__.__name__,
-            msg=str(e),
-        )
-        print(f"save_scene_graph_visualization failed: {e.__class__.__name__}: {e}")
-
-
-def task_room_from_args(args):
-    try:
-        with get_task_config_path(args.task).open("r", encoding="utf-8") as f:
-            config = json.load(f)
-    except Exception:
-        return None
-    return config.get("scene_info", {}).get("room")
 
 
 def safe_step_name(step_index: int, action: str) -> str:
@@ -923,6 +1601,100 @@ def set_samjam_output_dir(benchmark, output_dir: Path):
 
 def capture_robot_rgb_frame(robot, output_size):
     return get_robot_rgb(robot, output_size)[1]
+
+
+def _text_pixel_width(draw, text):
+    try:
+        bbox = draw.textbbox((0, 0), text)
+        return bbox[2] - bbox[0]
+    except Exception:
+        return len(text) * 6
+
+
+def _fit_text(draw, text, max_width):
+    text = str(text)
+    if _text_pixel_width(draw, text) <= max_width:
+        return text
+
+    ellipsis = "..."
+    if _text_pixel_width(draw, ellipsis) > max_width:
+        return ""
+
+    for keep in range(len(text) - 1, 0, -1):
+        head = (keep + 1) // 2
+        tail = keep // 2
+        candidate = f"{text[:head]}{ellipsis}{text[-tail:]}" if tail else f"{text[:head]}{ellipsis}"
+        if _text_pixel_width(draw, candidate) <= max_width:
+            return candidate
+    return ellipsis
+
+
+def annotate_task_action_hud(
+    rgb,
+    task_name,
+    step_index=None,
+    total_steps=None,
+    action=None,
+    phase=None,
+    status=None,
+):
+    """Overlay task/action context on video frames."""
+    frame = np.asarray(rgb)
+    image = Image.fromarray(frame[:, :, :3].copy()).convert("RGBA")
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    width, height = image.size
+
+    step_text = None
+    if step_index is not None:
+        step_text = f"Step: {step_index}"
+        if total_steps is not None:
+            step_text += f"/{total_steps}"
+
+    phase_parts = []
+    if phase:
+        phase_parts.append(str(phase))
+    if status:
+        phase_parts.append(str(status))
+
+    raw_lines = [f"Task: {task_name}"]
+    if step_text:
+        raw_lines.append(step_text)
+    if action:
+        raw_lines.append(f"Action: {action}")
+    if phase_parts:
+        raw_lines.append(f"Phase: {' | '.join(phase_parts)}")
+
+    margin = max(6, int(min(width, height) * 0.03))
+    pad_x = max(8, int(width * 0.025))
+    pad_y = max(6, int(height * 0.02))
+    max_text_width = max(32, width - margin * 2 - pad_x * 2)
+    lines = [_fit_text(draw, line, max_text_width) for line in raw_lines]
+    try:
+        line_bbox = draw.textbbox((0, 0), "Ag")
+        line_height = max(11, line_bbox[3] - line_bbox[1] + 3)
+    except Exception:
+        line_height = 13
+
+    panel_height = pad_y * 2 + line_height * len(lines)
+    left = margin
+    top = max(margin, height - margin - panel_height)
+    right = width - margin
+    bottom = height - margin
+    draw.rounded_rectangle(
+        (left, top, right, bottom),
+        radius=6,
+        fill=(0, 0, 0, 165),
+        outline=(255, 255, 255, 95),
+        width=1,
+    )
+
+    y = top + pad_y
+    for line in lines:
+        draw.text((left + pad_x, y), line, fill=(255, 255, 255, 245))
+        y += line_height
+
+    return np.asarray(Image.alpha_composite(image, overlay).convert("RGB"))
 
 
 def annotate_navigation_landmarks(rgb, robot, navigation_result):
@@ -1097,7 +1869,10 @@ def main():
     args = ARGS
     output_dir = get_run_output_dir(args.output_dir, args.timestamp_output)
     output_dir.mkdir(parents=True, exist_ok=True)
+    run_log_stream = install_run_log(output_dir)
     print(f"run output directory: {output_dir.resolve()}")
+    install_disabled_scene_graph_patch()
+    install_new_task_scene_patch()
     if args.scene_graph_backend in {"samjam_sam2", "samjam_unigoal"}:
         os.environ["ISBENCH_SAMJAM_OUTPUT_DIR"] = str(output_dir / "samjam_outputs")
 
@@ -1111,7 +1886,7 @@ def main():
         scene_graph_backend=args.scene_graph_backend,
         use_initial_setup=args.use_initial_setup,
         use_self_caption=args.use_self_caption,
-        online_object_sampling=None,
+        online_object_sampling=args.online_object_sampling,
         debug=False,
         eval_process_safety=True,
         eval_termination_safety=True,
@@ -1142,24 +1917,35 @@ def main():
             return
         os._exit(0)
 
+    if args.symbolic_smoke:
+        configure_native_symbolic_grasp(benchmark)
+
     robot = benchmark.env.robots[0]
     print("before:", robot.get_position_orientation()[0].tolist())
-    
-    # First Person View (FPV) image before executing any plan
     sensor_name, raw_shape, shape = save_robot_rgb(
         robot, output_dir / "fpv_before.png", args.output_size
     )
     print(
         f"saved fpv_before.png from sensor={sensor_name}, raw_shape={raw_shape}, saved_shape={shape}"
     )
-    # sensor_name, raw_shape, shape = save_robot_rgb(
-    #     robot, output_dir / "obs_rgb_before.png", args.output_size
-    # )
-    # print(
-    #     f"saved obs_rgb_before.png from sensor={sensor_name}, raw_shape={raw_shape}, saved_shape={shape}"
-    # )
+    sensor_name, raw_shape, shape = save_robot_rgb(
+        robot, output_dir / "obs_rgb_before.png", args.output_size
+    )
+    print(
+        f"saved obs_rgb_before.png from sensor={sensor_name}, raw_shape={raw_shape}, saved_shape={shape}"
+    )
     if args.save_video:
-        track_robot_rgb_video(robot, benchmark.tracker, args.output_size)
+        track_robot_rgb_video(
+            robot,
+            benchmark.tracker,
+            args.output_size,
+            frame_annotator=lambda rgb: annotate_task_action_hud(
+                rgb,
+                args.task,
+                action="initialization",
+                phase="before planning",
+            ),
+        )
     if args.save_surrounding_observations:
         save_surrounding_observations(benchmark, output_dir / "0_init")
 
@@ -1212,13 +1998,30 @@ def main():
             f"max_steps={max_steps} obs={args.planner_use_obs}"
         )
     else:
-        planner = benchmark.get_example_planning()
+        planner = list(benchmark.get_example_planning())
         print("planning_source: fixed example_planning")
+
+    symbolic_smoke_skipped = []
+    if args.symbolic_smoke:
+        original_plan_count = len(planner)
+        planner, symbolic_smoke_skipped, symbolic_smoke_inserted = (
+            build_symbolic_smoke_plan(planner)
+        )
+        validate_symbolic_smoke_plan(planner)
+        print_symbolic_smoke_summary(
+            original_plan_count,
+            planner,
+            symbolic_smoke_skipped,
+            symbolic_smoke_inserted,
+        )
+        print("planning_source: converted symbolic smoke plan (navigation disabled)")
 
     original_step_callback = benchmark.executor.step_callback
     capture_every = max(args.capture_every, 1)
+    total_plan_steps = len(planner)
     current_step_frames = None
     current_step_action = None
+    current_step_index = None
 
     def current_navigation_result():
         controller = getattr(benchmark.executor, "controller", None)
@@ -1236,6 +2039,18 @@ def main():
             current_navigation_result(),
         )
 
+    def annotate_current_video_frame(rgb, phase, status=None):
+        rgb = annotate_current_navigation_frame(rgb)
+        return annotate_task_action_hud(
+            rgb,
+            args.task,
+            step_index=current_step_index,
+            total_steps=total_plan_steps,
+            action=current_step_action,
+            phase=phase,
+            status=status,
+        )
+
     def wrapped_step_callback(context):
         if original_step_callback is not None:
             original_step_callback(context)
@@ -1244,45 +2059,59 @@ def main():
         if context.step_index % capture_every != 0:
             return
         rgb = capture_robot_rgb_frame(robot, args.output_size)
-        rgb = annotate_current_navigation_frame(rgb)
+        rgb = annotate_current_video_frame(rgb, phase="running")
         benchmark.tracker.track_video_rgb(rgb)
         if current_step_frames is not None:
             current_step_frames.append(rgb)
 
     benchmark.executor.step_callback = wrapped_step_callback
 
+    attempted_actions = 0
+    succeeded_actions = 0
+    failed_actions = 0
     for step_index, plan in enumerate(planner, start=1):
         action = plan["action"]
         current_step_action = action
-
-        # ========================= log start =========================
+        current_step_index = step_index
         step_dir = output_dir / safe_step_dir_name(step_index, action)
         step_dir.mkdir(parents=True, exist_ok=True)
         if args.scene_graph_backend in {"samjam_sam2", "samjam_unigoal"}:
             set_samjam_output_dir(benchmark, step_dir / "samjam_outputs")
+
         print(f"plan_step_{step_index:02d}: {action}")
-
         current_step_frames = []
-        sensor_name, raw_shape, shape, before_rgb = save_robot_rgb_with_frame(
-            robot, step_dir / "obs_before.png", args.output_size
-        )
-        current_step_frames.append(before_rgb)
-        print(
-            f"saved {step_dir.name}/obs_before.png from sensor={sensor_name}, raw_shape={raw_shape}, saved_shape={shape}"
-        )
+        capture_step_rgb = args.save_step_images or args.save_video
+        if capture_step_rgb:
+            sensor_name, raw_shape, shape, before_rgb = save_robot_rgb_with_frame(
+                robot, step_dir / "obs_before.png", args.output_size
+            )
+            current_step_frames.append(
+                annotate_current_video_frame(before_rgb, phase="before")
+            )
+            print(
+                f"saved {step_dir.name}/obs_before.png from sensor={sensor_name}, raw_shape={raw_shape}, saved_shape={shape}"
+            )
 
-        # ========================= plan start =========================
+        attempted_actions += 1
         execution_succeeded = benchmark.execute_plan(plan)
-
-
-        sensor_name, raw_shape, shape, after_rgb = save_robot_rgb_with_frame(
-            robot, step_dir / "obs_after.png", args.output_size
-        )
-        video_after_rgb = annotate_current_navigation_frame(after_rgb)
-        current_step_frames.append(video_after_rgb)
-        print(
-            f"saved {step_dir.name}/obs_after.png from sensor={sensor_name}, raw_shape={raw_shape}, saved_shape={shape}"
-        )
+        if execution_succeeded:
+            succeeded_actions += 1
+        else:
+            failed_actions += 1
+        video_after_rgb = None
+        if capture_step_rgb:
+            sensor_name, raw_shape, shape, after_rgb = save_robot_rgb_with_frame(
+                robot, step_dir / "obs_after.png", args.output_size
+            )
+            video_after_rgb = annotate_current_video_frame(
+                after_rgb,
+                phase="after",
+                status="succeeded" if execution_succeeded else "failed",
+            )
+            current_step_frames.append(video_after_rgb)
+            print(
+                f"saved {step_dir.name}/obs_after.png from sensor={sensor_name}, raw_shape={raw_shape}, saved_shape={shape}"
+            )
         if args.save_video:
             benchmark.tracker.track_video_rgb(video_after_rgb)
             video_info = save_rgb_video(
@@ -1298,10 +2127,9 @@ def main():
                 )
         current_step_frames = None
         current_step_action = None
-
+        current_step_index = None
         save_scene_graph_report(args, benchmark, step_dir)
         print_scene_graph_summary(f"after_step_{step_index:02d}", benchmark)
-        
         if args.save_surrounding_observations:
             step_tag = f"{step_index:02d}_" + action.replace("(", "__").replace(")", "__")
             save_surrounding_observations(benchmark, step_dir / "surrounding_obs" / step_tag)
@@ -1314,6 +2142,25 @@ def main():
         if not execution_succeeded and args.stop_on_error:
             print(f"stopping after failed action: {action}")
             break
+
+    if args.symbolic_smoke:
+        print(
+            "symbolic_smoke_execution: "
+            f"attempted={attempted_actions} succeeded={succeeded_actions} "
+            f"failed={failed_actions} skipped={len(symbolic_smoke_skipped)}"
+        )
+        if failed_actions:
+            print(
+                "symbolic_smoke_result: FAILED because one or more executable "
+                "symbolic actions failed."
+            )
+        elif symbolic_smoke_skipped:
+            print(
+                "symbolic_smoke_result: executable actions passed; full task success "
+                "is not asserted because the source plan contains unsupported actions."
+            )
+        else:
+            print("symbolic_smoke_result: PASSED")
 
     benchmark.termination_evaluation()
     if args.scene_graph_backend in {"samjam_sam2", "samjam_unigoal"}:
@@ -1329,27 +2176,38 @@ def main():
         )
         print(f"force_scene_graph_final failed: {e.__class__.__name__}: {e}")
 
-    sensor_name, raw_shape, shape = save_robot_rgb(
-        robot, output_dir / "fpv_after.png", args.output_size
-    )
-    print("after:", robot.get_position_orientation()[0].tolist())
-    print(
-        f"saved fpv_after.png from sensor={sensor_name}, raw_shape={raw_shape}, saved_shape={shape}"
-    )
-    # sensor_name, raw_shape, shape = save_robot_rgb(
-    #     robot, output_dir / "obs_rgb_after.png", args.output_size
-    # )
-    # print(
-    #     f"saved obs_rgb_after.png from sensor={sensor_name}, raw_shape={raw_shape}, saved_shape={shape}"
-    # )
+    try:
+        sensor_name, raw_shape, shape = save_robot_rgb(
+            robot, output_dir / "fpv_after.png", args.output_size
+        )
+        print("after:", robot.get_position_orientation()[0].tolist())
+        print(
+            f"saved fpv_after.png from sensor={sensor_name}, raw_shape={raw_shape}, saved_shape={shape}"
+        )
+        sensor_name, raw_shape, shape = save_robot_rgb(
+            robot, output_dir / "obs_rgb_after.png", args.output_size
+        )
+        print(
+            f"saved obs_rgb_after.png from sensor={sensor_name}, raw_shape={raw_shape}, saved_shape={shape}"
+        )
+    except Exception as e:
+        benchmark.tracker.track_error(
+            action="save_final_robot_observation",
+            err_type=e.__class__.__name__,
+            msg=str(e),
+        )
+        print(
+            "final robot observation failed: "
+            f"{e.__class__.__name__}: {e}"
+        )
 
-    save_scene_graph_visualization(args, benchmark, output_dir)
     save_report_and_video(args, benchmark, output_dir)
     save_scene_graph_report(args, benchmark, output_dir)
     print("scene_graph_history:", len(benchmark.tracker.scene_graph_history))
 
     sys.stdout.flush()
     sys.stderr.flush()
+    run_log_stream.flush()
     if args.clear_on_exit:
         og.clear()
         return

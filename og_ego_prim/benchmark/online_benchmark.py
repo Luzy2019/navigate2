@@ -251,6 +251,13 @@ class OnlineBenchmark(Benchmark):
             )
 
     def _resolve_initial_pose_object(self, object_name: str):
+        '''
+            把任务对象名解析为 simulator 中的对象引用，优先使用 task.object_scope 中的对象。
+            如果 task.object_scope 中没有，则尝试在 simulator 的 object_registry 中查找
+            如果 simulator 中也没有，则尝试在 task.object_scope 中查找与任务相关的对象
+            （例如 task.object_scope 中的 "refrigerator" 对象可能对应 simulator 中的 "refrigerator_0" 对象）。
+            如果以上都没有找到，则返回 None。
+        '''
         object_ref = self.env.task.object_scope.get(object_name)
         if object_ref is not None:
             return object_ref.wrapped_obj
@@ -262,6 +269,9 @@ class OnlineBenchmark(Benchmark):
         return find_task_related_object(self.env, object_name)
 
     def _add_task_specific_surrounding_poses(self):
+        # 为少数任务补充额外的固定环视相机位姿。
+        # 这些位姿会和 data/cameras/camera.json 中的通用相机位姿一起使用，
+        # 用于保存多视角 observation，方便 planner、视频和调试报告查看场景。
         extra_poses = {
             ('store_apple_and_tissue_box_in_bottom_cabinet', 'Wainscott_0_int'): [
                 {
@@ -276,11 +286,14 @@ class OnlineBenchmark(Benchmark):
             ],
         }.get((self.task_name, self.scene_name), [])
 
+        # 当前任务没有专门补充的相机位姿时，直接沿用通用配置。
         if not extra_poses:
             return
         if self.surrounding_poses is None:
             self.surrounding_poses = []
 
+        # OnlineBenchmark 内部统一使用 (position_tensor, quaternion_tensor) 表示相机位姿。
+        # pos表示相机位置，quat表示相机四元数朝向。
         for pose_dict in extra_poses:
             self.surrounding_poses.append(
                 (
@@ -297,15 +310,26 @@ class OnlineBenchmark(Benchmark):
                 return
 
     def set_viewer(self):
+        '''
+            ego：第一人称视角
+        '''
         for robot in self.env.robots:
             robot.visible = not self.ego_view
+        # 切到 ego / 第一人称视角后，让仿真先空跑 5 步稳定一下画面和机器人状态。
         if self.ego_view:
             self.executor._simulator_loop(5)
         
         if self.draw_bbox_2d:
             og.sim.viewer_camera.add_modality('bbox_2d_tight')
 
+    # 在仿真中添加额外的初始状态
+    # 例如：在任务初始化后，把冰箱里的、支持 Frozen 状态的任务对象设成“冷冻”状态。
     def _add_extra_init_states(self):
+        '''
+            这个功能主要服务于一些烹饪/加热任务：
+            比如从冰箱拿出来的食材需要先 WAIT(...) 解冻，或者安全条件要求 not frozen 后才能烹饪。
+            它确保“冰箱里的食物一开始是冷冻的”这个物理/状态前提真的写入 OmniGibson 状态里。
+        '''
         # set objects in refrigerator to frozen
         refrigerator = find_task_related_object(self.env, 'refrigerator')
         if refrigerator is None:
@@ -326,6 +350,8 @@ class OnlineBenchmark(Benchmark):
         
         self.executor._simulator_loop(5)
     
+    # 解析配置文件中的 task_instruction 和 initial_setup 信息
+    # 返回 (task_instruction, initial_setup)。
     def _get_task_information(self, config: Dict):
         cond_configs = config["planning_context"]
         if not cond_configs:
@@ -344,6 +370,7 @@ class OnlineBenchmark(Benchmark):
         if self.primitive_type == "starter":
             evaluation_plan = {
                 **plan,
+                # action wrapper
                 "action": starter_evaluation_action(
                     plan["action"],
                     self._starter_grasped_object,
@@ -408,16 +435,27 @@ class OnlineBenchmark(Benchmark):
         self.executor._simulator_loop(5)
 
     def _preprocess_obs(self) -> NumpyArrayLike:
+        '''
+            获取当前仿真环境的观察结果，并根据 draw_bbox_2d 配置决定是否在 rgb 图像上绘制 2D 边界框。
+            
+            Returns:
+                rgb: numpy.ndarray, shape (H, W, 3), dtype uint8
+
+            注：在当前任务中用的是sam2的bbox，所以这里应该设置为：
+                self.draw_bbox_2d = False
+        '''
         obs, info = og.sim.viewer_camera.get_obs()
         rgb = obs['rgb'].cpu().numpy()
         if not self.draw_bbox_2d:
             return rgb
 
+        # ============= 以下访问不到 ===================
         bbox_2d_data = obs['bbox_2d_tight']
         bbox_2d_info = info['bbox_2d_tight']
-        visible_task_related_objects = get_visible_task_related_objects(self.env)
 
+        visible_task_related_objects = get_visible_task_related_objects(self.env)
         visible_task_related_bbox_2d_id = []
+
         for bbox_2d_id, bbox_name in bbox_2d_info.items():
             for obj in visible_task_related_objects:
                 if bbox_name in obj.name:

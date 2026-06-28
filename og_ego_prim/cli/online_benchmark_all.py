@@ -13,8 +13,12 @@ from typing import List, Optional, Tuple
 
 from tqdm import tqdm
 
-from og_ego_prim.utils.constants import CAMERAS, TASKS
+from og_ego_prim.utils.constants import CAMERAS
 from og_ego_prim.utils.metric import Metric, read_benchmark_report
+from og_ego_prim.utils.task_registry import (
+    get_task_config_path,
+    iter_task_config_paths,
+)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default=None)
@@ -55,25 +59,31 @@ def get_all_tasks(
     use_default_scene_model: bool = True,
 ) -> List[Tuple[str, str]]:
 
-    all_supported_tasks = [task for task in os.listdir(TASKS) 
-                                if task.endswith('.json') and not 'test' in task]
     if task_list is None:
-        task_list = all_supported_tasks
+        task_paths = iter_task_config_paths(include_subdirs=False)
     elif not os.path.exists(task_list):
         raise FileNotFoundError(f'task list does not exist: "{task_list}"')
     else:
         with open(task_list, 'r') as f:
-            task_list = [task.strip() for task in f.readlines() if task.strip()]
-        task_list = list(map(lambda task: task if task.endswith('.json') else f'{task}.json', task_list))
-        task_list = list(filter(lambda task: task in all_supported_tasks, task_list))
+            task_specs = [
+                task.strip()
+                for task in f.readlines()
+                if task.strip() and not task.strip().startswith("#")
+            ]
+        task_paths = []
+        for task_spec in task_specs:
+            try:
+                task_paths.append(get_task_config_path(task_spec))
+            except (FileNotFoundError, ValueError) as exc:
+                warnings.warn(str(exc))
 
     with open(os.path.join(CAMERAS, 'camera.json'), 'r') as f:
         camera_config = json.load(f)
     
-    print(f"[INFO]######\n{task_list}")
+    print(f"[INFO]######\n{[str(path) for path in task_paths]}")
     all_tasks = []
-    for task in task_list:
-        with open(os.path.join(TASKS, task), 'r') as f:
+    for task_path in task_paths:
+        with open(task_path, 'r') as f:
             task_config = json.load(f)
         task_name = task_config['task_info']['task_name']
         scene_info = task_config['scene_info']
