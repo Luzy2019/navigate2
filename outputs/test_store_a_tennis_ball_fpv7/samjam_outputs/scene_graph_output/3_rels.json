@@ -1,7 +1,0 @@
-{
-    "samjam_object:2,samjam_object:7": "is_on",
-    "samjam_object:6,samjam_object:7": "is_on",
-    "samjam_object:1,samjam_object:7": "is_next_to",
-    "samjam_object:4,samjam_object:5": "is_near",
-    "samjam_object:5,samjam_object:7": "is_below"
-}
