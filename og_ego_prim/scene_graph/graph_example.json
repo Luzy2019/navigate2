@@ -1,0 +1,852 @@
+{
+  "task": "store_apple_and_tissue_box_in_bottom_cabinet",
+  "scene": "Wainscott_0_int",
+  "scene_graph_backend": "samjam_unigoal",
+  "scene_graph_step_interval": 100,
+  "scene_graph_update_every": 1,
+  "latest_summary": {
+    "backend": "samjam_unigoal",
+    "global_step_index": 34,
+    "frame_index": 35,
+    "objects": 42,
+    "rooms": 1,
+    "groups": 8,
+    "relations": 3,
+    "membership_edges": 84,
+    "edges": 87,
+    "skipped": false
+  },
+  "schema_version": "isbench.scene_graph.v2",
+  "latest_scene_graph": {
+    "rooms": [
+      {
+        "room_id": "room_0",
+        "room_name": "room_0",
+        "type": "room",
+        "group_count": 2,
+        "object_count": 14,
+        "groups": [
+          {
+            "group_id": "group_0",
+            "group_name": "group_0",
+            "type": "group",
+            "object_count": 6,
+            "nodes": [
+              {
+                "id": "obj_0001",
+                "uid": 1,
+                "name": "apple",
+                "label": "apple_01",
+                "is_coarse": false,
+                "is_vis": true,
+                "position": [
+                  4.162625410101225, 10.539066105146354, 2.5934484674965317
+                ],
+                "caption": "A red apple on the table.",
+                "last_seen_step": 10,
+                "room": "kitchen",
+                "room_id": 1,
+                "group": "kitchen:1"
+              },
+              {
+                "id": "obj_0002",
+                "uid": 2,
+                "name": "tissue_box",
+                "label": "tissue_box_01",
+                "is_coarse": false,
+                "is_vis": true,
+                "states": {
+                  "open": true
+                },
+                "position": [
+                  4.162625410101225, 10.539066105146354, 2.5934484674965317
+                ],
+                "hazard": {
+                  "fire": true,
+                  "electric": false,
+                  "toxic": false
+                }
+              },
+              {
+                "id": "obj_0003",
+                "uid": 3,
+                "name": "cabinet",
+                "label": "cabinet_02",
+                "role": "bottom_cabinet",
+                "is_coarse": true,
+                "is_vis": true,
+                "states": {
+                  "open": true
+                },
+                "position": [
+                  4.162625410101225, 10.539066105146354, 2.5934484674965317
+                ]
+              }
+            ],
+            "edges": [
+              {
+                "source": "obj_0001",
+                "target": "obj_0003",
+                "source_uid": 1,
+                "target_uid": 3,
+                "type": "in"
+              },
+              {
+                "source": "obj_0002",
+                "target": "obj_0003",
+                "source_uid": 2,
+                "target_uid": 3,
+                "type": "in"
+              }
+            ]
+          },
+          {
+            "group_id": "group_0",
+            "group_name": "group_0",
+            "type": "group",
+            "object_count": 6,
+            "nodes": [
+              {
+                "id": "obj_0001",
+                "uid": 1,
+                "name": "apple",
+                "label": "apple_01",
+                "is_coarse": false,
+                "is_vis": true,
+                "position": [
+                  4.162625410101225, 10.539066105146354, 2.5934484674965317
+                ],
+                "caption": "A red apple on the table.",
+                "last_seen_step": 10,
+                "room": "kitchen",
+                "room_id": 1,
+                "group": "kitchen:1"
+              },
+              {
+                "id": "obj_0002",
+                "uid": 2,
+                "name": "tissue_box",
+                "label": "tissue_box_01",
+                "is_coarse": false,
+                "is_vis": true,
+                "states": {
+                  "open": true
+                },
+                "position": [
+                  4.162625410101225, 10.539066105146354, 2.5934484674965317
+                ],
+                "hazard": {
+                  "fire": true,
+                  "electric": false,
+                  "toxic": false
+                }
+              },
+              {
+                "id": "obj_0003",
+                "uid": 3,
+                "name": "cabinet",
+                "label": "cabinet_02",
+                "role": "bottom_cabinet",
+                "is_coarse": true,
+                "is_vis": true,
+                "states": {
+                  "open": true
+                },
+                "position": [
+                  4.162625410101225, 10.539066105146354, 2.5934484674965317
+                ]
+              }
+            ],
+            "edges": [
+              {
+                "source": "obj_0001",
+                "target": "obj_0003",
+                "source_uid": 1,
+                "target_uid": 3,
+                "type": "in"
+              },
+              {
+                "source": "obj_0002",
+                "target": "obj_0003",
+                "source_uid": 2,
+                "target_uid": 3,
+                "type": "in"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "scene_graph_history": [
+    {
+      "rooms": [
+        {
+          "room_id": "room_0",
+          "room_name": "room_0",
+          "type": "room",
+          "group_count": 2,
+          "object_count": 14,
+          "groups": [
+            {
+              "group_id": "group_0",
+              "group_name": "group_0",
+              "type": "group",
+              "object_count": 6,
+              "nodes": [
+                {
+                  "id": "obj_0001",
+                  "uid": 1,
+                  "name": "apple",
+                  "label": "apple_01",
+                  "is_coarse": false,
+                  "is_vis": true,
+                  "position": [
+                    4.162625410101225, 10.539066105146354, 2.5934484674965317
+                  ],
+                  "caption": "A red apple on the table.",
+                  "last_seen_step": 10,
+                  "room": "kitchen",
+                  "room_id": 1,
+                  "group": "kitchen:1"
+                },
+                {
+                  "id": "obj_0002",
+                  "uid": 2,
+                  "name": "tissue_box",
+                  "label": "tissue_box_01",
+                  "is_coarse": false,
+                  "is_vis": true,
+                  "states": {
+                    "open": true
+                  },
+                  "position": [
+                    4.162625410101225, 10.539066105146354, 2.5934484674965317
+                  ],
+                  "hazard": {
+                    "fire": true,
+                    "electric": false,
+                    "toxic": false
+                  }
+                },
+                {
+                  "id": "obj_0003",
+                  "uid": 3,
+                  "name": "cabinet",
+                  "label": "cabinet_02",
+                  "role": "bottom_cabinet",
+                  "is_coarse": true,
+                  "is_vis": true,
+                  "states": {
+                    "open": true
+                  },
+                  "position": [
+                    4.162625410101225, 10.539066105146354, 2.5934484674965317
+                  ]
+                }
+              ],
+              "edges": [
+                {
+                  "source": "obj_0001",
+                  "target": "obj_0003",
+                  "source_uid": 1,
+                  "target_uid": 3,
+                  "type": "in"
+                },
+                {
+                  "source": "obj_0002",
+                  "target": "obj_0003",
+                  "source_uid": 2,
+                  "target_uid": 3,
+                  "type": "in"
+                }
+              ]
+            },
+            {
+              "group_id": "group_0",
+              "group_name": "group_0",
+              "type": "group",
+              "object_count": 6,
+              "nodes": [
+                {
+                  "id": "obj_0001",
+                  "uid": 1,
+                  "name": "apple",
+                  "label": "apple_01",
+                  "is_coarse": false,
+                  "is_vis": true,
+                  "position": [
+                    4.162625410101225, 10.539066105146354, 2.5934484674965317
+                  ],
+                  "caption": "A red apple on the table.",
+                  "last_seen_step": 10,
+                  "room": "kitchen",
+                  "room_id": 1,
+                  "group": "kitchen:1"
+                },
+                {
+                  "id": "obj_0002",
+                  "uid": 2,
+                  "name": "tissue_box",
+                  "label": "tissue_box_01",
+                  "is_coarse": false,
+                  "is_vis": true,
+                  "states": {
+                    "open": true
+                  },
+                  "position": [
+                    4.162625410101225, 10.539066105146354, 2.5934484674965317
+                  ],
+                  "hazard": {
+                    "fire": true,
+                    "electric": false,
+                    "toxic": false
+                  }
+                },
+                {
+                  "id": "obj_0003",
+                  "uid": 3,
+                  "name": "cabinet",
+                  "label": "cabinet_02",
+                  "role": "bottom_cabinet",
+                  "is_coarse": true,
+                  "is_vis": true,
+                  "states": {
+                    "open": true
+                  },
+                  "position": [
+                    4.162625410101225, 10.539066105146354, 2.5934484674965317
+                  ]
+                }
+              ],
+              "edges": [
+                {
+                  "source": "obj_0001",
+                  "target": "obj_0003",
+                  "source_uid": 1,
+                  "target_uid": 3,
+                  "type": "in"
+                },
+                {
+                  "source": "obj_0002",
+                  "target": "obj_0003",
+                  "source_uid": 2,
+                  "target_uid": 3,
+                  "type": "in"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "error_stack": [
+    {
+      "action": "open(cabinet.n.01_2)",
+      "err_type": "ActionPrimitiveError",
+      "msg": "EXECUTION_ERROR: Could not rotate in place to the desired orientation. Additional info: {'target pose': (tensor([4.8068e+00, 1.1283e+01, 1.0000e-02]), tensor([0.0000, 0.0000, 0.9963, 0.0854]))}"
+    }
+  ],
+  "execution_diagnostics": [
+    {
+      "plan": "navigate_to(half__banana.n.01_1)",
+      "primitive_type": "starter",
+      "primitive_name": "NAVIGATE_TO",
+      "status": "succeeded",
+      "low_level_steps": 1178,
+      "start_state": {
+        "base_position": [3.650664, 10.700019, 0.000618],
+        "base_orientation": [0.000274, -0.011218, 0.016291, 0.999804],
+        "eef_position": [4.149208, 10.59407, 1.064105],
+        "object_in_hand": null
+      },
+      "end_state": {
+        "base_position": [2.484257, 11.565447, 0.001281],
+        "base_orientation": [0.011457, 0.010114, 0.681624, -0.731543],
+        "eef_position": [2.39572, 11.082123, 1.072154],
+        "object_in_hand": null
+      },
+      "base_displacement": 1.452402,
+      "eef_displacement": 1.82016,
+      "action_groups": {
+        "base": {
+          "active_steps": 1038,
+          "max_abs_command": 0.20000000298023224
+        },
+        "camera": {
+          "active_steps": 1178,
+          "max_abs_command": 0.45941635966300964
+        },
+        "arm_0": {
+          "active_steps": 1178,
+          "max_abs_command": 2.144740104675293
+        },
+        "gripper_0": {
+          "active_steps": 1178,
+          "max_abs_command": 0.05000000074505806
+        }
+      },
+      "navigation": {
+        "target_object": "half_banana_xytkre_0",
+        "target_pos": [2.471591, 11.100143, 0.970599],
+        "start_base_pos": [3.650664, 10.700019, 0.000618],
+        "start_base_target_xy_distance": 1.245115,
+        "preferred_goal_direction": [0.946959, -0.321355],
+        "navigation_reason": "explicit_grasp_ready_stance",
+        "sampler": "omnigibson_native_starter",
+        "status": "completed_native_stance",
+        "goal_pose_2d": [2.420598, 11.564844, 4.821685],
+        "sample_source": "new_native_sample",
+        "native_sample_attempt": 1,
+        "native_plan_waypoints_2d": [
+          [3.650664, 10.700019, 0.032584],
+          [3.293375, 11.213305, 2.178887],
+          [2.420598, 11.564844, -1.4615]
+        ],
+        "native_plan_steps": 3,
+        "native_planning_filter_errors": [],
+        "navigation_hand_action_mode": "pinned_arm_gripper_no_op",
+        "densified_plan_waypoints_2d": [
+          [3.561341, 10.828341, 0.56916],
+          [3.472019, 10.956662, 1.105736],
+          [3.382697, 11.084984, 1.642311],
+          [3.293375, 11.213305, 2.178887],
+          [3.147912, 11.271895, 2.619354],
+          [3.002449, 11.330485, 3.05982],
+          [2.856986, 11.389074, -2.782899],
+          [2.711523, 11.447664, -2.342433],
+          [2.566061, 11.506254, -1.901966],
+          [2.420598, 11.564844, -1.4615]
+        ],
+        "densified_plan_steps": 10,
+        "executed_waypoints_2d": [
+          [3.561341, 10.828341, 0.56916],
+          [3.472019, 10.956662, 1.105736],
+          [3.382697, 11.084984, 1.642311],
+          [3.293375, 11.213305, 2.178887],
+          [3.147912, 11.271895, 2.619354],
+          [3.002449, 11.330485, 3.05982],
+          [2.856986, 11.389074, -2.782899],
+          [2.711523, 11.447664, -2.342433],
+          [2.566061, 11.506254, -1.901966],
+          [2.420598, 11.564844, -1.4615]
+        ],
+        "current_waypoint_pose_2d": [2.420598, 11.564844, -1.4615],
+        "current_waypoint_index": 9,
+        "current_waypoint_is_final": true,
+        "end_base_pos": [2.484258, 11.565403, 0.001278],
+        "end_base_target_xy_distance": 0.465432,
+        "end_reachable": true
+      }
+    },
+    {
+      "plan": "grasp(half__banana.n.01_1)",
+      "primitive_type": "starter",
+      "primitive_name": "GRASP",
+      "status": "succeeded",
+      "low_level_steps": 1,
+      "start_state": {
+        "base_position": [2.484257, 11.565447, 0.001281],
+        "base_orientation": [0.011457, 0.010114, 0.681624, -0.731543],
+        "eef_position": [2.39572, 11.082123, 1.072154],
+        "object_in_hand": null
+      },
+      "end_state": {
+        "base_position": [2.484256, 11.565448, 0.001281],
+        "base_orientation": [0.011457, 0.010114, 0.681624, -0.731543],
+        "eef_position": [2.395554, 11.082145, 1.072167],
+        "object_in_hand": "half_banana_xytkre_0"
+      },
+      "base_displacement": 1e-6,
+      "eef_displacement": 0.000168,
+      "action_groups": {
+        "base": {
+          "active_steps": 0,
+          "max_abs_command": 0.0
+        },
+        "camera": {
+          "active_steps": 1,
+          "max_abs_command": 0.4594210088253021
+        },
+        "arm_0": {
+          "active_steps": 1,
+          "max_abs_command": 2.144740104675293
+        },
+        "gripper_0": {
+          "active_steps": 1,
+          "max_abs_command": 0.04999999701976776
+        }
+      },
+      "navigation": {
+        "target_object": "half_banana_xytkre_0",
+        "target_pos": [2.471591, 11.100143, 0.970599],
+        "start_base_pos": [3.650664, 10.700019, 0.000618],
+        "start_base_target_xy_distance": 1.245115,
+        "preferred_goal_direction": [0.946959, -0.321355],
+        "navigation_reason": "explicit_grasp_ready_stance",
+        "sampler": "omnigibson_native_starter",
+        "status": "completed_native_stance",
+        "goal_pose_2d": [2.420598, 11.564844, 4.821685],
+        "sample_source": "new_native_sample",
+        "native_sample_attempt": 1,
+        "native_plan_waypoints_2d": [
+          [3.650664, 10.700019, 0.032584],
+          [3.293375, 11.213305, 2.178887],
+          [2.420598, 11.564844, -1.4615]
+        ],
+        "native_plan_steps": 3,
+        "native_planning_filter_errors": [],
+        "navigation_hand_action_mode": "pinned_arm_gripper_no_op",
+        "densified_plan_waypoints_2d": [
+          [3.561341, 10.828341, 0.56916],
+          [3.472019, 10.956662, 1.105736],
+          [3.382697, 11.084984, 1.642311],
+          [3.293375, 11.213305, 2.178887],
+          [3.147912, 11.271895, 2.619354],
+          [3.002449, 11.330485, 3.05982],
+          [2.856986, 11.389074, -2.782899],
+          [2.711523, 11.447664, -2.342433],
+          [2.566061, 11.506254, -1.901966],
+          [2.420598, 11.564844, -1.4615]
+        ],
+        "densified_plan_steps": 10,
+        "executed_waypoints_2d": [
+          [3.561341, 10.828341, 0.56916],
+          [3.472019, 10.956662, 1.105736],
+          [3.382697, 11.084984, 1.642311],
+          [3.293375, 11.213305, 2.178887],
+          [3.147912, 11.271895, 2.619354],
+          [3.002449, 11.330485, 3.05982],
+          [2.856986, 11.389074, -2.782899],
+          [2.711523, 11.447664, -2.342433],
+          [2.566061, 11.506254, -1.901966],
+          [2.420598, 11.564844, -1.4615]
+        ],
+        "current_waypoint_pose_2d": [2.420598, 11.564844, -1.4615],
+        "current_waypoint_index": 9,
+        "current_waypoint_is_final": true,
+        "end_base_pos": [2.484258, 11.565403, 0.001278],
+        "end_base_target_xy_distance": 0.465432,
+        "end_reachable": true
+      }
+    },
+    {
+      "plan": "navigate_to(ashcan.n.01_1)",
+      "primitive_type": "starter",
+      "primitive_name": "NAVIGATE_TO",
+      "status": "succeeded",
+      "low_level_steps": 96,
+      "start_state": {
+        "base_position": [2.484256, 11.565448, 0.001281],
+        "base_orientation": [0.011457, 0.010114, 0.681624, -0.731543],
+        "eef_position": [2.395554, 11.082145, 1.072167],
+        "object_in_hand": "half_banana_xytkre_0"
+      },
+      "end_state": {
+        "base_position": [2.412999, 11.611698, 0.001386],
+        "base_orientation": [-0.007711, 0.011147, -0.411856, -0.911148],
+        "eef_position": [2.827904, 11.886337, 1.069362],
+        "object_in_hand": "half_banana_xytkre_0"
+      },
+      "base_displacement": 0.084951,
+      "eef_displacement": 0.913049,
+      "action_groups": {
+        "base": {
+          "active_steps": 35,
+          "max_abs_command": 0.5
+        },
+        "camera": {
+          "active_steps": 96,
+          "max_abs_command": 0.459870308637619
+        },
+        "arm_0": {
+          "active_steps": 96,
+          "max_abs_command": 2.144740104675293
+        },
+        "gripper_0": {
+          "active_steps": 96,
+          "max_abs_command": 0.04999999701976776
+        }
+      },
+      "navigation": {
+        "target_object": "trash_can_gvnfgj_0",
+        "target_pos": [3.449997, 12.200001, 0.221755],
+        "start_base_pos": [2.484256, 11.565448, 0.001281],
+        "start_base_target_xy_distance": 1.155558,
+        "start_reachable": false,
+        "start_reach_satisfied": true,
+        "start_direction_aligned": true,
+        "start_radius_satisfied": true,
+        "start_max_radius_satisfied": true,
+        "preferred_goal_direction": null,
+        "prefer_target_reachable": false,
+        "minimum_goal_radius": 0.8,
+        "minimum_goal_radius_override": null,
+        "maximum_goal_radius": null,
+        "maximum_goal_radius_override": null,
+        "require_goal_direction_aligned": false,
+        "allow_unreachable_goal_fallback": true,
+        "skip_if_already_satisfied": true,
+        "status": "skipped_already_reachable",
+        "goal_pose_2d": [2.484256, 11.565448, 0.581324],
+        "sampled_goal_radius": 1.155558,
+        "path_points": 0,
+        "path_length": 0.0,
+        "waypoints": 0,
+        "end_base_pos": [2.412997, 11.611697, 0.001386],
+        "end_base_target_xy_distance": 1.192254,
+        "end_reachable": false,
+        "end_direction_aligned": true,
+        "navigation_hand_action_mode": "pinned_arm_gripper_no_op"
+      }
+    },
+    {
+      "plan": "place_inside(ashcan.n.01_1)",
+      "primitive_type": "starter",
+      "primitive_name": "PLACE_INSIDE",
+      "status": "succeeded",
+      "low_level_steps": 1,
+      "start_state": {
+        "base_position": [2.412999, 11.611698, 0.001386],
+        "base_orientation": [-0.007711, 0.011147, -0.411856, -0.911148],
+        "eef_position": [2.827904, 11.886337, 1.069362],
+        "object_in_hand": "half_banana_xytkre_0"
+      },
+      "end_state": {
+        "base_position": [2.412998, 11.611698, 0.001386],
+        "base_orientation": [-0.007711, 0.011148, -0.411856, -0.911148],
+        "eef_position": [2.827876, 11.886401, 1.069353],
+        "object_in_hand": null
+      },
+      "base_displacement": 1e-6,
+      "eef_displacement": 7e-5,
+      "action_groups": {
+        "base": {
+          "active_steps": 0,
+          "max_abs_command": 0.0
+        },
+        "camera": {
+          "active_steps": 1,
+          "max_abs_command": 0.4598734974861145
+        },
+        "arm_0": {
+          "active_steps": 1,
+          "max_abs_command": 2.144740104675293
+        },
+        "gripper_0": {
+          "active_steps": 1,
+          "max_abs_command": 0.04999999701976776
+        }
+      },
+      "navigation": {
+        "target_object": "trash_can_gvnfgj_0",
+        "target_pos": [3.449997, 12.200001, 0.221755],
+        "start_base_pos": [2.484256, 11.565448, 0.001281],
+        "start_base_target_xy_distance": 1.155558,
+        "start_reachable": false,
+        "start_reach_satisfied": true,
+        "start_direction_aligned": true,
+        "start_radius_satisfied": true,
+        "start_max_radius_satisfied": true,
+        "preferred_goal_direction": null,
+        "prefer_target_reachable": false,
+        "minimum_goal_radius": 0.8,
+        "minimum_goal_radius_override": null,
+        "maximum_goal_radius": null,
+        "maximum_goal_radius_override": null,
+        "require_goal_direction_aligned": false,
+        "allow_unreachable_goal_fallback": true,
+        "skip_if_already_satisfied": true,
+        "status": "skipped_already_reachable",
+        "goal_pose_2d": [2.484256, 11.565448, 0.581324],
+        "sampled_goal_radius": 1.155558,
+        "path_points": 0,
+        "path_length": 0.0,
+        "waypoints": 0,
+        "end_base_pos": [2.412997, 11.611697, 0.001386],
+        "end_base_target_xy_distance": 1.192254,
+        "end_reachable": false,
+        "end_direction_aligned": true,
+        "navigation_hand_action_mode": "pinned_arm_gripper_no_op"
+      }
+    },
+    {
+      "plan": "navigate_to(cabinet.n.01_2)",
+      "primitive_type": "starter",
+      "primitive_name": "NAVIGATE_TO",
+      "status": "succeeded",
+      "low_level_steps": 1314,
+      "start_state": {
+        "base_position": [2.412998, 11.611698, 0.001386],
+        "base_orientation": [-0.007711, 0.011148, -0.411856, -0.911148],
+        "eef_position": [2.827876, 11.886401, 1.069353],
+        "object_in_hand": null
+      },
+      "end_state": {
+        "base_position": [4.964023, 11.256297, 0.000997],
+        "base_orientation": [0.012196, 0.011043, 0.554088, -0.832296],
+        "eef_position": [5.040725, 10.773834, 1.073061],
+        "object_in_hand": null
+      },
+      "base_displacement": 2.575663,
+      "eef_displacement": 2.476796,
+      "action_groups": {
+        "base": {
+          "active_steps": 1145,
+          "max_abs_command": 0.20000000298023224
+        },
+        "camera": {
+          "active_steps": 1314,
+          "max_abs_command": 0.46993309259414673
+        },
+        "arm_0": {
+          "active_steps": 1314,
+          "max_abs_command": 2.144740104675293
+        },
+        "gripper_0": {
+          "active_steps": 1314,
+          "max_abs_command": 0.05000000074505806
+        }
+      },
+      "navigation": {
+        "target_object": "top_cabinet_tactqn_0",
+        "target_pos": [5.318837, 10.403235, 0.549614],
+        "start_base_pos": [2.412998, 11.611698, 0.001386],
+        "start_base_target_xy_distance": 3.147107,
+        "preferred_goal_direction": [0.0, 1.0],
+        "navigation_reason": "explicit_open_pose_stance_preview",
+        "sampler": "omnigibson_native_starter",
+        "status": "completed_native_stance",
+        "goal_pose_2d": [4.983418, 11.288455, 5.074584],
+        "sample_source": "new_native_sample",
+        "native_sample_attempt": 1,
+        "native_plan_waypoints_2d": [
+          [2.412998, 11.611698, 0.848998],
+          [4.983418, 11.288455, -1.208601]
+        ],
+        "native_plan_steps": 2,
+        "native_planning_filter_errors": [],
+        "navigation_hand_action_mode": "pinned_arm_gripper_no_op",
+        "densified_plan_waypoints_2d": [
+          [2.584359, 11.590149, 0.711825],
+          [2.75572, 11.568599, 0.574652],
+          [2.927082, 11.54705, 0.437478],
+          [3.098443, 11.5255, 0.300305],
+          [3.269804, 11.50395, 0.163132],
+          [3.441166, 11.482401, 0.025958],
+          [3.612527, 11.460852, -0.111215],
+          [3.783889, 11.439301, -0.248388],
+          [3.95525, 11.417752, -0.385562],
+          [4.126611, 11.396203, -0.522735],
+          [4.297973, 11.374653, -0.659908],
+          [4.469334, 11.353104, -0.797081],
+          [4.640696, 11.331554, -0.934255],
+          [4.812057, 11.310004, -1.071428],
+          [4.983418, 11.288455, -1.208601]
+        ],
+        "densified_plan_steps": 15,
+        "executed_waypoints_2d": [
+          [2.584359, 11.590149, 0.711825],
+          [2.75572, 11.568599, 0.574652],
+          [2.927082, 11.54705, 0.437478],
+          [3.098443, 11.5255, 0.300305],
+          [3.269804, 11.50395, 0.163132],
+          [3.441166, 11.482401, 0.025958],
+          [3.612527, 11.460852, -0.111215],
+          [3.783889, 11.439301, -0.248388],
+          [3.95525, 11.417752, -0.385562],
+          [4.126611, 11.396203, -0.522735],
+          [4.297973, 11.374653, -0.659908],
+          [4.469334, 11.353104, -0.797081],
+          [4.640696, 11.331554, -0.934255],
+          [4.812057, 11.310004, -1.071428],
+          [4.983418, 11.288455, -1.208601]
+        ],
+        "current_waypoint_pose_2d": [4.983418, 11.288455, -1.208601],
+        "current_waypoint_index": 14,
+        "current_waypoint_is_final": true,
+        "end_base_pos": [4.964017, 11.256311, 0.000996],
+        "end_base_target_xy_distance": 0.923924,
+        "end_reachable": true
+      }
+    },
+    {
+      "plan": "open(cabinet.n.01_2)",
+      "primitive_type": "starter",
+      "primitive_name": "OPEN",
+      "status": "failed",
+      "low_level_steps": 500,
+      "start_state": {
+        "base_position": [4.964023, 11.256297, 0.000997],
+        "base_orientation": [0.012196, 0.011043, 0.554088, -0.832296],
+        "eef_position": [5.040725, 10.773834, 1.073061],
+        "object_in_hand": null
+      },
+      "end_state": {
+        "base_position": [5.005142, 11.218733, 0.007455],
+        "base_orientation": [-0.012174, 0.013933, 0.999099, 0.038204],
+        "eef_position": [4.483999, 11.411399, 1.043849],
+        "object_in_hand": null
+      },
+      "base_displacement": 0.056067,
+      "eef_displacement": 0.846928,
+      "action_groups": {
+        "base": {
+          "active_steps": 500,
+          "max_abs_command": 0.10000000149011612
+        },
+        "camera": {
+          "active_steps": 500,
+          "max_abs_command": 0.47040021419525146
+        },
+        "arm_0": {
+          "active_steps": 500,
+          "max_abs_command": 2.144740104675293
+        },
+        "gripper_0": {
+          "active_steps": 500,
+          "max_abs_command": 0.05000000074505806
+        }
+      },
+      "navigation": {
+        "target_object": "top_cabinet_tactqn_0",
+        "target_pos": [5.318837, 10.403235, 0.549614],
+        "start_base_pos": [4.964023, 11.256297, 0.000997],
+        "start_base_target_xy_distance": 0.923909,
+        "preferred_goal_direction": [0.0, 1.0],
+        "navigation_reason": "explicit_open_pose_stance_preview",
+        "sampler": "omnigibson_native_starter",
+        "status": "failed",
+        "goal_pose_2d": [4.983418, 11.288455, 5.074584],
+        "sample_source": "saved_native_sample",
+        "native_plan_waypoints_2d": [
+          [4.964023, 11.256297, -1.174585],
+          [4.335258, 11.364848, 2.970637],
+          [3.959388, 11.219404, -1.604446]
+        ],
+        "native_plan_steps": 3,
+        "native_planning_filter_errors": [],
+        "navigation_hand_action_mode": "pinned_arm_gripper_no_op",
+        "densified_plan_waypoints_2d": [
+          [4.806831, 11.283435, -1.709076],
+          [4.64964, 11.310573, -2.243567],
+          [4.492449, 11.33771, -2.778058],
+          [4.335258, 11.364848, 2.970637],
+          [4.209968, 11.316367, -2.743181],
+          [4.084678, 11.267885, -2.173813],
+          [3.959388, 11.219404, -1.604446]
+        ],
+        "densified_plan_steps": 7,
+        "executed_waypoints_2d": [[4.806831, 11.283435, -1.709076]],
+        "current_waypoint_pose_2d": [4.806831, 11.283435, -1.709076],
+        "current_waypoint_index": 0,
+        "current_waypoint_is_final": false,
+        "error_type": "ActionPrimitiveError",
+        "error_message": "EXECUTION_ERROR: Could not rotate in place to the desired orientation. Additional info: {'target pose': (tensor([4.8068e+00, 1.1283e+01, 1.0000e-02]), tensor([0.0000, 0.0000, 0.9963, 0.0854]))}"
+      },
+      "error_type": "ActionPrimitiveError",
+      "error_message": "EXECUTION_ERROR: Could not rotate in place to the desired orientation. Additional info: {'target pose': (tensor([4.8068e+00, 1.1283e+01, 1.0000e-02]), tensor([0.0000, 0.0000, 0.9963, 0.0854]))}"
+    }
+  ]
+}

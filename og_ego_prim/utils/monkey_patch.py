@@ -1,11 +1,17 @@
 import sys
 
 import omnigibson as og
+from omnigibson.prims.cloth_prim import ClothPrim
 from omnigibson.systems.micro_particle_system import PhysxParticleInstancer
+from omnigibson.transition_rules import RecipeRule, TransitionResults
 from omnigibson.utils.physx_utils import create_physx_particleset_pointinstancer
 from omnigibson.utils.python_utils import torch_delete
 from omnigibson.utils.usd_utils import absolute_prim_path_to_scene_relative
 import torch
+
+
+_ORIGINAL_CLOTH_PRIM_DUMP_STATE = ClothPrim._dump_state
+_ORIGINAL_RECIPE_RULE_EXECUTE_RECIPE = RecipeRule._execute_recipe
 
 
 # fix bug, skip converting List[str] to tensor
@@ -158,6 +164,18 @@ def patched__MacroVisualParticleSystem__load_state(self, state):
     super(og.systems.macro_particle_system.MacroVisualParticleSystem, self)._load_state(state=state)
 
 
+def patched__RecipeRule__execute_recipe(self, container, recipe, container_info):
+    output_systems = recipe.get("output_systems", ())
+    if any(name not in self.scene.available_systems for name in output_systems):
+        return TransitionResults(add=[], remove=[])
+    return _ORIGINAL_RECIPE_RULE_EXECUTE_RECIPE(
+        self,
+        container,
+        recipe,
+        container_info,
+    )
+
+
 # fix bug, all(conditions) -> any(valid_conditions) & all(limit_conditions) & all(nonempty_conditions)
 def patched__ParticleModifier__check_conditions_for_system(self, system_name):
     if not self.supports_system(system_name):
@@ -180,12 +198,40 @@ def patched__ParticleModifier__check_conditions_for_system(self, system_name):
     return valid_check & limit_check & nonempty_check
 
 
+def patched__ClothPrim__dump_state(self):
+    state = _ORIGINAL_CLOTH_PRIM_DUMP_STATE(self)
+    actual_n_particles = len(state["particle_positions"])
+    state["n_particles"] = actual_n_particles
+    velocities = state["particle_velocities"]
+    missing_velocities = actual_n_particles - len(velocities)
+    if missing_velocities > 0:
+        if isinstance(velocities, torch.Tensor):
+            padding = torch.zeros(
+                (missing_velocities, *velocities.shape[1:]),
+                dtype=velocities.dtype,
+                device=velocities.device,
+            )
+            velocities = torch.cat((velocities, padding), dim=0)
+        else:
+            velocity_width = len(velocities[0]) if velocities else 3
+            velocities = [
+                *velocities,
+                *([[0.0] * velocity_width] * missing_velocities),
+            ]
+    elif missing_velocities < 0:
+        velocities = velocities[:actual_n_particles]
+    state["particle_velocities"] = velocities
+    return state
+
+
 def add_monkey_patch():
     og.utils.python_utils.recursively_convert_to_torch = patched__python_utils__recursively_convert_to_torch
     og.object_states.particle_modifier.ParticleModifier.check_conditions_for_system = patched__ParticleModifier__check_conditions_for_system
+    RecipeRule._execute_recipe = patched__RecipeRule__execute_recipe
     og.systems.micro_particle_system.MicroPhysicalParticleSystem.particle_instancer_name_to_idn = patched__MicroPhysicalParticleSystem__particle_instancer_name_to_idn
     og.systems.micro_particle_system.MicroPhysicalParticleSystem.generate_particle_instancer = patched__MicroPhysicalParticleSystem__generate_particle_instancer
     og.systems.macro_particle_system.MacroVisualParticleSystem._load_state = patched__MacroVisualParticleSystem__load_state
+    ClothPrim._dump_state = patched__ClothPrim__dump_state
     
     patched_funcs = [var for var in globals() if var.startswith('patched__')]
     print(f'patched omnigibson: {patched_funcs}')

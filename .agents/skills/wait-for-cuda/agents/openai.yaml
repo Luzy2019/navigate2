@@ -1,0 +1,4 @@
+interface:
+  display_name: "Wait for CUDA"
+  short_description: "Retry tasks when CUDA is temporarily unavailable"
+  default_prompt: "Use $wait-for-cuda to keep this task running through temporary CUDA unavailability."

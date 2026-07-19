@@ -1,0 +1,44 @@
+(define (problem lifelong_crossroom__pomaria__clam_sponge_ready_bowl_v1-0)
+    (:domain omnigibson)
+
+    (:objects
+        floor.n.01_1 floor.n.01_2 floor.n.01_3 - floor.n.01
+        door.n.01_1 door.n.01_2 - door.n.01
+        clam.n.03_1 clam.n.03_2 - clam.n.03
+        sand.n.04_1 - sand.n.04
+        compost_bin.n.01_1 compost_bin.n.01_2 - compost_bin.n.01
+        bowl.n.01_1 bowl.n.01_2 - bowl.n.01
+        sponge.n.01_1 sponge.n.01_2 - sponge.n.01
+        countertop.n.01_1 - countertop.n.01
+        table.n.02_1 - table.n.02
+        shelf.n.01_1 - shelf.n.01
+        washer.n.03_1 - washer.n.03
+        clothes_dryer.n.01_1 - clothes_dryer.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom floor.n.01_1 kitchen_0)
+        (inroom floor.n.01_2 corridor_0)
+        (inroom floor.n.01_3 living_room_0)
+        (inroom door.n.01_1 kitchen_0)
+        (inroom door.n.01_2 corridor_0)
+        (ontop clam.n.03_1 countertop.n.01_1)
+        (ontop compost_bin.n.01_1 floor.n.01_2)
+        (ontop clam.n.03_2 countertop.n.01_1)
+        (ontop bowl.n.01_1 table.n.02_1)
+        (ontop sponge.n.01_1 clothes_dryer.n.01_1)
+        (ontop bowl.n.01_2 table.n.02_1)
+        (ontop compost_bin.n.01_2 floor.n.01_3)
+        (ontop sponge.n.01_2 clothes_dryer.n.01_1)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (not (covered clam.n.03_1 sand.n.04_1))
+            (ontop compost_bin.n.01_1 floor.n.01_2)
+            (ontop clam.n.03_1 bowl.n.01_2)
+        )
+    )
+)

@@ -1,0 +1,50 @@
+(define (problem lifelong_crossroom__rs__brass_box_low_shelf_v1-0)
+    (:domain omnigibson)
+
+    (:objects
+        floor.n.01_1 floor.n.01_2 floor.n.01_3 - floor.n.01
+        door.n.01_1 door.n.01_2 - door.n.01
+        brass.n.02_1 brass.n.02_2 - brass.n.02
+        polish.n.03_1 - polish.n.03
+        rag.n.01_1 - rag.n.01
+        bucket.n.01_1 - bucket.n.01
+        tupperware.n.01_1 tupperware.n.01_2 - tupperware.n.01
+        bottom_cabinet.n.01_1 - bottom_cabinet.n.01
+        compost_bin.n.01_1 - compost_bin.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom floor.n.01_1 living_room_0)
+        (inroom floor.n.01_2 bedroom_0)
+        (inroom floor.n.01_3 entryway_0)
+        (inroom door.n.01_1 bedroom_0)
+        (inroom door.n.01_2 entryway_0)
+        (ontop brass.n.02_1 floor.n.01_1)
+        (ontop rag.n.01_1 floor.n.01_3)
+        (ontop bucket.n.01_1 floor.n.01_3)
+        (ontop tupperware.n.01_1 floor.n.01_1)
+        (inroom bottom_cabinet.n.01_1 entryway_0)
+        (ontop compost_bin.n.01_1 floor.n.01_3)
+        (ontop tupperware.n.01_2 floor.n.01_1)
+        (ontop brass.n.02_2 tupperware.n.01_1)
+        (covered floor.n.01_1 polish.n.03_1)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (covered brass.n.02_1 polish.n.03_1)
+            (ontop tupperware.n.01_1 floor.n.01_3)
+            (ontop tupperware.n.01_2 floor.n.01_3)
+            (inside rag.n.01_1 bucket.n.01_1)
+            (or (nextto tupperware.n.01_1 bottom_cabinet.n.01_1) (nextto tupperware.n.01_2 bottom_cabinet.n.01_1))
+            (inside tupperware.n.01_1 compost_bin.n.01_1)
+            (not (ontop tupperware.n.01_1 bottom_cabinet.n.01_1))
+            (not (nextto tupperware.n.01_1 bottom_cabinet.n.01_1))
+            (nextto tupperware.n.01_2 bottom_cabinet.n.01_1)
+            (not (open door.n.01_1))
+            (not (open door.n.01_2))
+        )
+    )
+)

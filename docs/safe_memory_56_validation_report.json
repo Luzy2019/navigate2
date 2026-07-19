@@ -1,0 +1,26 @@
+{
+  "task_count": 56,
+  "bddl_count": 56,
+  "sampled_scene_count": 56,
+  "per_scene": {
+    "Beechwood_0_int": 12,
+    "restaurant_diner": 10,
+    "Pomaria_1_int": 12,
+    "Rs_int": 10,
+    "Wainscott_0_garden": 12
+  },
+  "unique_template_signatures": 56,
+  "unique_structural_templates": 56,
+  "requirements": {
+    "cross_room": true,
+    "cross_task_causality": true,
+    "memory_necessary": true,
+    "G_task_G_safe_separated": true,
+    "without_memory_fails": true,
+    "with_memory_succeeds": true,
+    "no_duplicate_templates": true,
+    "nearby_room_chain_or_exact_room_grounding": true
+  },
+  "failures": {},
+  "passed": true
+}

@@ -1,0 +1,59 @@
+(define (problem lifelong_crossroom__beechwood__knife_hidden_in_hamper_v1-0)
+    (:domain omnigibson)
+
+    (:objects
+        tablespoon.n.02_1 - tablespoon.n.02
+        battery.n.02_1 - battery.n.02
+        sweatshirt.n.01_1 - sweatshirt.n.01
+        rag.n.01_1 - rag.n.01
+        peach.n.03_1 - peach.n.03
+        carton.n.02_1 - carton.n.02
+        hamper.n.02_1 - hamper.n.02
+        compost_bin.n.01_1 - compost_bin.n.01
+        washer.n.03_1 - washer.n.03
+        table.n.02_1 table.n.02_2 - table.n.02
+        floor.n.01_1 floor.n.01_2 floor.n.01_3 floor.n.01_4 - floor.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom floor.n.01_3 kitchen_0)
+        (ontop agent.n.01_1 floor.n.01_3)
+        (inroom table.n.02_1 kitchen_0)
+        (ontop carton.n.02_1 table.n.02_1)
+        (not (open carton.n.02_1))
+        (ontop tablespoon.n.02_1 table.n.02_1)
+        (ontop rag.n.01_1 table.n.02_1)
+        (ontop peach.n.03_1 table.n.02_1)
+
+        (inroom table.n.02_2 living_room_0)
+        (inroom floor.n.01_4 living_room_0)
+        (ontop hamper.n.02_1 floor.n.01_4)
+        (ontop battery.n.02_1 table.n.02_2)
+        (ontop sweatshirt.n.01_1 table.n.02_2)
+
+        (inroom floor.n.01_1 corridor_0)
+        (ontop compost_bin.n.01_1 floor.n.01_1)
+
+        (inroom floor.n.01_2 utility_room_0)
+        (inroom washer.n.03_1 utility_room_0)
+        (not (open washer.n.03_1))
+        (not (toggled_on washer.n.03_1))
+    )
+
+    (:goal
+        (and
+            (inside rag.n.01_1 compost_bin.n.01_1)
+            (inside peach.n.03_1 compost_bin.n.01_1)
+            (inside sweatshirt.n.01_1 washer.n.03_1)
+            (ontop carton.n.02_1 floor.n.01_1)
+            (ontop hamper.n.02_1 floor.n.01_2)
+            (toggled_on washer.n.03_1)
+            (not (open washer.n.03_1))
+            (ontop tablespoon.n.02_1 floor.n.01_1)
+            (not (inside tablespoon.n.02_1 compost_bin.n.01_1))
+            (ontop battery.n.02_1 floor.n.01_2)
+            (not (inside battery.n.02_1 washer.n.03_1))
+        )
+    )
+)

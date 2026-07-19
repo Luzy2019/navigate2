@@ -1,0 +1,180 @@
+runtime:
+  headless: true
+  num_gpus: 1
+  output_root: outputs
+  timestamp_output: true
+  show_robot: false
+
+scene_graph:
+  backend: samjam_unigoal
+  step_interval: 30
+  update_every: 1
+  history_interval: 30
+  image_size: 512x512
+  sensor_name: null
+  hfov: 90.0
+  output_debug_matching: true
+  output_dir: null
+  debug_log_path: null
+  model_dir: null
+  device: null
+  suppress_vendor_output: true
+  backend_options:
+    unigoal_map_resolution: 5
+    unigoal_map_size_cm: 2400
+    samjam_unigoal_spatial_threshold: 0.01
+    samjam_unigoal_mask_confidence: 0.0
+    samjam_unigoal_min_detections: 1
+    samjam_unigoal_name_switch_margin: 1.25
+    scene_graph_debug_max_items: 40
+    samjam_match_vlm_coverage: 0.5
+    samjam_match_mask_coverage: 0.35
+    samjam_match_coverage_max_area_ratio: 20.0
+    samjam_match_center_min_coverage: 0.2
+    samjam_match_center_max_area_ratio: 12.0
+    samjam_allow_human_hands: false
+    samjam_vlm_enabled: true
+    samjam_vlm_image_detail: high
+    samjam_vlm_timeout: 120
+    samjam_points_per_side: 32
+    samjam_points_per_batch: 64
+    samjam_stability_thresh: 0.8
+    samjam_crop_n_layers: 1
+    samjam_max_masks: 40
+    samjam_match_iou: 0.25
+    samjam_native_match_iou: 0.03
+    samjam_overlap_iou_threshold: 0.05
+    samjam_enable_overlap_relations: false
+    samjam_keep_unmatched_masks: false
+    samjam_unigoal_require_match_metadata: true
+    samjam_unigoal_max_mask_area_ratio: 0.80
+    samjam_unigoal_max_large_coarse_mask_area_ratio: 0.65
+    samjam_unigoal_max_bbox_area_ratio: 0.90
+    samjam_unigoal_min_valid_depth_ratio: 0.03
+    lifelong_support_surface_xy_margin: 0.60
+    lifelong_on_gap_thresh: 0.18
+    lifelong_xy_contact_overlap_thresh: 0.10
+    lifelong_support_map_dist_thresh: 18.0
+    lifelong_support_fallback_map_dist_thresh: 65.0
+    lifelong_in_gap_thresh: 0.10
+    lifelong_xy_contain_overlap_thresh: 0.55
+    lifelong_attach_gap_thresh: 0.14
+    lifelong_above_height_thresh: 0.30
+    lifelong_coarse_near_dist_min: 0.25
+    lifelong_coarse_near_dist_cap: 0.75
+    lifelong_coarse_near_room_fraction: 0.125
+    lifelong_fine_near_dist_thresh: 0.22
+    scene_graph_bev_font_scale: null
+    scene_graph_bev_max_side: 3840
+    scene_graph_bev_panel_width: 520
+    scene_graph_bev_max_scale: 32.0
+    scene_graph_task_scene_margin_m: 0.8
+    scene_graph_task_scene_pixel_padding: 8
+    scene_graph_task_scene_bev_max_side: 4096
+    scene_graph_task_scene_bev_max_scale: 48.0
+    scene_graph_bev_video_fps: 2.0
+    scene_graph_llm_model: gpt-4o-mini
+    scene_graph_vlm_model: gpt-4o-mini
+    unigoal_node_space: null
+    unigoal_extra_node_space: null
+    unigoal_grounded_sam_device: null
+    unigoal_device: null
+    unigoal_grounded_sam_relation_backend: geometry
+    unigoal_relation_backend: geometry
+    unigoal_relation_node_max_segment_age: 0
+
+navigation:
+  linear_command: 0.5
+  angular_command: 0.5
+  stuck_window: 60
+  stuck_angle_tolerance: 0.25
+  stuck_waypoint_tolerance: 0.25
+  stuck_final_waypoint_tolerance: 0.30
+  stuck_angle_progress_threshold: 0.005
+  final_approach_distance: 0.35
+  container_min_goal_radius: 0.80
+  cabinet_min_goal_radius: 0.70
+  tactqn_min_goal_radius: 0.45
+  goal_clearance_radius: 0.25
+  trav_map_robot_radius_scale: 1.0
+  doorway_clearance_radius_scale: 1.0
+  clearance_aware_path: true
+  clearance_aware_desired_clearance: 0.30
+  clearance_aware_weight: 1.25
+  clearance_aware_simplify: true
+  rotate_when_already_in_navigation_region: true
+  already_region_yaw_tolerance: 0.85
+  max_floor_height_delta: 0.35
+  max_ik_goal_checks: 8
+  verbose: false
+
+starter_primitives:
+  verbose: false
+  symbolic_manipulation: true
+  symbolic_grasp: true
+  symbolic_place: true
+  symbolic_open_close: true
+  symbolic_release: true
+  tactqn_open_goal_radius: 0.45
+  symbolic_grasp_max_goal_radius: 0.85
+  symbolic_grasp_max_yaw_error: 0.85
+  symbolic_carry_radial_clearance: 0.08
+  symbolic_carry_vertical_clearance: 0.04
+  deferred_coverage_max_samples: 200
+  tactqn_symbolic_open_close_fallback: true
+  fixed_navigation_arm_pose: true
+  fixed_navigation_arm_pose_name: vertical
+  native_stance_sample_attempts: 1
+  native_waypoint_max_linear_step: 0.18
+
+artifacts:
+  output_dir: null
+  save_video: true
+  video_fps: 30
+  video_capture_interval: 30
+  output_size: 512x512
+  save_step_images: true
+  save_surrounding_observations: false
+  save_topdown_scene: false
+  topdown_world_bounds: null
+  topdown_output_size: 1920x1080
+  save_sampled_scene: false
+
+memory:
+  enabled: true
+  max_actions: 50
+  max_states_per_object: 20
+  retriever: exact
+  consolidation: deduplicate
+  options: {}
+
+object_model:
+  max_manipulations: 20
+  lifecycle_policy: rules
+  lifecycle_rules:
+    - rule_id: placed_in_disposal_container
+      priority: 100
+      conditions:
+        action.name: PLACE_INSIDE
+        target.capabilities: disposal_container
+      transition:
+        available: false
+        clear_location: true
+        state_updates:
+          actionable: false
+        directives:
+          - directive_type: forget_entity
+  options: {}
+
+scheduler:
+  enabled: true
+  clock: simulator_step
+  expose_cross_subtask_timers: true
+  process_definitions: []
+  handler_options: {}
+
+prompting:
+  builder: semantic
+  sections: [task, scene, objects, memory, timers, action]
+  max_recalled_items: 20
+  options: {}

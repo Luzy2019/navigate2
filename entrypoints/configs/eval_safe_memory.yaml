@@ -1,0 +1,32 @@
+includes:
+  - common.yaml
+  - task.yaml
+
+task:
+  primitive_type: auto
+  prompt_setting: v1
+
+scene_graph:
+  backend: disabled
+  step_interval: 0
+
+navigation:
+  already_reachable_max_goal_radius: 1.30
+
+artifacts:
+  save_video: true
+  video_capture_interval: 30
+  output_size: 512x512
+  sensor_image_size: 1024x1024
+  topdown_output_size: 1920x1080
+  video_fps: 10
+  save_surrounding_observations: true
+
+safe_memory:
+  memory_modes:
+    - with_memory
+    - without_memory
+  timeout_seconds: 7200
+  resume: false
+  use_example_planning: false
+  actions_file: null

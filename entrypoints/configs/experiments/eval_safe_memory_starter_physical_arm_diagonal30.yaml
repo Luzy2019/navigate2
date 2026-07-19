@@ -1,0 +1,7 @@
+includes:
+  - ../eval_safe_memory_starter_physical.yaml
+
+# Match Fetch's native fetch_primitives.yaml navigation posture while retaining
+# the physical-starter arm hold behavior. No navigation geometry is changed.
+starter_primitives:
+  fixed_navigation_arm_pose_name: diagonal30

@@ -1,0 +1,32 @@
+includes:
+  - eval_safe_memory_starter_physical.yaml
+
+# The initial robot pose now faces the first office-corridor door.  Keep a
+# modest tolerance for small contact-induced yaw stalls without accepting the
+# previous ~85-degree heading error as a valid arrival.
+navigation:
+  stuck_angle_tolerance: 0.45
+  # Doorway tracking repeatedly stops 0.47-0.48 m from an intermediate A*
+  # waypoint even though the base stays level and the next cell is clear.
+  # Accept that bounded doorway offset without simplifying away the corner.
+  stuck_waypoint_tolerance: 0.50
+  stuck_final_waypoint_tolerance: 0.50
+  verbose: true
+  # Preserve the raw A* corner points through the narrow office-to-utility
+  # passage. Simplification previously collapsed them into an infeasible turn.
+  clearance_aware_simplify: false
+
+# Forty native stance samples made each door attempt spend more than six
+# minutes in OMPL without producing an action result.  Keep multiple samples
+# for narrow Beechwood doorways, but bound the focused/full runtime.
+starter_primitives:
+  native_stance_sample_attempts: 8
+  fixed_navigation_arm_pose_name: tucked_high
+  # The old dryer screen and the washer-staged screen were observed at
+  # 1.23-1.37 m from stable task poses. Keep this task-local grasp envelope;
+  # the shared physical-starter baseline remains unchanged.
+  symbolic_grasp_max_goal_radius: 1.4
+  # The washer-side target has no full-clearance stance within 1.20 m; the
+  # nearest reachable cell is about 1.25 m away. Keep explicit pickup
+  # navigation aligned with the symbolic grasp-ready envelope (1.20 + 0.15 m).
+  explicit_grasp_navigation_max_goal_radius: 1.35

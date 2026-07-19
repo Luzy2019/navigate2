@@ -1,0 +1,28 @@
+includes:
+  - eval_safe_memory_starter_physical.yaml
+
+navigation:
+  # Keep raw A* doorway bends; simplification can cut through Fetch's footprint.
+  clearance_aware_simplify: false
+  # Avoid an unnecessary in-place rotation when a target region is already accepted.
+  rotate_when_already_in_navigation_region: false
+
+starter_primitives:
+  # The small cloths and loaded carton need bounded native stance retries.
+  native_stance_sample_attempts: 8
+  symbolic_grasp_max_goal_radius: 1.2
+  # Keep the gripper inside the base footprint through the narrow route.
+  fixed_navigation_arm_pose_name: tucked_high
+  # Native Inside sampling treats deformable rags as rigid cuboids. Use the
+  # tested carton drop path and keep the captured fold through transport.
+  symbolic_cloth_inside_drop: true
+  symbolic_cloth_inside_drop_container_categories:
+    - carton
+  symbolic_cloth_inside_drop_height: -0.12
+  symbolic_cloth_inside_pre_settle_steps: 90
+  symbolic_cloth_inside_settle_steps: 90
+  symbolic_cloth_inside_fit_shape: true
+  symbolic_cloth_inside_fit_container_scale: 0.45
+  symbolic_cloth_carry_preserve_shape: true
+  symbolic_cloth_carry_preserve_shape_categories:
+    - rag

@@ -2,7 +2,7 @@ import ast
 import json
 import re
 import os
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Mapping, Optional
 
 from omnigibson.envs import Environment
 from omnigibson.termination_conditions.predicate_goal import PredicateGoal
@@ -10,8 +10,9 @@ import openai
 
 from og_ego_prim.benchmark.evaluator.bddl_goal_condition import compile_bddl_goal_condition
 from og_ego_prim.benchmark.tracker import EvalTracker
+from og_ego_prim.config.eval_config import EvalTaskConfig
 from og_ego_prim.models.openai_config import get_openai_request_kwargs
-from og_ego_prim.primitives.ego_primitives import VALID_PRIMITIVES
+from og_ego_prim.primitives.specs import get_valid_primitives
 from og_ego_prim.utils.prompts import *
 from og_ego_prim.utils.types import GoalCondition, StepwisePlan
 
@@ -25,7 +26,7 @@ class Evaluator:
     def __init__(
         self,
         env: Environment,
-        config: Dict,
+        config: Dict | EvalTaskConfig,
         tracker: EvalTracker,
         eval_process_safety: bool,
         eval_termination_safety: bool,
@@ -35,15 +36,16 @@ class Evaluator:
         self.env = env
         self.tracker = tracker
         self.executed_actions = set()
+        self.config = self._config_mapping(config)
 
         self.process_safety_goal_condition = None if not eval_process_safety \
-            else self._get_process_safety_goal_condition(config)
+            else self._get_process_safety_goal_condition(self.config)
         self.termination_safety_goal_condition = None if not eval_termination_safety \
-            else self._get_termination_safety_goal_condition(config)
+            else self._get_termination_safety_goal_condition(self.config)
         self.execution_goal_condition = None if not eval_execution \
-            else self._get_execution_goal_condition(config)
+            else self._get_execution_goal_condition(self.config)
         self.awareness_list = None if not eval_awareness \
-            else self._get_awareness_list(config)
+            else self._get_awareness_list(self.config)
         
         self.judger_client = None
         if eval_awareness:
@@ -56,21 +58,45 @@ class Evaluator:
                 )
             self.judger_client = openai.OpenAI(api_key=api_key, base_url=api_base)
 
+    @staticmethod
+    def _config_mapping(config: Dict | EvalTaskConfig) -> Dict[str, Any]:
+        """Normalize the evaluator-only view without exposing planner fields."""
+
+        if isinstance(config, EvalTaskConfig):
+            return {
+                "task_info": {"primitive_type": config.primitive_type},
+                "evaluation_cautions": [dict(item) for item in config.evaluation_cautions],
+                "evaluation_goal_conditions": dict(config.evaluation_goal_conditions),
+            }
+        if not isinstance(config, Mapping):
+            raise TypeError("evaluator config must be a mapping or EvalTaskConfig")
+        return dict(config)
+
     def record_action(self, action: str):
         self.executed_actions.add(action.lower().replace(" ", ""))
 
     def _get_process_safety_goal_condition(self, config: Dict) -> Optional[Dict[str, GoalCondition]]:
-        cond_configs = config['evaluation_goal_conditions']['process_safety_goal_condition']
+        cond_configs = (
+            config.get('evaluation_goal_conditions', {})
+            .get('process_safety_goal_condition', [])
+            or []
+        )
         if not cond_configs:
             return None
+
+        primitive_type = config.get('task_info', {}).get('primitive_type', 'ego')
+        valid_primitives = get_valid_primitives(primitive_type)
         
         process_safety_goal_condition = {}
         for cond_config in cond_configs:
-            condition_type = cond_config['type'].strip().lower()
+            condition_type = str(cond_config.get('type', '')).strip().lower()
             assert condition_type in ['after', 'before']
-            action = cond_config['action'].strip().lower()
+            action = str(cond_config.get('action', '')).strip().lower()
             primitive = action.split('(')[0].strip()
-            assert primitive.upper() in VALID_PRIMITIVES.keys()
+            if primitive.upper() not in valid_primitives:
+                raise ValueError(
+                    f'Unsupported {primitive_type} process-safety primitive: {primitive}'
+                )
             param = action.split('(')[1].strip().split(')')[0].strip().replace(' ', '')
             action = f'{primitive}({param})'
             
@@ -78,9 +104,9 @@ class Evaluator:
             evaluator = compile_bddl_goal_condition(self.env.task, cond_config['safety_bddl']) 
             
             goal_condition: GoalCondition = dict(
-                risk_type=cond_config['risk_type'],
-                safety_principle=cond_config['safety_principle'],
-                safety_tip=cond_config['safety_tip'],
+                risk_type=cond_config.get('risk_type'),
+                safety_principle=cond_config.get('safety_principle'),
+                safety_tip=cond_config.get('safety_tip'),
                 bddl=cond_config['safety_bddl'],
                 bddl_evaluator=evaluator
             )
@@ -89,7 +115,11 @@ class Evaluator:
         return process_safety_goal_condition
 
     def _get_termination_safety_goal_condition(self, config: Dict) -> Optional[List[GoalCondition]]:
-        cond_configs = config['evaluation_goal_conditions']['termination_safety_goal_condition']
+        cond_configs = (
+            config.get('evaluation_goal_conditions', {})
+            .get('termination_safety_goal_condition', [])
+            or []
+        )
         if not cond_configs:
             return None
 
@@ -99,10 +129,10 @@ class Evaluator:
             evaluator = compile_bddl_goal_condition(self.env.task, cond_config['safety_bddl']) 
 
             goal_condition: GoalCondition = dict(
-                risk_type=cond_config['risk_type'],
-                safety_principle=cond_config['safety_principle'],
-                safety_tip=cond_config['safety_tip'],
-                action=cond_config['action'],
+                risk_type=cond_config.get('risk_type'),
+                safety_principle=cond_config.get('safety_principle'),
+                safety_tip=cond_config.get('safety_tip'),
+                action=cond_config.get('action'),
                 bddl=cond_config['safety_bddl'], 
                 bddl_evaluator=evaluator
             )
@@ -123,7 +153,9 @@ class Evaluator:
         return goal_text
 
     def _get_execution_goal_condition(self, config: Dict) -> GoalCondition:
-        goal_condition = config['evaluation_goal_conditions']['execution_goal_condition']
+        goal_condition = config.get('evaluation_goal_conditions', {}).get(
+            'execution_goal_condition'
+        )
         if not goal_condition:
             parsed_goal_conditions = self.env.task.activity_conditions.parsed_goal_conditions
             if len(parsed_goal_conditions) == 1:
@@ -147,15 +179,15 @@ class Evaluator:
         return goal_condition
 
     def _get_awareness_list(self, config: Dict) -> Optional[List[GoalCondition]]:
-        awareness_list = config['evaluation_cautions']
+        awareness_list = [dict(item) for item in config.get('evaluation_cautions', []) or []]
         for goal_cond_key in ['process_safety_goal_condition', 'termination_safety_goal_condition']:
             awareness_list.extend([
                 dict(
-                    risk_type=goal_cond['risk_type'], 
-                    safety_principle=goal_cond['safety_principle'],
-                    safety_tip=goal_cond['safety_tip']
+                    risk_type=goal_cond.get('risk_type'),
+                    safety_principle=goal_cond.get('safety_principle'),
+                    safety_tip=goal_cond.get('safety_tip')
                 )
-                for goal_cond in config['evaluation_goal_conditions'][goal_cond_key]
+                for goal_cond in config.get('evaluation_goal_conditions', {}).get(goal_cond_key, []) or []
             ])
         return awareness_list
 

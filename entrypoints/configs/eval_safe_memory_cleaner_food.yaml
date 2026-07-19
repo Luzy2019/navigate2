@@ -1,0 +1,27 @@
+includes:
+  - eval_safe_memory_starter_physical.yaml
+
+navigation:
+  # The storage room is only 1.185 m wide. Keep the full Fetch footprint
+  # erosion, but reduce the additional endpoint-only clearance by one map cell.
+  goal_clearance_radius: 0.20
+  # Keep Fetch farther from the bottom cabinet so opening its door does not
+  # lift the base. The inherited 0.70 m ring reproduced that collision.
+  cabinet_min_goal_radius: 0.85
+  # Keep this task's dining-room return path away from the wall corner. The
+  # desired clearance is a soft A* target, so raise its weight without adding
+  # hard erosion that could disconnect the narrow storage-room route.
+  clearance_aware_desired_clearance: 0.40
+  clearance_aware_weight: 4.0
+  # A seventh erosion pixel destabilized the full dining return, so keep the
+  # six-pixel footprint and use the compact arm pose below instead.
+  trav_map_extra_erosion_margin: 0.0
+  # Preserve the raw A* corners through Beechwood's dining and storage
+  # passages. The simplified path destabilized Fetch at the dining doorway in
+  # two consecutive fixed-scene runs.
+  clearance_aware_simplify: false
+
+starter_primitives:
+  # Keep the raised trunk used for symbolic carry while folding the arm inside
+  # Fetch's base footprint for the storage-room wall corner.
+  fixed_navigation_arm_pose_name: tucked_high

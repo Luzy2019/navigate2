@@ -1,0 +1,52 @@
+(define (problem lifelong_crossroom__diner__grease_rag_bar_cabinet_v1-0)
+    (:domain omnigibson)
+
+    (:objects
+        floor.n.01_1 floor.n.01_2 floor.n.01_3 - floor.n.01
+        door.n.01_1 door.n.01_2 - door.n.01
+        stove.n.01_1 - stove.n.01
+        cooking_oil.n.01_1 - cooking_oil.n.01
+        bottom_cabinet.n.01_1 - bottom_cabinet.n.01
+        stain.n.01_1 - stain.n.01
+        table.n.02_1 - table.n.02
+        rag.n.01_1 rag.n.01_2 - rag.n.01
+        compost_bin.n.01_1 compost_bin.n.01_2 - compost_bin.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom floor.n.01_1 kitchen_0)
+        (inroom floor.n.01_2 bar_0)
+        (inroom floor.n.01_3 dining_room_0)
+        (inroom door.n.01_1 kitchen_0)
+        (inroom door.n.01_2 dining_room_0)
+        (inroom stove.n.01_1 kitchen_0)
+        (covered stove.n.01_1 cooking_oil.n.01_1)
+        (inroom bottom_cabinet.n.01_1 bar_0)
+        (covered bottom_cabinet.n.01_1 stain.n.01_1)
+        (inroom table.n.02_1 dining_room_0)
+        (covered table.n.02_1 stain.n.01_1)
+        (ontop rag.n.01_1 floor.n.01_1)
+        (ontop compost_bin.n.01_1 floor.n.01_3)
+        (ontop compost_bin.n.01_2 floor.n.01_3)
+        (ontop rag.n.01_2 floor.n.01_1)
+        (saturated rag.n.01_1 cooking_oil.n.01_1)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (not (covered stove.n.01_1 cooking_oil.n.01_1))
+            (not (covered bottom_cabinet.n.01_1 stain.n.01_1))
+            (ontop rag.n.01_1 floor.n.01_3)
+            (ontop rag.n.01_2 floor.n.01_3)
+            (not (covered table.n.02_1 stain.n.01_1))
+            (or (nextto rag.n.01_1 compost_bin.n.01_1) (nextto rag.n.01_2 compost_bin.n.01_1))
+            (not (inside rag.n.01_1 compost_bin.n.01_2))
+            (not (nextto rag.n.01_1 compost_bin.n.01_1))
+            (nextto rag.n.01_2 compost_bin.n.01_1)
+            (not (open door.n.01_1))
+            (not (open door.n.01_2))
+        )
+    )
+)

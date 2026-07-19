@@ -17,23 +17,23 @@ if [[ -n "${PARTITION:-}" ]]; then
 fi
 
 if [[ $# -lt 1 ]]; then
-    echo "Usage: bash entrypoints/eval_close.sh MODEL_NAME [DATA_PARALLEL] [TASK_OR_TASK_LIST]" >&2
+    echo "Usage: bash entrypoints/eval_close.sh MODEL_NAME [DATA_PARALLEL] [TASK_OR_TASK_LIST] [CONFIG] [EXTRA_ARGS...]" >&2
     exit 2
 fi
 
 MODEL_NAME=$1
 DATA_PARALLEL=${2:-1}
 TASK_SPEC=${3:-entrypoints/task_list.txt}
-NUM_RETRY=${NUM_RETRY:-3}
+CONFIG=${4:-entrypoints/configs/eval_close.yaml}
+EXTRA_ARGS=("${@:5}")
+NUM_RETRY=3
 
 if [[ -f "$TASK_SPEC" ]]; then
     TASK_LIST=$TASK_SPEC
 else
     TASK_NAME=${TASK_SPEC%.json}
-    if [[ ! -f "data/tasks/$TASK_NAME.json" ]]; then
-        echo "Unknown task or task-list file: $TASK_SPEC" >&2
-        exit 2
-    fi
+    TASK_NAME=${TASK_NAME#./data/tasks/}
+    TASK_NAME=${TASK_NAME#data/tasks/}
 
     TASK_LIST=$(mktemp "${TMPDIR:-/tmp}/isbench-task-list.XXXXXX")
     trap 'rm -f "$TASK_LIST"' EXIT
@@ -41,21 +41,16 @@ else
 fi
 
 WORK_DIR=./results/$MODEL_NAME
-SHOW_ROBOT_ARGS=()
-if [[ "${SHOW_ROBOT:-0}" == "1" ]]; then
-    SHOW_ROBOT_ARGS+=(--show_robot)
-fi
 
 python -m og_ego_prim.cli.check_close_api --model "$MODEL_NAME"
 
 python -m og_ego_prim.cli.online_benchmark_all \
+    --config "$CONFIG" \
     --data_parallel $DATA_PARALLEL \
     --num_retry "$NUM_RETRY" \
     --task_list "$TASK_LIST" \
     --work_dir "$WORK_DIR" \
     --model "$MODEL_NAME" \
-    --primitive_type "${PRIMITIVE_TYPE:-auto}" \
-    "${SHOW_ROBOT_ARGS[@]}" \
     --draw_bbox_2d \
-    --prompt_setting 'v1' \
+    "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "$LOG_FILE"

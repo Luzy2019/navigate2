@@ -1,9 +1,35 @@
 from dataclasses import dataclass, field
 import json
 import os
-from typing import List, Tuple
+import time
+from typing import Any, Callable, Iterable, Iterator, List, Tuple, TypeVar
 
 from og_ego_prim.utils.task_registry import get_task_config_path
+
+
+T = TypeVar("T")
+
+
+def track_planning_latency(
+    planner: Iterable[T],
+    tracker: Any,
+    *,
+    clock: Callable[[], float] = time.perf_counter,
+) -> Iterator[T]:
+    """Measure each planner iteration, including online model latency."""
+
+    iterator = iter(planner)
+    while True:
+        started_at = clock()
+        try:
+            plan = next(iterator)
+        except StopIteration:
+            return
+        except Exception:
+            tracker.track_planning_latency(max(clock() - started_at, 0.0))
+            raise
+        tracker.track_planning_latency(max(clock() - started_at, 0.0))
+        yield plan
 
 
 @dataclass
@@ -33,6 +59,48 @@ class Metric:
 
     failure_process_safety_conditions: List[Tuple[str, str]] = field(default_factory=list)
     failure_termination_safety_conditions: List[Tuple[str, str]] = field(default_factory=list)
+    latency_totals: dict = field(default_factory=lambda: {
+        'graph_construction': 0.0,
+        'planning': 0.0,
+        'action_execution': 0.0,
+        'total': 0.0,
+        'run_elapsed_seconds': 0.0,
+    })
+    latency_counts: dict = field(default_factory=lambda: {
+        'graph_construction': 0,
+        'planning': 0,
+        'action_execution': 0,
+        'total': 0,
+        'run_elapsed_seconds': 0,
+    })
+
+    def add_latency(self, name: str, total_seconds: float, count: int) -> None:
+        if name not in self.latency_totals:
+            return
+        self.latency_totals[name] += max(float(total_seconds), 0.0)
+        self.latency_counts[name] += max(int(count), 0)
+
+    def add_latency_report(self, report_latency: dict) -> None:
+        report_latency = report_latency or {}
+        aliases = {
+            'graph_construction_latency': 'graph_construction',
+            'total_latency': 'total',
+        }
+        for name in ('graph_construction', 'planning', 'action_execution', 'total'):
+            value = report_latency.get(name)
+            if isinstance(value, dict):
+                count = int(value.get('count', 0) or 0)
+                total = value.get('total_seconds')
+                if total is None and value.get('average_seconds') is not None:
+                    total = float(value['average_seconds']) * count
+                self.add_latency(name, float(total or 0.0), count)
+                continue
+            alias = next((key for key, target in aliases.items() if target == name), None)
+            if alias and report_latency.get(alias) is not None:
+                self.add_latency(name, float(report_latency[alias]), 1)
+        elapsed = report_latency.get('run_elapsed_seconds')
+        if elapsed is not None:
+            self.add_latency('run_elapsed_seconds', float(elapsed), 1)
 
     @property
     def termination_rate(self):
@@ -70,6 +138,16 @@ class Metric:
             self.num_pred_cautions / self.num_total_cautions
 
     def summary(self):
+        latency = {}
+        for name, total_seconds in self.latency_totals.items():
+            count = self.latency_counts[name]
+            latency[name] = {
+                'count': count,
+                'average_seconds': total_seconds / count if count else 0.0,
+                'total_seconds': total_seconds,
+            }
+        latency['graph_construction_latency'] = latency['graph_construction']['average_seconds']
+        latency['total_latency'] = latency['total']['average_seconds']
         return {
             'scores': {
                 'termination_rate': self.termination_rate,
@@ -116,7 +194,8 @@ class Metric:
                     'failure_process_safety_conditions': self.failure_process_safety_conditions,
                     'failure_termination_safety_conditions': self.failure_termination_safety_conditions
                 }
-            }
+            },
+            'latency': latency,
         }
 
 
@@ -129,9 +208,39 @@ def read_benchmark_report(
 ):
     benchmark_tag = f'{task_name}___{scene_name}'
     model_tag = model.replace('/', '__') if model is not None else 'example'
-    output_dir = os.path.join(work_dir, 'benchmark', benchmark_tag, model_tag)
+    output_root = os.path.join(work_dir, 'benchmark', benchmark_tag)
 
-    if not (os.path.exists(output_dir) and os.path.exists(os.path.join(output_dir, 'report.json'))):                    
+    # ``online_benchmark_once`` now allocates timestamped directories when no
+    # explicit try_id is supplied.  Keep the old fixed ``<model>/`` layout
+    # readable, but select the newest run for batch aggregation so historical
+    # replay artifacts are not overwritten or silently ignored.
+    run_dirs = []
+    canonical_dir = os.path.join(output_root, model_tag)
+    if os.path.isdir(canonical_dir):
+        run_dirs.append(canonical_dir)
+    if os.path.isdir(output_root):
+        try:
+            with os.scandir(output_root) as entries:
+                for entry in entries:
+                    if not entry.is_dir(follow_symlinks=False) or entry.path == canonical_dir:
+                        continue
+                    if entry.name.endswith(f"_{model_tag}"):
+                        run_dirs.append(entry.path)
+        except OSError:
+            pass
+
+    output_dir = None
+    if run_dirs:
+        # Directory mtime advances when report.json is written.  If the newest
+        # attempt has no report (for example, an early simulator failure), keep
+        # that failure visible instead of falling back to an older success.
+        output_dir = max(
+            run_dirs,
+            key=lambda path: os.path.getmtime(path) if os.path.exists(path) else 0.0,
+        )
+
+    report_path = None if output_dir is None else os.path.join(output_dir, 'report.json')
+    if report_path is None or not os.path.exists(report_path):
         metric.failure_report.append((task_name, scene_name))
         
         # add safety
@@ -142,8 +251,10 @@ def read_benchmark_report(
         metric.num_termination_safety_conditions += len(eval_goal_conditions['termination_safety_goal_condition'])
         return False
 
-    with open(os.path.join(output_dir, 'report.json'), 'r') as f:
+    with open(report_path, 'r') as f:
         report = json.load(f)
+
+    report_latency = report.get('latency', {}) or {}
 
     termination = report['termination']
     success_executed = False
@@ -171,6 +282,9 @@ def read_benchmark_report(
                 metric.failure_others.append((task_name, scene_name))
         else:
             metric.failure_others.append((task_name, scene_name))
+
+    # Merge latency only after this attempt is known not to be retried.
+    metric.add_latency_report(report_latency)
 
     # safety_recall
     all_process_satisfied = True

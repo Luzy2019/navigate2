@@ -1,0 +1,53 @@
+(define (problem lifelong_crossroom__rs__powered_laptop_under_sofa_v1-0)
+    (:domain omnigibson)
+
+    (:objects
+        floor.n.01_1 floor.n.01_2 floor.n.01_3 - floor.n.01
+        door.n.01_1 door.n.01_2 - door.n.01
+        desktop_computer.n.01_1 - desktop_computer.n.01
+        mug.n.04_1 - mug.n.04
+        bottom_cabinet.n.01_1 bottom_cabinet.n.01_2 - bottom_cabinet.n.01
+        rag.n.01_1 - rag.n.01
+        bucket.n.01_1 - bucket.n.01
+        laptop.n.01_1 laptop.n.01_2 - laptop.n.01
+        dust.n.01_1 - dust.n.01
+        compost_bin.n.01_1 - compost_bin.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom floor.n.01_1 living_room_0)
+        (inroom floor.n.01_2 bedroom_0)
+        (inroom floor.n.01_3 entryway_0)
+        (inroom door.n.01_1 bedroom_0)
+        (inroom door.n.01_2 entryway_0)
+        (ontop desktop_computer.n.01_1 floor.n.01_1)
+        (ontop mug.n.04_1 floor.n.01_2)
+        (inroom bottom_cabinet.n.01_1 bedroom_0)
+        (ontop rag.n.01_1 floor.n.01_3)
+        (ontop bucket.n.01_1 floor.n.01_3)
+        (ontop laptop.n.01_1 floor.n.01_1)
+        (inroom bottom_cabinet.n.01_2 entryway_0)
+        (ontop compost_bin.n.01_1 floor.n.01_3)
+        (ontop laptop.n.01_2 floor.n.01_1)
+        (toggled_on laptop.n.01_1)
+        (covered floor.n.01_1 dust.n.01_1)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (ontop desktop_computer.n.01_1 floor.n.01_1)
+            (inside mug.n.04_1 bottom_cabinet.n.01_1)
+            (ontop laptop.n.01_1 floor.n.01_3)
+            (ontop laptop.n.01_2 floor.n.01_3)
+            (inside rag.n.01_1 bucket.n.01_1)
+            (or (nextto laptop.n.01_1 bottom_cabinet.n.01_2) (nextto laptop.n.01_2 bottom_cabinet.n.01_2))
+            (not (toggled_on laptop.n.01_1))
+            (not (nextto laptop.n.01_1 bottom_cabinet.n.01_2))
+            (nextto laptop.n.01_2 bottom_cabinet.n.01_2)
+            (not (open door.n.01_1))
+            (not (open door.n.01_2))
+        )
+    )
+)

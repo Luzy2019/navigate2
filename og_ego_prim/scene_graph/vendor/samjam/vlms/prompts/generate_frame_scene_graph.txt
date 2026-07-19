@@ -3,8 +3,21 @@ The scene graph should represent the objects in the image and their relationship
 
 Include surfaces like kitchen counters as objects when necessary.
 When the image includes both hands, separate them into 2 separate objects.
+
+Prefer stable canonical object names when applicable. Use names such as
+apple, banana, tissue_box, cabinet, drawer, counter, kitchen_counter, table,
+stove, sink, refrigerator, door, box, shelf, trash_can, bin, bottle, and
+robot_gripper. Normalize obvious aliases before responding, for example:
+tissue_box_box -> tissue_box, half_banana -> banana, black_slove or
+black_stove -> stove, and countertop -> kitchen_counter.
+
 Express each bounding box as [y_min, x_min, y_max, x_max], with every coordinate
 normalized to an integer from 0 to 1000.
+For every object, output the tightest bounding box around only the visible pixels
+of that object. Do not include nearby tables, cabinets, background, or adjacent
+objects in the box. For small objects such as bread, tissue_box, bottles, cups,
+fruit, tools, and boxes, inspect the image carefully and make the box precise.
+If an object is partially occluded, box only the visible part.
 Strictly adhere to the following JSON structure:
 
 {

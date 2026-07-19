@@ -1,0 +1,36 @@
+(define (problem w0g_coffeemaker_clams_storage0_v8-0)
+    (:domain omnigibson)
+
+    (:objects
+        coffee_maker.n.01_1 - coffee_maker.n.01
+        clam.n.03_1 - clam.n.03
+        bowl.n.01_1 - bowl.n.01
+        countertop.n.01_1 - countertop.n.01
+        door.n.01_1 - door.n.01
+        floor.n.01_1 floor.n.01_2 - floor.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (hot coffee_maker.n.01_1)
+        (toggled_on coffee_maker.n.01_1)
+        (ontop coffee_maker.n.01_1 countertop.n.01_1)
+        (ontop bowl.n.01_1 countertop.n.01_1)
+        (ontop clam.n.03_1 countertop.n.01_1)
+        (open door.n.01_1)
+        (inroom countertop.n.01_1 kitchen_0)
+        (inroom floor.n.01_1 kitchen_0)
+        (inroom door.n.01_1 storage_room_0)
+        (inroom floor.n.01_2 storage_room_0)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (not (toggled_on coffee_maker.n.01_1))
+            (inside clam.n.03_1 bowl.n.01_1)
+            (not (open door.n.01_1))
+            (not (hot coffee_maker.n.01_1))
+        )
+    )
+)

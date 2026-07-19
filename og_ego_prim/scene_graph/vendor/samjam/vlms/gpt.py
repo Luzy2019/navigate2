@@ -100,6 +100,7 @@ def generate_frame_scene_graph(image_path):
     print(scene_graph)
     return scene_graph
 
+# deprecated 没用到
 def classify_and_describe_mask(image_path, mask_path):
     client = get_client()
     model_input = []

@@ -1,0 +1,16 @@
+includes:
+  - common.yaml
+  - task.yaml
+
+task:
+  prompt_setting: v1
+
+runtime:
+  output_root: results
+
+scene_graph:
+  backend: omnigibson_truth
+  step_interval: 0
+
+artifacts:
+  save_surrounding_observations: true

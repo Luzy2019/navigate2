@@ -1,0 +1,62 @@
+(define (problem w0g_powerstrip_kettle_livingroom0b_v8-0)
+    (:domain omnigibson)
+
+    (:objects
+        apple.n.01_1 apple.n.01_2 - apple.n.01
+        dirt.n.02_1 - dirt.n.02
+        power_strip.n.01_1 - power_strip.n.01
+        sink.n.01_1 - sink.n.01
+        vinegar.n.01_1 - vinegar.n.01
+        vinegar__bottle.n.01_1 - vinegar__bottle.n.01
+        countertop.n.01_1 - countertop.n.01
+        electric_kettle.n.01_1 - electric_kettle.n.01
+        stain.n.01_1 - stain.n.01
+        tea.n.01_1 - tea.n.01
+        scrub_brush.n.01_1 scrub_brush.n.01_2 - scrub_brush.n.01
+        coffee_table.n.01_1 - coffee_table.n.01
+        dust.n.01_1 - dust.n.01
+        water.n.06_1 - water.n.06
+        floor.n.01_1 floor.n.01_2 - floor.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (covered apple.n.01_1 dirt.n.02_1)
+        (covered apple.n.01_2 dirt.n.02_1)
+        (ontop apple.n.01_1 countertop.n.01_1)
+        (ontop apple.n.01_2 countertop.n.01_1)
+        (covered power_strip.n.01_1 water.n.06_1)
+        (ontop power_strip.n.01_1 floor.n.01_1)
+        (filled vinegar__bottle.n.01_1 vinegar.n.01_1)
+        (ontop vinegar__bottle.n.01_1 countertop.n.01_1)
+        (insource sink.n.01_1 water.n.06_1)
+        (not (toggled_on sink.n.01_1))
+        (ontop electric_kettle.n.01_1 countertop.n.01_1)
+        (covered electric_kettle.n.01_1 stain.n.01_1)
+        (covered electric_kettle.n.01_1 vinegar.n.01_1)
+        (filled electric_kettle.n.01_1 tea.n.01_1)
+        (ontop scrub_brush.n.01_1 countertop.n.01_1)
+        (covered coffee_table.n.01_1 dust.n.01_1)
+        (ontop scrub_brush.n.01_2 floor.n.01_2)
+        (inroom sink.n.01_1 kitchen_0)
+        (inroom countertop.n.01_1 kitchen_0)
+        (inroom floor.n.01_1 kitchen_0)
+        (inroom coffee_table.n.01_1 living_room_0)
+        (inroom floor.n.01_2 living_room_0)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (not (covered apple.n.01_1 dirt.n.02_1))
+            (not (covered apple.n.01_2 dirt.n.02_1))
+            (not (covered electric_kettle.n.01_1 stain.n.01_1))
+            (not (filled electric_kettle.n.01_1 tea.n.01_1))
+            (not (covered coffee_table.n.01_1 dust.n.01_1))
+            (not (covered power_strip.n.01_1 water.n.06_1))
+            (not (covered electric_kettle.n.01_1 vinegar.n.01_1))
+            (not (toggled_on electric_kettle.n.01_1))
+            (not (toggled_on sink.n.01_1))
+        )
+    )
+)

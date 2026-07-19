@@ -1,9 +1,6 @@
 import hashlib
 import json
 import math
-import os
-import shutil
-import subprocess
 from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -11,15 +8,23 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from og_ego_prim.config.runtime_config import SceneGraphConfig
 
 XY = Tuple[float, float]
 Pixel = Tuple[float, float]
 DEFAULT_BEV_MAX_SIDE = 3840
 
+_ACTIVE_SCENE_GRAPH_CONFIG = SceneGraphConfig()
+
+
+def set_visualization_config(config: Optional[SceneGraphConfig]) -> None:
+    global _ACTIVE_SCENE_GRAPH_CONFIG
+    _ACTIVE_SCENE_GRAPH_CONFIG = config or SceneGraphConfig()
+
 
 def _env_int(name: str, default: int) -> int:
     try:
-        value = int(os.environ.get(name, str(default)))
+        value = int(_ACTIVE_SCENE_GRAPH_CONFIG.option(name, default))
     except ValueError:
         return default
     return max(1, value)
@@ -27,7 +32,7 @@ def _env_int(name: str, default: int) -> int:
 
 def _env_float(name: str, default: float) -> float:
     try:
-        value = float(os.environ.get(name, str(default)))
+        value = float(_ACTIVE_SCENE_GRAPH_CONFIG.option(name, default))
     except ValueError:
         return default
     return max(0.1, value)
@@ -36,55 +41,6 @@ def _env_float(name: str, default: float) -> float:
 def _style_scale(max_side: int) -> float:
     default = max(1.0, min(2.6, max_side / 1600.0))
     return _env_float("ISBENCH_SCENE_GRAPH_BEV_FONT_SCALE", default)
-
-
-def _metadata_filename(filename: str) -> str:
-    path = Path(filename)
-    if path.suffix:
-        return f"{path.stem}.json"
-    return f"{filename}.json"
-
-
-def save_scene_graph_task_scene_bev_visualization(
-    snapshot: Optional[Dict[str, Any]],
-    output_dir: Path,
-    *,
-    env: Any = None,
-    execution_diagnostics: Optional[List[Dict[str, Any]]] = None,
-    task_room: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
-    return save_scene_graph_bev_visualization(
-        snapshot,
-        output_dir,
-        env=env,
-        execution_diagnostics=execution_diagnostics,
-        filename="scene_graph_bev_task_scene.png",
-        metadata_filename="scene_graph_bev_task_scene.json",
-        task_room=task_room,
-        crop_to_task_scene=True,
-    )
-
-
-def save_scene_graph_task_scene_bev_video(
-    snapshots: Optional[List[Dict[str, Any]]],
-    output_dir: Path,
-    *,
-    latest_snapshot: Optional[Dict[str, Any]] = None,
-    env: Any = None,
-    execution_diagnostics: Optional[List[Dict[str, Any]]] = None,
-    task_room: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
-    return save_scene_graph_bev_video(
-        snapshots,
-        output_dir,
-        latest_snapshot=latest_snapshot,
-        env=env,
-        execution_diagnostics=execution_diagnostics,
-        filename="scene_graph_bev_task_scene_history.mp4",
-        metadata_filename="scene_graph_bev_task_scene_history.json",
-        task_room=task_room,
-        crop_to_task_scene=True,
-    )
 
 
 def lifelong_scene_graph_snapshot(snapshot: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -217,7 +173,7 @@ def save_lifelong_scene_graph_bev_visualization(
             encoding="utf-8",
         )
         return metadata
-    return save_scene_graph_bev_visualization(
+    return _save_lifelong_bev_image(
         converted,
         output_dir,
         env=env,
@@ -229,18 +185,18 @@ def save_lifelong_scene_graph_bev_visualization(
     )
 
 
-def save_scene_graph_bev_visualization(
+def _save_lifelong_bev_image(
     snapshot: Optional[Dict[str, Any]],
     output_dir: Path,
     *,
     env: Any = None,
     execution_diagnostics: Optional[List[Dict[str, Any]]] = None,
-    filename: str = "scene_graph_bev.png",
-    metadata_filename: Optional[str] = None,
+    filename: str,
+    metadata_filename: str,
     task_room: Optional[str] = None,
     crop_to_task_scene: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """Save a final BEV map overlaid with scene-graph nodes and relations."""
+    """Save a single BEV image for internal diagnostic-style helpers."""
     if snapshot is None:
         return None
 
@@ -253,7 +209,7 @@ def save_scene_graph_bev_visualization(
         task_room=task_room,
         crop_to_task_scene=crop_to_task_scene,
     )
-    metadata_path = output_dir / (metadata_filename or _metadata_filename(filename))
+    metadata_path = output_dir / metadata_filename
     if canvas is None:
         metadata_path.write_text(
             json.dumps(metadata, indent=2, ensure_ascii=False),
@@ -271,195 +227,6 @@ def save_scene_graph_bev_visualization(
     return metadata
 
 
-def save_scene_graph_bev_video(
-    snapshots: Optional[List[Dict[str, Any]]],
-    output_dir: Path,
-    *,
-    latest_snapshot: Optional[Dict[str, Any]] = None,
-    env: Any = None,
-    execution_diagnostics: Optional[List[Dict[str, Any]]] = None,
-    filename: str = "scene_graph_bev_history.mp4",
-    metadata_filename: Optional[str] = None,
-    task_room: Optional[str] = None,
-    crop_to_task_scene: bool = False,
-) -> Optional[Dict[str, Any]]:
-    """Save a time-lapse BEV video from scene_graph_history snapshots."""
-    timeline = _history_snapshots(snapshots, latest_snapshot)
-    if not timeline:
-        return None
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    metadata_path = output_dir / (metadata_filename or _metadata_filename(filename))
-    video_path = output_dir / filename
-    renderable = [
-        snapshot
-        for snapshot in timeline
-        if any(_node_xy(node) is not None for node in _normalise_nodes(snapshot))
-    ]
-    if not renderable:
-        metadata = {
-            "saved": False,
-            "reason": "no_positioned_scene_graph_nodes",
-            "frame_count": 0,
-            "scene_graph_source": "benchmark.tracker.scene_graph_history",
-            "simulator_truth_overlay": False,
-        }
-        metadata_path.write_text(
-            json.dumps(metadata, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return metadata
-
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        metadata = {
-            "saved": False,
-            "reason": "ffmpeg_not_found",
-            "frame_count": len(renderable),
-            "scene_graph_source": "benchmark.tracker.scene_graph_history",
-            "simulator_truth_overlay": False,
-        }
-        metadata_path.write_text(
-            json.dumps(metadata, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return metadata
-
-    fixed_task_scene = None
-    if crop_to_task_scene:
-        fixed_task_scene = _history_task_scene_context(
-            renderable,
-            execution_diagnostics=execution_diagnostics,
-            env=env,
-            task_room=task_room,
-        )
-
-    fps = _env_float("ISBENCH_SCENE_GRAPH_BEV_VIDEO_FPS", 2.0)
-    first_canvas, first_metadata = _render_scene_graph_bev(
-        renderable[0],
-        env=env,
-        execution_diagnostics=execution_diagnostics,
-        task_room=task_room,
-        crop_to_task_scene=crop_to_task_scene,
-        task_scene_override=fixed_task_scene,
-    )
-    if first_canvas is None:
-        metadata = dict(first_metadata)
-        metadata.update(
-            {
-                "saved": False,
-                "reason": metadata.get("reason") or "first_frame_not_renderable",
-                "frame_count": 0,
-                "scene_graph_source": "benchmark.tracker.scene_graph_history",
-                "simulator_truth_overlay": False,
-            }
-        )
-        metadata_path.write_text(
-            json.dumps(metadata, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return metadata
-
-    first_frame = _video_frame_array(first_canvas)
-    height, width = first_frame.shape[:2]
-    command = [
-        ffmpeg,
-        "-y",
-        "-loglevel",
-        "error",
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "rgb24",
-        "-s",
-        f"{width}x{height}",
-        "-r",
-        str(fps),
-        "-i",
-        "-",
-        "-an",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        str(video_path),
-    ]
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
-    written = 0
-    frame_summaries: List[Dict[str, Any]] = []
-    try:
-        for index, snapshot in enumerate(renderable):
-            if index == 0:
-                canvas = first_canvas
-                frame_metadata = first_metadata
-            else:
-                canvas, frame_metadata = _render_scene_graph_bev(
-                    snapshot,
-                    env=env,
-                    execution_diagnostics=execution_diagnostics,
-                    task_room=task_room,
-                    crop_to_task_scene=crop_to_task_scene,
-                    task_scene_override=fixed_task_scene,
-                )
-                if canvas is None:
-                    continue
-            frame = _video_frame_array(canvas)
-            if frame.shape[:2] != (height, width):
-                frame_image = Image.fromarray(frame, mode="RGB").resize(
-                    (width, height),
-                    Image.Resampling.BILINEAR,
-                )
-                frame = np.asarray(frame_image, dtype=np.uint8)
-            process.stdin.write(np.ascontiguousarray(frame).tobytes())
-            written += 1
-            frame_summaries.append(
-                {
-                    "index": index,
-                    "frame_index": (snapshot.get("metadata") or {}).get("frame_index"),
-                    "global_step_index": (snapshot.get("metadata") or {}).get("global_step_index"),
-                    "drawn_node_count": frame_metadata.get("drawn_node_count"),
-                    "relation_edge_count": frame_metadata.get("relation_edge_count"),
-                }
-            )
-        process.stdin.close()
-        stderr = process.stderr.read().decode("utf-8", errors="replace")
-        return_code = process.wait()
-    except Exception:
-        process.kill()
-        process.wait()
-        raise
-
-    if return_code != 0:
-        raise RuntimeError(f"ffmpeg failed to save scene graph BEV video: {stderr.strip()}")
-
-    metadata = {
-        "saved": True,
-        "video": str(video_path),
-        "kind": "task_scene" if crop_to_task_scene else "global",
-        "frame_count": written,
-        "fps": fps,
-        "width": width,
-        "height": height,
-        "task_scene": fixed_task_scene,
-        "scene_graph_source": "benchmark.tracker.scene_graph_history",
-        "simulator_truth_overlay": False,
-        "frames": frame_summaries,
-    }
-    metadata_path.write_text(
-        json.dumps(metadata, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    return metadata
-
-
 def _render_scene_graph_bev(
     snapshot: Dict[str, Any],
     *,
@@ -468,6 +235,9 @@ def _render_scene_graph_bev(
     task_room: Optional[str] = None,
     crop_to_task_scene: bool = False,
     task_scene_override: Optional[Dict[str, Any]] = None,
+    max_side_override: Optional[int] = None,
+    max_scale_override: Optional[float] = None,
+    robot_pose_override: Optional[Tuple[float, float, Optional[float]]] = None,
 ) -> Tuple[Optional[Image.Image], Dict[str, Any]]:
     nodes = _normalise_nodes(snapshot)
     positioned_nodes = [node for node in nodes if _node_xy(node) is not None]
@@ -479,8 +249,8 @@ def _render_scene_graph_bev(
         }
 
     map_ctx = _extract_map_context(env)
-    trajectories = _extract_trajectories(execution_diagnostics or [])
-    robot_pose = _extract_robot_pose(env)
+    trajectories = _extract_trajectories(execution_diagnostics or [], snapshot=snapshot)
+    robot_pose = robot_pose_override or _extract_robot_pose(env)
     if task_scene_override is not None:
         task_scene = task_scene_override
     else:
@@ -496,12 +266,13 @@ def _render_scene_graph_bev(
     if robot_pose is not None:
         points.append(robot_pose[:2])
 
-    max_side = _env_int("ISBENCH_SCENE_GRAPH_BEV_MAX_SIDE", DEFAULT_BEV_MAX_SIDE)
+    max_side = max_side_override or _env_int("ISBENCH_SCENE_GRAPH_BEV_MAX_SIDE", DEFAULT_BEV_MAX_SIDE)
     style_scale = _style_scale(max_side)
     map_image, project, map_metadata = _build_base_image(
         map_ctx,
         points,
         max_side=max_side,
+        max_scale=max_scale_override,
         crop_bounds=task_scene.get("bounds") if task_scene else None,
     )
     map_draw = ImageDraw.Draw(map_image, "RGBA")
@@ -610,12 +381,72 @@ def _history_snapshots(
 
 
 def _snapshot_key(snapshot: Dict[str, Any]) -> Tuple[Any, Any, int, int]:
-    metadata = snapshot.get("metadata") or {}
+    summary = snapshot.get("summary") or snapshot.get("metadata") or {}
+    node_count, edge_count = _snapshot_counts(snapshot)
     return (
-        metadata.get("global_step_index"),
-        metadata.get("frame_index"),
-        len(snapshot.get("nodes") or []),
-        len(snapshot.get("edges") or []),
+        summary.get("global_step_index"),
+        summary.get("frame_index"),
+        node_count,
+        edge_count,
+    )
+
+
+def _snapshot_counts(snapshot: Dict[str, Any]) -> Tuple[int, int]:
+    rooms = snapshot.get("rooms", [])
+    if rooms:
+        node_ids = {
+            node.get("id")
+            for room in rooms
+            for node, _group in _iter_room_nodes(room)
+            if node.get("id") is not None
+        }
+        edge_count = sum(1 for room in rooms for _edge in _iter_room_edges(room))
+        return len(node_ids), edge_count
+    return len(snapshot.get("nodes") or []), len(snapshot.get("edges") or [])
+
+
+def _iter_room_nodes(room: Dict[str, Any]):
+    for node in room.get("nodes", []):
+        if isinstance(node, dict):
+            yield node, None
+    for group in room.get("groups", []):
+        if not isinstance(group, dict):
+            continue
+        for node in group.get("nodes", []):
+            if isinstance(node, dict):
+                yield node, group
+
+
+def _iter_room_edges(room: Dict[str, Any]):
+    seen = set()
+    for edge in room.get("edges", []):
+        if not isinstance(edge, dict):
+            continue
+        key = _edge_key(edge)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield edge
+    for group in room.get("groups", []):
+        if not isinstance(group, dict):
+            continue
+        for edge in group.get("edges", []):
+            if not isinstance(edge, dict):
+                continue
+            key = _edge_key(edge)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield edge
+
+
+def _edge_key(edge: Dict[str, Any]) -> Tuple[Any, ...]:
+    return (
+        edge.get("source") or edge.get("source_id"),
+        edge.get("target") or edge.get("target_id"),
+        edge.get("type") or edge.get("relation"),
+        edge.get("source_uid"),
+        edge.get("target_uid"),
     )
 
 
@@ -676,8 +507,67 @@ def _video_frame_array(image: Image.Image) -> np.ndarray:
 
 
 def _normalise_nodes(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rooms = snapshot.get("rooms", [])
+    if rooms:
+        nodes = []
+        seen = set()
+        for room in rooms:
+            room_name = room.get("room_name")
+            room_id = room.get("room_id")
+            for node, group in _iter_room_nodes(room):
+                group_name = None if group is None else group.get("group_name")
+                object_id = str(node.get("id") or "")
+                if not object_id or object_id in seen:
+                    continue
+                seen.add(object_id)
+                states = dict(node.get("states") or {})
+                states.setdefault("room_id", node.get("room") or room_name)
+                states.setdefault(
+                    "attributes",
+                    {
+                        "room": node.get("room") or room_name,
+                        "room_id": node.get("room_id") or room_id,
+                        "group": node.get("group") or group_name,
+                    },
+                )
+                nodes.append(
+                    {
+                        "object_id": object_id,
+                        "name": node.get("label") or node.get("name") or object_id,
+                        "category": "object",
+                        "visible": bool(node.get("is_vis", True)),
+                        "position": node.get("position"),
+                        "states": states,
+                    }
+                )
+        return nodes
     nodes = snapshot.get("nodes", [])
     return [node for node in nodes if isinstance(node, dict)]
+
+
+def _normalise_room_edges(
+    snapshot: Dict[str, Any],
+    node_positions: Dict[str, XY],
+) -> Optional[List[Dict[str, Any]]]:
+    rooms = snapshot.get("rooms", [])
+    if not rooms:
+        return None
+
+    edges = []
+    for room in rooms:
+        for edge in _iter_room_edges(room):
+            source_id = str(edge.get("source") or "")
+            target_id = str(edge.get("target") or "")
+            if source_id in node_positions and target_id in node_positions and source_id != target_id:
+                edges.append(
+                    {
+                        **edge,
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "relation": edge.get("type"),
+                    }
+                )
+    return edges
 
 
 def _normalise_room_name(value: Optional[str]) -> Optional[str]:
@@ -840,6 +730,7 @@ def _build_base_image(
     points: List[XY],
     *,
     max_side: int,
+    max_scale: Optional[float] = None,
     crop_bounds: Optional[List[float]] = None,
 ) -> Tuple[Image.Image, Callable[[XY], Optional[Pixel]], Dict[str, Any]]:
     if map_ctx is not None:
@@ -864,7 +755,8 @@ def _build_base_image(
         image_np[:, :] = np.asarray([42, 45, 50], dtype=np.uint8)
         image_np[free] = np.asarray([230, 235, 229], dtype=np.uint8)
         base = Image.fromarray(image_np)
-        max_scale = _env_float("ISBENCH_SCENE_GRAPH_BEV_MAX_SCALE", 32.0)
+        if max_scale is None:
+            max_scale = _env_float("ISBENCH_SCENE_GRAPH_BEV_MAX_SCALE", 32.0)
         scale = max(min(max_side / max(base.width, base.height), max_scale), 0.1)
         resized = base.resize(
             (max(1, int(round(base.width * scale))), max(1, int(round(base.height * scale)))),
@@ -1007,27 +899,179 @@ def _extract_robot_pose(env: Any) -> Optional[Tuple[float, float, Optional[float
     return float(pos[0]), float(pos[1]), yaw
 
 
-def _extract_trajectories(diagnostics: Iterable[Dict[str, Any]]) -> List[List[XY]]:
+def _robot_pose_from_frame_pose(
+    frame_pose: Optional[Dict[str, Any]],
+) -> Optional[Tuple[float, float, Optional[float]]]:
+    if not isinstance(frame_pose, dict):
+        return None
+    camera_pose = frame_pose.get("camera_pose")
+    robot_position = frame_pose.get("robot_position")
+
+    xy = _xy_from_value(robot_position)
+    yaw = _camera_pose_yaw(camera_pose)
+    if xy is None:
+        xy = _camera_pose_xy(camera_pose)
+    if xy is None:
+        return None
+    return float(xy[0]), float(xy[1]), yaw
+
+
+def _camera_pose_xy(camera_pose: Any) -> Optional[XY]:
+    try:
+        pose = np.asarray(camera_pose, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if pose.shape != (4, 4):
+        return None
+    x = float(pose[0, 3])
+    y = float(pose[1, 3])
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return None
+    return x, y
+
+
+def _camera_pose_yaw(camera_pose: Any) -> Optional[float]:
+    try:
+        pose = np.asarray(camera_pose, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if pose.shape != (4, 4):
+        return None
+    rotation = pose[:3, :3]
+    # FrameObservation depth projection treats +Z as the optical axis.
+    forward = rotation @ np.asarray([0.0, 0.0, 1.0], dtype=float)
+    if not np.all(np.isfinite(forward[:2])):
+        return None
+    norm = float(np.linalg.norm(forward[:2]))
+    if norm <= 1e-6:
+        return None
+    return math.atan2(float(forward[1]), float(forward[0]))
+
+
+def _extract_trajectories(
+    diagnostics: Iterable[Dict[str, Any]],
+    *,
+    snapshot: Optional[Dict[str, Any]] = None,
+) -> List[List[XY]]:
+    diagnostic_items = [
+        item for item in diagnostics if isinstance(item, dict)
+    ]
+    current_index, current_progress = _trajectory_progress_for_snapshot(
+        diagnostic_items,
+        snapshot,
+    )
+    paths: List[List[XY]] = []
+    for index, item in enumerate(diagnostic_items):
+        if current_index is not None:
+            if index > current_index:
+                continue
+            progress = 1.0 if index < current_index else current_progress
+        else:
+            progress = 1.0
+        for path in _diagnostic_paths(item):
+            if progress < 1.0:
+                path = _clip_path(path, progress)
+            if len(path) >= 2:
+                paths.append(path)
+    return paths
+
+
+def _trajectory_progress_for_snapshot(
+    diagnostics: List[Dict[str, Any]],
+    snapshot: Optional[Dict[str, Any]],
+) -> Tuple[Optional[int], float]:
+    if not diagnostics or not isinstance(snapshot, dict):
+        return None, 1.0
+    raw_plan = snapshot.get("raw_plan")
+    if raw_plan is None:
+        return None, 1.0
+    raw_plan = str(raw_plan)
+    matches = [
+        index
+        for index, item in enumerate(diagnostics)
+        if str(item.get("plan") or "") == raw_plan
+    ]
+    if not matches:
+        return None, 1.0
+    current_index = matches[0]
+    step_index = snapshot.get("step_index")
+    try:
+        step_index = int(step_index)
+    except (TypeError, ValueError):
+        return current_index, 1.0
+    low_level_steps = diagnostics[current_index].get("low_level_steps")
+    try:
+        low_level_steps = int(low_level_steps)
+    except (TypeError, ValueError):
+        low_level_steps = 0
+    if low_level_steps <= 0:
+        return current_index, 1.0
+    progress = (step_index + 1) / float(low_level_steps)
+    return current_index, max(0.0, min(1.0, progress))
+
+
+def _diagnostic_paths(item: Dict[str, Any]) -> List[List[XY]]:
     paths: List[List[XY]] = []
     state_path: List[XY] = []
-    for item in diagnostics:
-        for state_key in ("start_state", "end_state"):
-            xy = _xy_from_value((item.get(state_key) or {}).get("base_position"))
-            if xy is not None:
-                state_path.append(xy)
-        nav = item.get("navigation")
-        if isinstance(nav, dict):
-            for key, value in nav.items():
-                if "waypoint" in key or "path" in key:
-                    if not isinstance(value, (list, tuple)):
-                        continue
-                    path = [_xy_from_value(point) for point in value or []]
-                    path = [point for point in path if point is not None]
-                    if len(path) >= 2:
-                        paths.append(path)
+    for state_key in ("start_state", "end_state"):
+        xy = _xy_from_value((item.get(state_key) or {}).get("base_position"))
+        if xy is not None:
+            state_path.append(xy)
     if len(state_path) >= 2:
-        paths.insert(0, state_path)
+        paths.append(state_path)
+
+    nav = item.get("navigation")
+    if isinstance(nav, dict):
+        for key, value in nav.items():
+            if "waypoint" in key or "path" in key:
+                if not isinstance(value, (list, tuple)):
+                    continue
+                path = [_xy_from_value(point) for point in value or []]
+                path = [point for point in path if point is not None]
+                if len(path) >= 2:
+                    paths.append(path)
     return paths
+
+
+def _clip_path(path: List[XY], progress: float) -> List[XY]:
+    if len(path) < 2:
+        return path
+    if progress >= 1.0:
+        return path
+    if progress <= 0.0:
+        return path[:1]
+
+    segment_lengths = []
+    total = 0.0
+    for start, end in zip(path, path[1:]):
+        length = math.hypot(end[0] - start[0], end[1] - start[1])
+        segment_lengths.append(length)
+        total += length
+    if total <= 0.0:
+        count = max(1, int(math.ceil(len(path) * progress)))
+        return path[:count]
+
+    target = total * progress
+    clipped = [path[0]]
+    travelled = 0.0
+    for index, length in enumerate(segment_lengths):
+        start = path[index]
+        end = path[index + 1]
+        if travelled + length < target:
+            clipped.append(end)
+            travelled += length
+            continue
+        if length <= 0.0:
+            continue
+        ratio = (target - travelled) / length
+        clipped.append(
+            (
+                start[0] + (end[0] - start[0]) * ratio,
+                start[1] + (end[1] - start[1]) * ratio,
+            )
+        )
+        break
+    return clipped
 
 
 def _xy_from_value(value: Any) -> Optional[XY]:
@@ -1047,6 +1091,10 @@ def _relation_edges(
     snapshot: Dict[str, Any],
     node_positions: Dict[str, XY],
 ) -> List[Dict[str, Any]]:
+    room_edges = _normalise_room_edges(snapshot, node_positions)
+    if room_edges is not None:
+        return room_edges
+
     edges = []
     for edge in snapshot.get("edges", []):
         if not isinstance(edge, dict):
@@ -1279,11 +1327,21 @@ def _draw_panel(
     dup_line = max(14, int(round(14 * style_scale)))
     max_chars = max(42, int(width / max(8.5 * style_scale, 1.0)))
     metadata = snapshot.get("metadata", {})
-    backend = metadata.get("perception_backend")
-    frame_index = metadata.get("frame_index")
-    object_count = sum(1 for node in nodes if node.get("category") not in {"room", "group"})
-    group_count = sum(1 for node in nodes if node.get("category") == "group")
-    room_count = sum(1 for node in nodes if node.get("category") == "room")
+    summary = snapshot.get("summary") or metadata
+    backend = summary.get("backend") or summary.get("perception_backend")
+    frame_index = summary.get("frame_index")
+    object_count = summary.get(
+        "objects",
+        sum(1 for node in nodes if node.get("category") not in {"room", "group"}),
+    )
+    group_count = summary.get(
+        "groups",
+        sum(1 for node in nodes if node.get("category") == "group"),
+    )
+    room_count = summary.get(
+        "rooms",
+        sum(1 for node in nodes if node.get("category") == "room"),
+    )
 
     draw.text((x, y), "Scene Graph BEV", fill=(24, 28, 33), font=title_font)
     y += title_line

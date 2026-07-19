@@ -1,0 +1,12 @@
+includes:
+  - eval_safe_memory_starter_physical.yaml
+
+navigation:
+  clearance_aware_simplify: false
+  goal_clearance_radius: 0.20
+
+starter_primitives:
+  deferred_coverage_max_samples: 40
+  fixed_navigation_arm_pose_name: tucked_high
+  native_stance_sample_attempts: 8
+  symbolic_grasp_max_goal_radius: 1.2

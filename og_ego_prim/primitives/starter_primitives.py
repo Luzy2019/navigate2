@@ -1,8 +1,7 @@
 import importlib.util
 import math
-import os
 import sys
-from typing import Optional
+from typing import Any, Dict, Mapping, Optional
 
 import omnigibson as og
 import torch
@@ -18,16 +17,14 @@ from omnigibson.action_primitives.starter_semantic_action_primitives import (
 from omnigibson.envs import Environment
 from omnigibson.object_states.open_state import _get_relevant_joints
 from omnigibson.utils.control_utils import IKSolver
-from omnigibson.utils.constants import JointType
+from omnigibson.utils.constants import JointType, PrimType
 from omnigibson.utils.grasping_planning_utils import get_grasp_poses_for_object_sticky
 from omnigibson.utils.motion_planning_utils import plan_base_motion
 import omnigibson.utils.transform_utils as T
 
+from og_ego_prim.config.runtime_config import NavigationConfig, StarterPrimitivesConfig
 from og_ego_prim.navigation import NavigationBackend, OmniGibsonNavigationBackend
-
-
-def _env_flag(name: str, default: str = "0") -> bool:
-    return os.environ.get(name, default).lower() in {"1", "true", "yes", "on"}
+from og_ego_prim.primitives.object_states_utils import get_placement_objects
 
 
 def _interpolate_open_close_waypoints(start_pose, end_pose, num_waypoints="default"):
@@ -78,98 +75,190 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         self,
         env: Environment,
         navigation_backend: Optional[NavigationBackend] = None,
+        starter_config: Optional[StarterPrimitivesConfig] = None,
+        navigation_config: Optional[NavigationConfig] = None,
         **kwargs,
     ):
         super().__init__(env, **kwargs)
+        config = starter_config or StarterPrimitivesConfig()
         if navigation_backend is None:
             self.navigation_backend = OmniGibsonNavigationBackend(
                 allow_native_fallback=False,
+                navigation_config=navigation_config,
             )
         else:
             self.navigation_backend = navigation_backend
             if hasattr(self.navigation_backend, "allow_native_fallback"):
                 self.navigation_backend.allow_native_fallback = False
         self.navigation_backend.reset(env)
-        self.verbose = os.environ.get("ISBENCH_STARTER_VERBOSE", "0").lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        self.symbolic_manipulation = _env_flag(
-            "ISBENCH_STARTER_SYMBOLIC_MANIPULATION",
-            "1",
+        self.verbose = bool(config.verbose)
+        self.symbolic_manipulation = bool(config.symbolic_manipulation)
+        self.symbolic_grasp = self.symbolic_manipulation and bool(config.symbolic_grasp)
+        self.symbolic_place = self.symbolic_manipulation and bool(config.symbolic_place)
+        self.symbolic_cloth_inside_drop = bool(config.symbolic_cloth_inside_drop)
+        self.symbolic_cloth_inside_drop_container_categories = frozenset(
+            config.symbolic_cloth_inside_drop_container_categories
         )
-        self.symbolic_grasp = self.symbolic_manipulation and _env_flag(
-            "ISBENCH_STARTER_SYMBOLIC_GRASP",
-            "1",
+        self.symbolic_cloth_inside_drop_height = float(
+            config.symbolic_cloth_inside_drop_height
         )
-        self.symbolic_place = self.symbolic_manipulation and _env_flag(
-            "ISBENCH_STARTER_SYMBOLIC_PLACE",
-            "1",
+        self.symbolic_cloth_inside_pre_settle_steps = int(
+            config.symbolic_cloth_inside_pre_settle_steps
         )
-        self.symbolic_open_close = self.symbolic_manipulation and _env_flag(
-            "ISBENCH_STARTER_SYMBOLIC_OPEN_CLOSE",
-            "1",
+        self.symbolic_cloth_inside_settle_steps = int(
+            config.symbolic_cloth_inside_settle_steps
         )
-        self.symbolic_release = self.symbolic_manipulation and _env_flag(
-            "ISBENCH_STARTER_SYMBOLIC_RELEASE",
-            "1",
+        self.symbolic_cloth_inside_fit_shape = bool(
+            config.symbolic_cloth_inside_fit_shape
         )
+        self.symbolic_cloth_inside_fit_container_scale = float(
+            config.symbolic_cloth_inside_fit_container_scale
+        )
+        self.symbolic_cloth_carry_preserve_shape = bool(
+            config.symbolic_cloth_carry_preserve_shape
+        )
+        self.symbolic_cloth_carry_preserve_shape_categories = frozenset(
+            config.symbolic_cloth_carry_preserve_shape_categories
+        )
+        self.symbolic_loaded_cloth_carry_preserve_shape = bool(
+            config.symbolic_loaded_cloth_carry_preserve_shape
+        )
+        self.symbolic_loaded_cloth_carry_preserve_shape_categories = frozenset(
+            config.symbolic_loaded_cloth_carry_preserve_shape_categories
+        )
+        self.symbolic_loaded_cloth_release_stabilization_steps = int(
+            config.symbolic_loaded_cloth_release_stabilization_steps
+        )
+        if not math.isfinite(self.symbolic_cloth_inside_drop_height):
+            raise ValueError(
+                "starter_primitives.symbolic_cloth_inside_drop_height must be finite"
+            )
+        if (
+            self.symbolic_cloth_inside_drop
+            and not self.symbolic_cloth_inside_drop_container_categories
+        ):
+            raise ValueError(
+                "starter_primitives.symbolic_cloth_inside_drop_container_categories "
+                "must be non-empty when cloth drop is enabled"
+            )
+        if self.symbolic_cloth_inside_settle_steps < 1:
+            raise ValueError(
+                "starter_primitives.symbolic_cloth_inside_settle_steps must be positive"
+            )
+        if not 0.0 < self.symbolic_cloth_inside_fit_container_scale <= 1.0:
+            raise ValueError(
+                "starter_primitives.symbolic_cloth_inside_fit_container_scale "
+                "must be in (0, 1]"
+            )
+        if self.symbolic_cloth_inside_pre_settle_steps < 0:
+            raise ValueError(
+                "starter_primitives.symbolic_cloth_inside_pre_settle_steps "
+                "must be non-negative"
+            )
+        if self.symbolic_loaded_cloth_release_stabilization_steps < 0:
+            raise ValueError(
+                "starter_primitives.symbolic_loaded_cloth_release_stabilization_steps "
+                "must be non-negative"
+            )
+        self.symbolic_open_close = self.symbolic_manipulation and bool(config.symbolic_open_close)
+        self.symbolic_release = self.symbolic_manipulation and bool(config.symbolic_release)
         self._symbolic_grasp_previous_disable_grasp_handling = None
         self._symbolic_carry_state = None
+        self._released_loaded_cloth_stabilization = None
+        self._pending_symbolic_particle_transfer = None
         self._last_grasp_ready_navigation = None
         self._open_ready_stance_cache = {}
-        self.tactqn_open_goal_radius = float(
-            os.environ.get("ISBENCH_STARTER_TACTQN_OPEN_GOAL_RADIUS", "0.45")
-        )
+        self.task_placement_slots: Dict[tuple[str, str], Dict[str, Any]] = {}
+        self.tactqn_open_goal_radius = float(config.tactqn_open_goal_radius)
         if self.tactqn_open_goal_radius < 0.45:
             raise ValueError(
-                "ISBENCH_STARTER_TACTQN_OPEN_GOAL_RADIUS must be at least 0.45"
+                "starter_primitives.tactqn_open_goal_radius must be at least 0.45"
             )
-        self.symbolic_grasp_max_goal_radius = float(
-            os.environ.get("ISBENCH_STARTER_SYMBOLIC_GRASP_MAX_GOAL_RADIUS", "0.85")
-        )
+        self.symbolic_grasp_max_goal_radius = float(config.symbolic_grasp_max_goal_radius)
         if self.symbolic_grasp_max_goal_radius < 0.45:
             raise ValueError(
-                "ISBENCH_STARTER_SYMBOLIC_GRASP_MAX_GOAL_RADIUS must be at least 0.45"
+                "starter_primitives.symbolic_grasp_max_goal_radius must be at least 0.45"
             )
-        self.symbolic_grasp_max_yaw_error = float(
-            os.environ.get("ISBENCH_STARTER_SYMBOLIC_GRASP_MAX_YAW_ERROR", "0.85")
-        )
+        self.symbolic_grasp_max_yaw_error = float(config.symbolic_grasp_max_yaw_error)
         if self.symbolic_grasp_max_yaw_error <= 0.0:
             raise ValueError(
-                "ISBENCH_STARTER_SYMBOLIC_GRASP_MAX_YAW_ERROR must be positive"
+                "starter_primitives.symbolic_grasp_max_yaw_error must be positive"
             )
-        self.tactqn_symbolic_open_close_fallback = os.environ.get(
-            "ISBENCH_STARTER_TACTQN_SYMBOLIC_OPEN_CLOSE_FALLBACK",
-            "1",
-        ).lower() in {"1", "true", "yes", "on"}
+        self.symbolic_carry_radial_clearance = float(
+            config.symbolic_carry_radial_clearance
+        )
+        self.symbolic_carry_vertical_clearance = float(
+            config.symbolic_carry_vertical_clearance
+        )
+        self.deferred_coverage_max_samples = int(
+            config.deferred_coverage_max_samples
+        )
+        if self.deferred_coverage_max_samples < 1:
+            raise ValueError(
+                "starter_primitives.deferred_coverage_max_samples must be positive"
+            )
+        self.symbolic_carry_robot_collision_filter_scope = str(
+            config.symbolic_carry_robot_collision_filter_scope
+        ).strip().lower()
+        if self.symbolic_carry_robot_collision_filter_scope not in {
+            "release",
+            "episode",
+        }:
+            raise ValueError(
+                "starter_primitives.symbolic_carry_robot_collision_filter_scope "
+                "must be 'release' or 'episode'"
+            )
+        self.symbolic_carry_robot_collision_filter_objects = frozenset(
+            config.symbolic_carry_robot_collision_filter_objects
+        )
+        self._symbolic_carry_robot_filter_registry = {}
+        if self.symbolic_carry_radial_clearance < 0.0:
+            raise ValueError(
+                "starter_primitives.symbolic_carry_radial_clearance must be non-negative"
+            )
+        if self.symbolic_carry_vertical_clearance < 0.0:
+            raise ValueError(
+                "starter_primitives.symbolic_carry_vertical_clearance must be non-negative"
+            )
+        self.tactqn_symbolic_open_close_fallback = bool(
+            config.tactqn_symbolic_open_close_fallback
+        )
         self._ompl_warning_logged = False
         self._suppress_navigation_hand_actions = False
-        self.fixed_navigation_arm_pose = _env_flag(
-            "ISBENCH_STARTER_FIXED_NAVIGATION_ARM_POSE",
-            "1",
-        )
-        self.fixed_navigation_arm_pose_name = os.environ.get(
-            "ISBENCH_STARTER_FIXED_NAVIGATION_ARM_POSE_NAME",
-            "vertical",
-        )
+        self.fixed_navigation_arm_pose = bool(config.fixed_navigation_arm_pose)
+        self.fixed_navigation_arm_pose_name = config.fixed_navigation_arm_pose_name
         self._fixed_navigation_joint_indices = None
         self._fixed_navigation_joint_positions = None
-        self.native_stance_sample_attempts = int(
-            os.environ.get("ISBENCH_STARTER_NATIVE_STANCE_SAMPLE_ATTEMPTS", "1")
-        )
+        self.native_stance_sample_attempts = int(config.native_stance_sample_attempts)
         if self.native_stance_sample_attempts < 1:
             raise ValueError(
-                "ISBENCH_STARTER_NATIVE_STANCE_SAMPLE_ATTEMPTS must be at least 1"
+                "starter_primitives.native_stance_sample_attempts must be at least 1"
             )
-        self.native_waypoint_max_linear_step = float(
-            os.environ.get("ISBENCH_STARTER_NATIVE_WAYPOINT_MAX_LINEAR_STEP", "0.18")
-        )
+        self.native_waypoint_max_linear_step = float(config.native_waypoint_max_linear_step)
         if self.native_waypoint_max_linear_step <= 0.0:
             raise ValueError(
-                "ISBENCH_STARTER_NATIVE_WAYPOINT_MAX_LINEAR_STEP must be positive"
+                "starter_primitives.native_waypoint_max_linear_step must be positive"
+            )
+        self.explicit_navigation_max_goal_radius = config.explicit_navigation_max_goal_radius
+        if (
+            self.explicit_navigation_max_goal_radius is not None
+            and self.explicit_navigation_max_goal_radius < 0.45
+        ):
+            raise ValueError(
+                "starter_primitives.explicit_navigation_max_goal_radius must be at least 0.45"
+            )
+        self.explicit_grasp_use_object_navigation = bool(
+            config.explicit_grasp_use_object_navigation
+        )
+        self.explicit_grasp_navigation_max_goal_radius = (
+            config.explicit_grasp_navigation_max_goal_radius
+        )
+        if (
+            self.explicit_grasp_navigation_max_goal_radius is not None
+            and self.explicit_grasp_navigation_max_goal_radius < 0.45
+        ):
+            raise ValueError(
+                "starter_primitives.explicit_grasp_navigation_max_goal_radius must be at least 0.45"
             )
         self._cached_ik_solver = None
         self.controller_functions[
@@ -290,36 +379,57 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         return "Robot base left the traversable floor" in str(exc)
 
     def _initialize_fixed_navigation_arm_pose(self):
-        """Put the arm in one task-level safe pose and hold it there.
+        """Put the arm in one configured navigation pose and hold it there.
 
-        In the all-symbolic manipulation mode, the arm does not need to
-        physically reach, grasp, open, or place.  Keeping the gripper in an
-        extended pose makes OG/OMPL base planning reject otherwise good cabinet
-        stance samples because the copied gripper collides with countertops.
-        We therefore set trunk / arm / gripper joints once to a high Fetch
-        untucked pose, then keep the Starter arm target pinned there for the
-        remainder of the task.  This mirrors the natural high initial arm pose
-        from earlier successful runs and avoids the low tucked gripper pose that
-        can scrape the table edge.
+        Symbolic manipulation does not require an extended arm during base
+        motion.  In addition to Fetch's named untucked poses, ``tucked`` uses
+        OmniGibson's native compact reset pose. ``tucked_high`` keeps the same
+        compact arm joints but restores the normal raised navigation trunk.
         """
         if not self.fixed_navigation_arm_pose:
             return
 
         try:
-            if hasattr(self.robot, "untucked_default_joint_pos"):
+            requested_pose_name = self.fixed_navigation_arm_pose_name
+            tucked_pose_names = {"tucked", "tucked_high"}
+            if requested_pose_name in tucked_pose_names and hasattr(
+                self.robot,
+                "tucked_default_joint_pos",
+            ):
+                target_joint_positions = torch.as_tensor(
+                    self.robot.tucked_default_joint_pos,
+                    dtype=torch.float32,
+                )
+                pose_name = requested_pose_name
+                if (
+                    pose_name == "tucked_high"
+                    and hasattr(self.robot, "untucked_default_joint_pos")
+                ):
+                    raised_joint_positions = torch.as_tensor(
+                        self.robot.untucked_default_joint_pos,
+                        dtype=torch.float32,
+                    )
+                    target_joint_positions[self.robot.trunk_control_idx] = (
+                        raised_joint_positions[self.robot.trunk_control_idx]
+                    )
+            elif hasattr(self.robot, "untucked_default_joint_pos"):
                 target_joint_positions = torch.as_tensor(
                     self.robot.untucked_default_joint_pos,
                     dtype=torch.float32,
                 )
+                pose_name = requested_pose_name
             else:
                 target_joint_positions = torch.as_tensor(
                     self._get_reset_joint_pos(),
                     dtype=torch.float32,
                 )
+                pose_name = "reset"
 
-            if hasattr(self.robot, "default_arm_poses"):
+            if pose_name not in tucked_pose_names and hasattr(
+                self.robot,
+                "default_arm_poses",
+            ):
                 arm_poses = self.robot.default_arm_poses
-                pose_name = self.fixed_navigation_arm_pose_name
                 if pose_name not in arm_poses:
                     pose_name = "vertical"
                 if pose_name in arm_poses:
@@ -329,7 +439,7 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                         arm_poses[pose_name],
                         dtype=torch.float32,
                     )
-            else:
+            elif pose_name not in tucked_pose_names:
                 pose_name = "reset"
 
             indices = [
@@ -507,6 +617,30 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                 f"preferred_goal_direction={self._to_float_list(preferred_goal_direction)}"
             )
             sys.stdout.flush()
+            if navigation_reason != "explicit_grasp_ready_stance" and (
+                self._safe_target_in_reach(grasp_pose)
+                or (
+                    self._symbolic_grasp_pose_near_enough(grasp_pose)
+                    and self._symbolic_grasp_pose_direction_aligned(
+                        grasp_pose,
+                        preferred_goal_direction,
+                    )
+                    and self._symbolic_grasp_pose_facing_target(grasp_pose)
+                )
+            ):
+                print(
+                    "[starter][grasp] accepting current ready pose "
+                    f"target={obj.name} reason={navigation_reason} "
+                    f"base_target_xy_distance={self._base_target_xy_distance(grasp_pose)}"
+                )
+                sys.stdout.flush()
+                self._set_cached_grasp_ready_navigation(
+                    obj,
+                    grasp_pose,
+                    preferred_goal_direction,
+                    navigation_reason,
+                )
+                return grasp_pose, preferred_goal_direction
             try:
                 yield from self._navigate_to_native_stance_pose(
                     obj,
@@ -1341,6 +1475,8 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                 },
             )
 
+        self._remove_released_loaded_cloth_object(obj)
+
         print(f"[starter][grasp][symbolic_shortcut] target={obj.name}")
         sys.stdout.flush()
         reach_pose = grasp_pose if grasp_pose is not None else obj.get_position_orientation()
@@ -1374,19 +1510,123 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                     ),
                 },
             )
-        contact_pos = self.robot.get_eef_position(self.arm)
-        obj.set_position_orientation(position=contact_pos)
-        obj.keep_still()
-        self._force_symbolic_grasp_constraint(obj, contact_pos)
+        obj_pos, obj_orn = obj.get_position_orientation()
+        # Capture deformable geometry before the symbolic teleport.  Sampling
+        # after the root move can already include the stretched state caused by
+        # moving PhysX particles with the object pose.
+        capture_cloth_shape = getattr(
+            self,
+            "_capture_symbolic_carried_cloth_shape",
+            None,
+        )
+        cloth_shape = (
+            capture_cloth_shape(obj)
+            if callable(capture_cloth_shape)
+            else None
+        )
+        particle_states = self._capture_symbolic_carried_particles(obj)
+        rigid_descendant_states = self._capture_symbolic_carried_rigid_descendants(
+            obj
+        )
+        try:
+            self._suspend_symbolic_carried_particles(particle_states)
+            self._suspend_symbolic_carried_rigid_descendants(
+                rigid_descendant_states
+            )
+            carried_obj_pos, carried_obj_orn, eef_pos = (
+                self._symbolic_carry_pose_away_from_robot(
+                    obj,
+                    obj_orn,
+                )
+            )
+            obj.set_position_orientation(
+                position=carried_obj_pos,
+                orientation=carried_obj_orn,
+            )
+            obj.keep_still()
+            self._sync_symbolic_rigid_descendants_to_root_pose(
+                rigid_descendant_states,
+                carried_obj_pos,
+                carried_obj_orn,
+            )
+            self._force_symbolic_grasp_constraint(
+                obj,
+                eef_pos,
+                cloth_shape=cloth_shape,
+                particle_states=particle_states,
+                rigid_descendant_states=rigid_descendant_states,
+            )
+        except Exception:
+            if (
+                self._symbolic_carry_state is not None
+                and self._symbolic_carry_state.get("obj") is obj
+            ):
+                self._clear_symbolic_grasp_state(
+                    self.arm,
+                    restore_payload=False,
+                )
+            obj.set_position_orientation(position=obj_pos, orientation=obj_orn)
+            obj.keep_still()
+            self._restore_symbolic_rigid_descendant_snapshot(
+                rigid_descendant_states
+            )
+            self._restore_symbolic_carried_rigid_descendant_collisions(
+                rigid_descendant_states
+            )
+            self._sync_released_symbolic_payload_to_object(
+                particle_states,
+                rigid_descendant_states,
+                obj,
+                preserve_snapshot_velocities=True,
+            )
+            raise
 
         obj_in_hand = self._get_obj_in_hand()
         if obj_in_hand is None:
+            if self._symbolic_carry_state is not None:
+                self._clear_symbolic_grasp_state(
+                    self.arm,
+                    restore_payload=False,
+                )
+            obj.set_position_orientation(position=obj_pos, orientation=obj_orn)
+            obj.keep_still()
+            self._restore_symbolic_rigid_descendant_snapshot(
+                rigid_descendant_states
+            )
+            self._restore_symbolic_carried_rigid_descendant_collisions(
+                rigid_descendant_states
+            )
+            self._sync_released_symbolic_payload_to_object(
+                particle_states,
+                rigid_descendant_states,
+                obj,
+                preserve_snapshot_velocities=True,
+            )
             raise ActionPrimitiveError(
                 ActionPrimitiveError.Reason.POST_CONDITION_ERROR,
                 "Symbolic grasp completed, but no object was detected in hand.",
                 {"target object": obj.name},
             )
         if obj_in_hand != obj:
+            if self._symbolic_carry_state is not None:
+                self._clear_symbolic_grasp_state(
+                    self.arm,
+                    restore_payload=False,
+                )
+            obj.set_position_orientation(position=obj_pos, orientation=obj_orn)
+            obj.keep_still()
+            self._restore_symbolic_rigid_descendant_snapshot(
+                rigid_descendant_states
+            )
+            self._restore_symbolic_carried_rigid_descendant_collisions(
+                rigid_descendant_states
+            )
+            self._sync_released_symbolic_payload_to_object(
+                particle_states,
+                rigid_descendant_states,
+                obj,
+                preserve_snapshot_velocities=True,
+            )
             raise ActionPrimitiveError(
                 ActionPrimitiveError.Reason.POST_CONDITION_ERROR,
                 "Symbolic grasp attached an unexpected object.",
@@ -1397,6 +1637,39 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             )
         self._disable_assisted_grasp_auto_handling_for_symbolic_hold()
         yield from self._yield_symbolic_refresh_step()
+
+    def _symbolic_carry_pose_away_from_robot(self, obj, obj_orn):
+        """Place the carried AABB below the EEF and outside the robot body."""
+        robot_pos, robot_orn = self.robot.get_position_orientation()
+        eef_pos, _ = self.robot.eef_links[self.arm].get_position_orientation()
+        robot_pos = torch.as_tensor(robot_pos, dtype=torch.float32)
+        eef_pos = torch.as_tensor(eef_pos, dtype=torch.float32)
+        extent = torch.as_tensor(obj.aabb_extent, dtype=torch.float32)
+
+        outward_xy = eef_pos[:2] - robot_pos[:2]
+        outward_norm = torch.linalg.norm(outward_xy)
+        if float(outward_norm.item()) < 1e-4:
+            robot_yaw = T.quat2euler(robot_orn)[2]
+            outward_xy = torch.stack((torch.cos(robot_yaw), torch.sin(robot_yaw)))
+        else:
+            outward_xy = outward_xy / outward_norm
+
+        carried_obj_pos = eef_pos.clone()
+        carried_obj_pos[:2] += outward_xy * (
+            0.5 * torch.linalg.norm(extent[:2])
+            + self.symbolic_carry_radial_clearance
+        )
+        carried_obj_pos[2] -= (
+            0.5 * extent[2] + self.symbolic_carry_vertical_clearance
+        )
+        print(
+            "[starter][grasp][symbolic_carry_pose] "
+            f"target={obj.name} extent={self._to_float_list(extent)} "
+            f"eef={self._to_float_list(eef_pos)} "
+            f"object={self._to_float_list(carried_obj_pos)}"
+        )
+        sys.stdout.flush()
+        return carried_obj_pos, obj_orn, eef_pos
 
     def _empty_action(self):
         if self._symbolic_carry_active():
@@ -1421,15 +1694,22 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         instead of chasing a stale manipulation target.
         """
         previous = self._suppress_navigation_hand_actions
+        previous_disable_grasp_handling = self.robot._disable_grasp_handling
         self._pin_current_arm_targets_for_navigation()
         self._suppress_navigation_hand_actions = True
+        # Holding the gripper command still allows AssistedGrasp to attach an
+        # object when closed fingers brush nearby furniture.  Navigation must
+        # never acquire a new object implicitly.
+        self.robot._disable_grasp_handling = True
         if isinstance(self.navigation_backend.last_navigation_result, dict):
             self.navigation_backend.last_navigation_result.update(
                 navigation_hand_action_mode="pinned_arm_gripper_no_op",
+                assisted_grasp_handling_disabled=True,
             )
         try:
             yield from generator
         finally:
+            self.robot._disable_grasp_handling = previous_disable_grasp_handling
             self._suppress_navigation_hand_actions = previous
 
     def _mask_navigation_hand_action(self, action):
@@ -1479,6 +1759,125 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             except Exception:
                 continue
 
+    def _postprocess_action(self, action):
+        """Refresh task-scoped released cloth before each simulator step."""
+        self._stabilize_released_loaded_cloth_payload()
+        return super()._postprocess_action(action)
+
+    def _stabilize_released_loaded_cloth_payload(self):
+        """Keep captured cloth descendants inside a released carrier briefly.
+
+        Symbolic loaded-container carry restores a cloth pose when the carrier
+        is released, but a subsequent navigation step can otherwise let the
+        cloth slide out before the next manipulation.  This bounded repair is
+        opt-in and only applies to the captured cloth descendants of one
+        released root; the state is removed as soon as a listed child is
+        grasped or the step budget expires.
+        """
+        stabilization = getattr(
+            self,
+            "_released_loaded_cloth_stabilization",
+            None,
+        )
+        if not stabilization:
+            return
+        remaining = int(stabilization.get("remaining_steps", 0))
+        if remaining <= 0:
+            self._released_loaded_cloth_stabilization = None
+            return
+        root_obj = stabilization.get("root")
+        descendant_states = stabilization.get("states", [])
+        if root_obj is None or not descendant_states:
+            self._released_loaded_cloth_stabilization = None
+            return
+        try:
+            root_pos, root_orn = root_obj.get_position_orientation()
+            self._sync_symbolic_rigid_descendants_to_root_pose(
+                descendant_states,
+                root_pos,
+                root_orn,
+            )
+            self._restore_symbolic_rigid_descendant_cloth_shapes(
+                descendant_states
+            )
+        except Exception as exc:
+            print(
+                "[starter][release][loaded_cloth] clearing stale "
+                f"stabilization root={getattr(root_obj, 'name', root_obj)} "
+                f"error={type(exc).__name__}: {exc}"
+            )
+            sys.stdout.flush()
+            self._released_loaded_cloth_stabilization = None
+            return
+        stabilization["remaining_steps"] = remaining - 1
+
+    @staticmethod
+    def _same_runtime_object(left, right):
+        if left is right:
+            return True
+        if left is None or right is None:
+            return False
+        for attribute in ("prim_path", "name"):
+            left_value = getattr(left, attribute, None)
+            right_value = getattr(right, attribute, None)
+            if left_value is not None and left_value == right_value:
+                return True
+        return False
+
+    def _register_released_loaded_cloth_stabilization(
+        self,
+        root_obj,
+        descendant_states,
+    ):
+        """Register only after a released loaded relation has been checked."""
+        if self.symbolic_loaded_cloth_release_stabilization_steps <= 0:
+            return
+        if self._get_obj_in_hand() is not None:
+            return
+        if getattr(root_obj, "prim_type", None) == PrimType.CLOTH:
+            return
+        cloth_states = [
+            state
+            for state in descendant_states
+            if state.get("cloth_shape")
+        ]
+        if not cloth_states:
+            return
+        self._released_loaded_cloth_stabilization = {
+            "root": root_obj,
+            "states": cloth_states,
+            "remaining_steps": self.symbolic_loaded_cloth_release_stabilization_steps,
+        }
+        print(
+            "[starter][release][loaded_cloth] "
+            f"stabilization root={root_obj.name} "
+            f"children={[state['obj'].name for state in cloth_states]} "
+            f"steps={self.symbolic_loaded_cloth_release_stabilization_steps}"
+        )
+        sys.stdout.flush()
+
+    def _remove_released_loaded_cloth_object(self, obj):
+        """Stop stabilizing one child when its next manipulation begins."""
+        stabilization = getattr(
+            self,
+            "_released_loaded_cloth_stabilization",
+            None,
+        )
+        if not stabilization:
+            return
+        if self._same_runtime_object(stabilization.get("root"), obj):
+            self._released_loaded_cloth_stabilization = None
+            return
+        remaining_states = [
+            state
+            for state in stabilization.get("states", [])
+            if not self._same_runtime_object(state.get("obj"), obj)
+        ]
+        if remaining_states:
+            stabilization["states"] = remaining_states
+        else:
+            self._released_loaded_cloth_stabilization = None
+
     def _yield_symbolic_refresh_step(self):
         """Advance one safe no-op frame after symbolic state changes.
 
@@ -1507,7 +1906,15 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         )
         self._symbolic_grasp_previous_disable_grasp_handling = None
 
-    def _force_symbolic_grasp_constraint(self, obj, contact_pos):
+    def _force_symbolic_grasp_constraint(
+        self,
+        obj,
+        contact_pos,
+        particle_states=None,
+        rigid_descendant_states=None,
+        *,
+        cloth_shape=None,
+    ):
         """Create assisted-grasp state records without a live physics joint.
 
         Downstream Starter / executor code only needs the same bookkeeping that
@@ -1561,6 +1968,11 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                 0
             ][0]
 
+        # Keep a compatibility fallback for direct callers that do not provide
+        # the pre-teleport snapshot.  The normal symbolic grasp path always
+        # passes the snapshot captured before moving the object.
+        if cloth_shape is None:
+            cloth_shape = self._capture_symbolic_carried_cloth_shape(obj)
         self._symbolic_carry_state = {
             "arm": arm,
             "obj": obj,
@@ -1569,6 +1981,10 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             "collision_states": self._suppress_symbolic_carried_object_collisions(
                 obj
             ),
+            "particle_states": list(particle_states or []),
+            "rigid_descendant_states": list(rigid_descendant_states or []),
+            "pending_covered_systems": [],
+            "cloth_shape": cloth_shape,
         }
         self._pin_current_arm_targets_for_symbolic_carry()
         self._sync_symbolic_carried_object_to_eef()
@@ -1638,6 +2054,1399 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         )
         obj.set_position_orientation(position=obj_pos, orientation=obj_orn)
         obj.keep_still()
+        self._restore_symbolic_carried_cloth_shape(
+            obj,
+            obj_pos,
+            obj_orn,
+            self._symbolic_carry_state.get("cloth_shape"),
+        )
+        self._sync_symbolic_rigid_descendants_to_root_pose(
+            self._symbolic_carry_state.get("rigid_descendant_states", []),
+            obj_pos,
+            obj_orn,
+        )
+
+    @staticmethod
+    def _capture_symbolic_cloth_shape(obj):
+        obj_pos, obj_orn = obj.get_position_orientation()
+        world_positions = obj.root_link.compute_particle_positions()
+        rotation = T.quat2mat(obj_orn)
+        return {
+            "root_relative_positions": (
+                rotation.T @ (world_positions - obj_pos).T
+            ).T.clone()
+        }
+
+    def _capture_symbolic_carried_cloth_shape(self, obj):
+        if (
+            not self.symbolic_cloth_carry_preserve_shape
+            or getattr(obj, "prim_type", None) != PrimType.CLOTH
+            or (
+                self.symbolic_cloth_carry_preserve_shape_categories
+                and getattr(obj, "category", "")
+                not in self.symbolic_cloth_carry_preserve_shape_categories
+            )
+        ):
+            return None
+        return self._capture_symbolic_cloth_shape(obj)
+
+    def _capture_symbolic_loaded_cloth_shape(self, obj):
+        if (
+            not self.symbolic_loaded_cloth_carry_preserve_shape
+            or getattr(obj, "prim_type", None) != PrimType.CLOTH
+            or (
+                self.symbolic_loaded_cloth_carry_preserve_shape_categories
+                and getattr(obj, "category", "")
+                not in self.symbolic_loaded_cloth_carry_preserve_shape_categories
+            )
+        ):
+            return None
+        return self._capture_symbolic_cloth_shape(obj)
+
+    @staticmethod
+    def _restore_symbolic_carried_cloth_shape(obj, obj_pos, obj_orn, shape):
+        if not shape:
+            return
+        relative_positions = shape["root_relative_positions"]
+        rotation = T.quat2mat(obj_orn)
+        world_positions = (rotation @ relative_positions.T).T + obj_pos
+        obj.root_link.set_particle_positions(world_positions)
+        obj.root_link.particle_velocities = torch.zeros_like(
+            obj.root_link.particle_velocities
+        )
+
+    @staticmethod
+    def _fit_symbolic_cloth_shape_to_extent(shape, root_orn, max_extent):
+        """Compress a captured fold only when its release container is smaller."""
+        if not shape:
+            return shape
+        relative_positions = shape.get("root_relative_positions")
+        if relative_positions is None or relative_positions.ndim != 2:
+            return shape
+        rotation = T.quat2mat(root_orn)
+        world_relative = (rotation @ relative_positions.T).T
+        low = world_relative.min(dim=0).values
+        high = world_relative.max(dim=0).values
+        extent = high - low
+        max_extent = torch.as_tensor(
+            max_extent,
+            dtype=world_relative.dtype,
+            device=world_relative.device,
+        )
+        scale = torch.minimum(
+            torch.ones_like(extent),
+            max_extent / extent.clamp_min(1e-6),
+        )
+        if bool(torch.all(scale >= 0.999999).item()):
+            return shape
+        center = (low + high) / 2.0
+        fitted_world_relative = (world_relative - center) * scale + center
+        fitted_local = (rotation.T @ fitted_world_relative.T).T
+        return {
+            **shape,
+            "root_relative_positions": fitted_local.clone(),
+            "fit_scale": scale.clone(),
+        }
+
+    def _capture_symbolic_carried_rigid_descendants(self, root_obj):
+        """Capture task objects recursively supported by ``root_obj``.
+
+        Each descendant keeps both a root-relative pose for whole-container
+        carry and a parent-relative pose for preserving nested Inside / OnTop
+        relations. DUMP_INTO later selects only direct Inside children.
+        """
+        root_pos, root_orn = root_obj.get_position_orientation()
+        captured = []
+        seen = {id(root_obj)}
+
+        def capture_children(parent_obj, top_level_obj=None, depth=1):
+            for predicate in (object_states.Inside, object_states.OnTop):
+                try:
+                    placements = get_placement_objects(
+                        parent_obj,
+                        self.env,
+                        predicate,
+                    ) or []
+                except Exception as exc:
+                    raise ActionPrimitiveError(
+                        ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                        "Failed to enumerate complete loaded-object contents.",
+                        {
+                            "parent": parent_obj.name,
+                            "predicate": predicate.__name__,
+                            "error": str(exc),
+                        },
+                    ) from exc
+
+                for placement in placements:
+                    child_obj = placement.object
+                    if child_obj is None or id(child_obj) in seen:
+                        continue
+                    if not hasattr(child_obj, "get_position_orientation"):
+                        continue
+                    seen.add(id(child_obj))
+                    child_pos, child_orn = child_obj.get_position_orientation()
+                    root_to_child_pos, root_to_child_orn = T.relative_pose_transform(
+                        child_pos,
+                        child_orn,
+                        root_pos,
+                        root_orn,
+                    )
+                    parent_pos, parent_orn = parent_obj.get_position_orientation()
+                    parent_to_child_pos, parent_to_child_orn = T.relative_pose_transform(
+                        child_pos,
+                        child_orn,
+                        parent_pos,
+                        parent_orn,
+                    )
+                    top_level = child_obj if top_level_obj is None else top_level_obj
+                    captured.append(
+                        {
+                            "obj": child_obj,
+                            "parent": parent_obj,
+                            "predicate": predicate,
+                            "top_level": top_level,
+                            "depth": depth,
+                            "root_to_obj_pos": root_to_child_pos.clone(),
+                            "root_to_obj_orn": root_to_child_orn.clone(),
+                            "parent_to_obj_pos": parent_to_child_pos.clone(),
+                            "parent_to_obj_orn": parent_to_child_orn.clone(),
+                            "cloth_shape": self._capture_symbolic_loaded_cloth_shape(
+                                child_obj
+                            ),
+                            "original_pos": child_pos.clone(),
+                            "original_orn": child_orn.clone(),
+                            "original_visible": bool(
+                                getattr(child_obj, "visible", True)
+                            ),
+                            "collision_states": None,
+                        }
+                    )
+                    capture_children(child_obj, top_level, depth + 1)
+
+        capture_children(root_obj)
+        if captured:
+            print(
+                "[starter][grasp][loaded_carry] "
+                f"root={root_obj.name} "
+                f"descendants={[state['obj'].name for state in captured]}"
+            )
+            sys.stdout.flush()
+        return captured
+
+    def _restore_symbolic_rigid_descendant_cloth_shapes(
+        self,
+        descendant_states,
+    ):
+        for state in descendant_states:
+            cloth_shape = state.get("cloth_shape")
+            if not cloth_shape:
+                continue
+            obj = state["obj"]
+            obj_pos, obj_orn = obj.get_position_orientation()
+            self._restore_symbolic_carried_cloth_shape(
+                obj,
+                obj_pos,
+                obj_orn,
+                cloth_shape,
+            )
+
+    def _suspend_symbolic_carried_rigid_descendants(self, descendant_states):
+        """Suppress bundle-to-robot collisions while preserving render state."""
+        for state in descendant_states:
+            obj = state["obj"]
+            state["collision_states"] = (
+                self._suppress_symbolic_carried_object_collisions(obj)
+            )
+            try:
+                obj.visible = state["original_visible"]
+            except Exception:
+                pass
+            obj.keep_still()
+
+    def _sync_symbolic_rigid_descendants_to_root_pose(
+        self,
+        descendant_states,
+        root_pos,
+        root_orn,
+    ):
+        for state in descendant_states:
+            child_pos, child_orn = T.pose_transform(
+                root_pos,
+                root_orn,
+                state["root_to_obj_pos"],
+                state["root_to_obj_orn"],
+            )
+            child_obj = state["obj"]
+            child_obj.set_position_orientation(
+                position=child_pos,
+                orientation=child_orn,
+            )
+            child_obj.keep_still()
+            self._restore_symbolic_carried_cloth_shape(
+                child_obj,
+                child_pos,
+                child_orn,
+                state.get("cloth_shape"),
+            )
+
+    def _sync_symbolic_rigid_descendant_subtrees(self, descendant_states):
+        """Rebuild nested descendants after a direct child has been resampled."""
+        for state in sorted(descendant_states, key=lambda item: item["depth"]):
+            if state["depth"] <= 1:
+                continue
+            parent_pos, parent_orn = state["parent"].get_position_orientation()
+            child_pos, child_orn = T.pose_transform(
+                parent_pos,
+                parent_orn,
+                state["parent_to_obj_pos"],
+                state["parent_to_obj_orn"],
+            )
+            child_obj = state["obj"]
+            child_obj.set_position_orientation(
+                position=child_pos,
+                orientation=child_orn,
+            )
+            child_obj.keep_still()
+            self._restore_symbolic_carried_cloth_shape(
+                child_obj,
+                child_pos,
+                child_orn,
+                state.get("cloth_shape"),
+            )
+
+    def _restore_symbolic_rigid_descendant_snapshot(self, descendant_states):
+        for state in descendant_states:
+            obj = state["obj"]
+            obj.set_position_orientation(
+                position=state["original_pos"],
+                orientation=state["original_orn"],
+            )
+            self._restore_symbolic_carried_cloth_shape(
+                obj,
+                state["original_pos"],
+                state["original_orn"],
+                state.get("cloth_shape"),
+            )
+            try:
+                obj.visible = state["original_visible"]
+            except Exception:
+                pass
+            obj.keep_still()
+
+    def _restore_symbolic_carried_rigid_descendant_collisions(
+        self,
+        descendant_states,
+    ):
+        for state in descendant_states:
+            collision_states = state.get("collision_states")
+            if collision_states is not None:
+                self._restore_symbolic_carried_object_collisions(
+                    {
+                        "obj": state["obj"],
+                        "collision_states": collision_states,
+                    }
+                )
+                state["collision_states"] = None
+            try:
+                state["obj"].visible = state["original_visible"]
+            except Exception:
+                pass
+
+    def _symbolic_carried_rigid_descendant_states(self, obj):
+        carry_state = self._symbolic_carry_state
+        if not carry_state or carry_state.get("obj") != obj:
+            return []
+        return list(carry_state.get("rigid_descendant_states", []))
+
+    @staticmethod
+    def _rigid_descendant_postcondition_failures(descendant_states):
+        failures = []
+        for state in descendant_states:
+            obj = state["obj"]
+            parent = state["parent"]
+            predicate = state.get("predicate", object_states.Inside)
+            try:
+                relation_holds = (
+                    predicate in getattr(obj, "states", {})
+                    and obj.states[predicate].get_value(parent)
+                )
+            except Exception:
+                relation_holds = False
+            if not relation_holds:
+                failures.append((obj, parent, predicate))
+        return failures
+
+    def _ensure_symbolic_rigid_descendant_postconditions(
+        self,
+        descendant_states,
+    ):
+        """Repair once, then fail if a released loaded container lost contents."""
+        failures = self._rigid_descendant_postcondition_failures(descendant_states)
+        if not failures:
+            return
+
+        for obj, parent, predicate in failures:
+            try:
+                obj.states[predicate].set_value(
+                    parent,
+                    True,
+                    reset_before_sampling=False,
+                )
+            except TypeError:
+                obj.states[predicate].set_value(parent, True)
+            except Exception:
+                pass
+        self._sync_symbolic_rigid_descendant_subtrees(descendant_states)
+        self._restore_symbolic_rigid_descendant_cloth_shapes(descendant_states)
+        yield from self._yield_symbolic_refresh_step()
+        failures = self._rigid_descendant_postcondition_failures(descendant_states)
+        if failures:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.POST_CONDITION_ERROR,
+                "Loaded-object carry did not preserve all Inside relations or OnTop relations.",
+                {
+                    "failed relations": [
+                        {"object": obj.name, "parent": parent.name}
+                        for obj, parent, _predicate in failures
+                    ]
+                },
+            )
+
+    def _sync_released_symbolic_payload_to_object(
+        self,
+        particle_states,
+        rigid_descendant_states,
+        obj,
+        *,
+        preserve_snapshot_velocities=False,
+    ):
+        self._sync_released_symbolic_particles_to_object(
+            particle_states,
+            obj,
+            preserve_snapshot_velocities=preserve_snapshot_velocities,
+        )
+        if rigid_descendant_states:
+            obj_pos, obj_orn = obj.get_position_orientation()
+            self._sync_symbolic_rigid_descendants_to_root_pose(
+                rigid_descendant_states,
+                obj_pos,
+                obj_orn,
+            )
+        carry_state = self._symbolic_carry_state
+        if (
+            carry_state is not None
+            and carry_state.get("obj") is obj
+            and carry_state.get("released_pending_payload", False)
+        ):
+            self._symbolic_carry_state = None
+
+    def dump_carried_contents_into(self, source_obj, target_obj):
+        """Atomically move all direct rigid contents into ``target_obj``.
+
+        The source is implicit and remains in hand. No simulator step occurs
+        between direct-child placements. A failed placement or postcondition
+        restores every captured object to its pre-dump pose and, for symbolic
+        carry, reattaches the complete payload to the held source.
+        """
+        if self._get_obj_in_hand() != source_obj:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                "DUMP_INTO requires the source container to be held.",
+                {"source": source_obj.name, "target": target_obj.name},
+            )
+        if source_obj is target_obj:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                "Cannot dump a container into itself.",
+                {"source": source_obj.name},
+            )
+        if (
+            object_states.Open in getattr(target_obj, "states", {})
+            and not target_obj.states[object_states.Open].get_value()
+        ):
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                "Open the destination before dumping into it.",
+                {"target": target_obj.name},
+            )
+
+        carry_state = self._symbolic_carry_state
+        symbolic_payload = bool(
+            carry_state and carry_state.get("obj") == source_obj
+        )
+        descendant_states = (
+            list(carry_state.get("rigid_descendant_states", []))
+            if symbolic_payload
+            else self._capture_symbolic_carried_rigid_descendants(source_obj)
+        )
+        direct_states = [
+            state
+            for state in descendant_states
+            if state["parent"] is source_obj
+            and state.get("predicate", object_states.Inside)
+            is object_states.Inside
+        ]
+        if not direct_states:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                "The held source container has no rigid contents to dump.",
+                {"source": source_obj.name, "target": target_obj.name},
+            )
+
+        top_level_ids = {id(state["obj"]) for state in direct_states}
+        detached_states = [
+            state
+            for state in descendant_states
+            if id(state["top_level"]) in top_level_ids
+        ]
+        if any(state["obj"] is target_obj for state in detached_states):
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                "Cannot dump into an object contained by the source.",
+                {"source": source_obj.name, "target": target_obj.name},
+            )
+        for state in direct_states:
+            if object_states.Inside not in getattr(state["obj"], "states", {}):
+                raise ActionPrimitiveError(
+                    ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                    "A source content object does not support Inside.",
+                    {"object": state["obj"].name, "target": target_obj.name},
+                )
+
+        dump_snapshot = []
+        for state in detached_states:
+            pos, orn = state["obj"].get_position_orientation()
+            dump_snapshot.append((state, pos.clone(), orn.clone()))
+
+        def rollback_to_source():
+            if symbolic_payload:
+                carry_state["rigid_descendant_states"] = descendant_states
+            for state, pos, orn in dump_snapshot:
+                state["obj"].set_position_orientation(
+                    position=pos,
+                    orientation=orn,
+                )
+                state["obj"].keep_still()
+            self._sync_symbolic_rigid_descendant_subtrees(detached_states)
+            self._restore_symbolic_rigid_descendant_cloth_shapes(detached_states)
+            return self._rigid_descendant_postcondition_failures(detached_states)
+
+        def place_inside_target(state):
+            try:
+                return state["obj"].states[object_states.Inside].set_value(
+                    target_obj,
+                    True,
+                    reset_before_sampling=False,
+                )
+            except TypeError:
+                return state["obj"].states[object_states.Inside].set_value(
+                    target_obj,
+                    True,
+                )
+
+        try:
+            for state in direct_states:
+                placed = place_inside_target(state)
+                if placed is False:
+                    raise RuntimeError(
+                        f'Inside sampler rejected object "{state["obj"].name}"'
+                    )
+            self._sync_symbolic_rigid_descendant_subtrees(detached_states)
+            self._restore_symbolic_rigid_descendant_cloth_shapes(detached_states)
+        except Exception as exc:
+            rollback_failures = rollback_to_source()
+            rollback_complete = not rollback_failures
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                (
+                    "DUMP_INTO failed; all contents were rolled back."
+                    if rollback_complete
+                    else "DUMP_INTO failed and rollback did not restore all source relations."
+                ),
+                {
+                    "source": source_obj.name,
+                    "target": target_obj.name,
+                    "error": str(exc),
+                    "rollback_failed_relations": [
+                        {"object": obj.name, "parent": parent.name}
+                        for obj, parent, _predicate in rollback_failures
+                    ],
+                },
+            ) from exc
+
+        detached_object_ids = {id(state["obj"]) for state in detached_states}
+        remaining_states = [
+            state
+            for state in descendant_states
+            if id(state["obj"]) not in detached_object_ids
+        ]
+        stabilization = getattr(
+            self,
+            "_released_loaded_cloth_stabilization",
+            None,
+        )
+        if stabilization and self._same_runtime_object(
+            stabilization.get("root"),
+            source_obj,
+        ):
+            kept_states = [
+                state
+                for state in stabilization.get("states", [])
+                if id(state.get("obj")) not in detached_object_ids
+            ]
+            if kept_states:
+                stabilization["states"] = kept_states
+            else:
+                self._released_loaded_cloth_stabilization = None
+        if symbolic_payload:
+            carry_state["rigid_descendant_states"] = remaining_states
+        self._restore_symbolic_carried_rigid_descendant_collisions(
+            detached_states
+        )
+        yield from self._yield_symbolic_refresh_step()
+
+        failures = []
+        for state in direct_states:
+            try:
+                if not state["obj"].states[object_states.Inside].get_value(
+                    target_obj
+                ):
+                    failures.append(
+                        (state["obj"], target_obj, object_states.Inside)
+                    )
+            except Exception:
+                failures.append((state["obj"], target_obj, object_states.Inside))
+        nested_states = [state for state in detached_states if state["depth"] > 1]
+        failures.extend(self._rigid_descendant_postcondition_failures(nested_states))
+        if failures:
+            rollback_failures = rollback_to_source()
+            if symbolic_payload:
+                self._suspend_symbolic_carried_rigid_descendants(
+                    detached_states
+                )
+            yield from self._yield_symbolic_refresh_step()
+            rollback_failures = self._rigid_descendant_postcondition_failures(
+                detached_states
+            )
+            rollback_complete = not rollback_failures
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.POST_CONDITION_ERROR,
+                (
+                    "DUMP_INTO postcondition failed; all contents were rolled back."
+                    if rollback_complete
+                    else "DUMP_INTO postcondition failed and rollback did not restore all source relations."
+                ),
+                {
+                    "source": source_obj.name,
+                    "target": target_obj.name,
+                    "failed relations": [
+                        {"object": obj.name, "parent": parent.name}
+                        for obj, parent, _predicate in failures
+                    ],
+                    "rollback_failed_relations": [
+                        {"object": obj.name, "parent": parent.name}
+                        for obj, parent, _predicate in rollback_failures
+                    ],
+                },
+            )
+
+        return [state["obj"] for state in direct_states]
+
+    def _capture_symbolic_carried_particles(self, obj):
+        """Capture physical particles currently inside a symbolic carry object."""
+        if object_states.ContainedParticles not in getattr(obj, "states", {}):
+            return []
+
+        obj_pos, obj_orn = obj.get_position_orientation()
+        particle_states = []
+        for system in obj.scene.system_registry.objects:
+            try:
+                if not obj.scene.is_physical_particle_system(system_name=system.name):
+                    continue
+                contained_state = obj.states[object_states.ContainedParticles]
+                contained_state.clear_cache()
+                contained = contained_state.get_value(system)
+                particle_indices = torch.nonzero(
+                    contained.in_volume,
+                    as_tuple=False,
+                ).flatten()
+                if particle_indices.numel() == 0:
+                    continue
+                world_positions = contained.positions[particle_indices]
+                instancer = getattr(system, "default_particle_instancer", None)
+                if instancer is None:
+                    raise RuntimeError("contained physical particles have no instancer")
+                particle_states.append(
+                    {
+                        "system": system,
+                        "instancer": instancer,
+                        "instancer_particle_count": int(instancer.n_particles),
+                        "instancer_idn": int(getattr(instancer, "idn", 0)),
+                        "indices": particle_indices.clone(),
+                        "local_positions": self._world_points_to_local_frame(
+                            world_positions,
+                            obj_pos,
+                            obj_orn,
+                        ),
+                        "velocities": instancer.particle_velocities[
+                            particle_indices
+                        ].clone(),
+                        "orientations": instancer.particle_orientations[
+                            particle_indices
+                        ].clone(),
+                        "scales": instancer.particle_scales[
+                            particle_indices
+                        ].clone(),
+                        "prototype_indices": instancer.particle_prototype_ids[
+                            particle_indices
+                        ].clone(),
+                        "particle_group": int(
+                            getattr(instancer, "particle_group", 0)
+                        ),
+                        "suspended": False,
+                    }
+                )
+            except Exception as exc:
+                raise ActionPrimitiveError(
+                    ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                    "Failed to capture complete loaded-container particles.",
+                    {
+                        "object": obj.name,
+                        "system": getattr(system, "name", None),
+                        "error": str(exc),
+                    },
+                ) from exc
+
+        if particle_states:
+            particle_count = sum(
+                int(state["indices"].numel()) for state in particle_states
+            )
+            print(
+                "[starter][grasp][symbolic_carry] "
+                f"captured_contained_particles object={obj.name} "
+                f"systems={[state['system'].name for state in particle_states]} "
+                f"count={particle_count}"
+            )
+            sys.stdout.flush()
+        return particle_states
+
+    def _suspend_symbolic_carried_particles(self, particle_states):
+        """Remove carried rows from PhysX while retaining a complete payload."""
+        if not particle_states:
+            return
+        for particle_state in particle_states:
+            system = particle_state["system"]
+            instancer = particle_state["instancer"]
+            if getattr(system, "default_particle_instancer", None) is not instancer:
+                raise ActionPrimitiveError(
+                    ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                    "Cannot suspend particles from a replaced instancer.",
+                    {"system": system.name},
+                )
+            if int(instancer.n_particles) != int(
+                particle_state["instancer_particle_count"]
+            ):
+                raise ActionPrimitiveError(
+                    ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                    "Cannot suspend particles after the instancer count changed.",
+                    {"system": system.name},
+                )
+            indices = particle_state["indices"].to(dtype=torch.long)
+            expected_count = int(particle_state["instancer_particle_count"]) - int(
+                indices.numel()
+            )
+            instancer_snapshot = {
+                "positions": instancer.particle_positions.clone(),
+                "velocities": instancer.particle_velocities.clone(),
+                "orientations": instancer.particle_orientations.clone(),
+                "scales": instancer.particle_scales.clone(),
+                "prototype_indices": instancer.particle_prototype_ids.clone(),
+                "instancer_idn": int(getattr(instancer, "idn", 0)),
+                "particle_group": int(getattr(instancer, "particle_group", 0)),
+                "particle_count": int(instancer.n_particles),
+            }
+            try:
+                system.remove_particles(idxs=indices)
+                if int(system.n_particles) != expected_count:
+                    raise RuntimeError(
+                        "particle suspension removed an incomplete payload: "
+                        f"expected {expected_count}, got {int(system.n_particles)}"
+                    )
+            except Exception as exc:
+                rollback_error = None
+                if int(system.n_particles) != instancer_snapshot["particle_count"]:
+                    try:
+                        current_count = int(system.n_particles)
+                        if current_count:
+                            system.remove_particles(
+                                idxs=torch.arange(
+                                    0,
+                                    current_count,
+                                    dtype=torch.long,
+                                )
+                            )
+                        if int(system.n_particles) != 0:
+                            raise RuntimeError(
+                                "failed to clear the partially modified instancer"
+                            )
+                        system.generate_particles(
+                            positions=instancer_snapshot["positions"],
+                            instancer_idn=instancer_snapshot["instancer_idn"],
+                            velocities=instancer_snapshot["velocities"],
+                            orientations=instancer_snapshot["orientations"],
+                            scales=instancer_snapshot["scales"],
+                            prototype_indices=instancer_snapshot[
+                                "prototype_indices"
+                            ].tolist(),
+                            particle_group=instancer_snapshot["particle_group"],
+                        )
+                        if int(system.n_particles) != instancer_snapshot[
+                            "particle_count"
+                        ]:
+                            raise RuntimeError(
+                                "full instancer rollback restored the wrong count"
+                            )
+                        restored_instancer = system.default_particle_instancer
+                        if restored_instancer is None:
+                            raise RuntimeError(
+                                "full instancer rollback produced no instancer"
+                            )
+                        particle_state["instancer"] = restored_instancer
+                    except Exception as rollback_exc:
+                        rollback_error = (
+                            f"{type(rollback_exc).__name__}: {rollback_exc}"
+                        )
+                particle_state["suspended"] = False
+                raise ActionPrimitiveError(
+                    ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                    "Particle suspension failed before the payload was committed.",
+                    {
+                        "system": system.name,
+                        "expected remaining": expected_count,
+                        "actual remaining": int(system.n_particles),
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "rollback_error": rollback_error,
+                    },
+                ) from exc
+            particle_state["suspended"] = True
+            print(
+                "[starter][grasp][particle_suspension] "
+                f"system={system.name} count={int(indices.numel())} "
+                "mode=removed_payload_snapshot"
+            )
+            sys.stdout.flush()
+
+    @staticmethod
+    def _world_points_to_local_frame(world_points, frame_pos, frame_orn):
+        world_points = torch.as_tensor(world_points)
+        frame_pos = torch.as_tensor(
+            frame_pos,
+            dtype=world_points.dtype,
+            device=world_points.device,
+        )
+        frame_orn = torch.as_tensor(
+            frame_orn,
+            dtype=world_points.dtype,
+            device=world_points.device,
+        )
+        rotation = T.quat2mat(frame_orn)
+        return ((world_points - frame_pos) @ rotation).clone()
+
+    @staticmethod
+    def _local_points_to_world_frame(local_points, frame_pos, frame_orn):
+        local_points = torch.as_tensor(local_points)
+        frame_pos = torch.as_tensor(
+            frame_pos,
+            dtype=local_points.dtype,
+            device=local_points.device,
+        )
+        frame_orn = torch.as_tensor(
+            frame_orn,
+            dtype=local_points.dtype,
+            device=local_points.device,
+        )
+        rotation = T.quat2mat(frame_orn)
+        return local_points @ rotation.T + frame_pos
+
+    def _sync_symbolic_carried_particles_to_pose(
+        self,
+        particle_states,
+        obj_pos,
+        obj_orn,
+        *,
+        zero_velocities,
+    ):
+        """Materialize a suspended payload at a stationary container pose."""
+        suspended_states = [
+            state for state in particle_states if state.get("suspended", False)
+        ]
+        if not suspended_states:
+            return
+        world_positions = [
+            self._local_points_to_world_frame(
+                state["local_positions"],
+                obj_pos,
+                obj_orn,
+            )
+            for state in suspended_states
+        ]
+        try:
+            self._generate_suspended_particle_states(
+                suspended_states,
+                world_positions,
+                zero_velocities=zero_velocities,
+            )
+        except Exception as exc:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                "Failed to restore the complete loaded-container payload.",
+                {
+                    "systems": [state["system"].name for state in suspended_states],
+                    "error": str(exc),
+                },
+            ) from exc
+
+    def _generate_suspended_particle_states(
+        self,
+        particle_states,
+        world_positions,
+        *,
+        zero_velocities,
+    ):
+        if len(particle_states) != len(world_positions):
+            raise ValueError("particle states and destination positions must align")
+
+        generated_plans = []
+        try:
+            for state, positions in zip(particle_states, world_positions):
+                if not state.get("suspended", False):
+                    raise RuntimeError("particle payload is not suspended")
+                system = state["system"]
+                positions = torch.as_tensor(positions)
+                expected_count = int(state["local_positions"].shape[0])
+                if int(positions.shape[0]) != expected_count:
+                    raise RuntimeError("particle destination count changed")
+
+                start_count = int(system.n_particles)
+                snapshot = {
+                    "instancer": state.get("instancer"),
+                    "instancer_particle_count": state.get(
+                        "instancer_particle_count"
+                    ),
+                    "indices": state.get("indices"),
+                    "suspended": state.get("suspended", False),
+                }
+                try:
+                    system.generate_particles(
+                        positions=positions,
+                        instancer_idn=state["instancer_idn"],
+                        velocities=(
+                            torch.zeros_like(positions)
+                            if zero_velocities
+                            else state["velocities"]
+                        ),
+                        orientations=state["orientations"],
+                        scales=state["scales"],
+                        prototype_indices=state["prototype_indices"].tolist(),
+                        particle_group=state["particle_group"],
+                    )
+                except Exception:
+                    generated_count = max(0, int(system.n_particles) - start_count)
+                    if generated_count:
+                        generated_plans.append(
+                            {
+                                "state": state,
+                                "system": system,
+                                "start_count": start_count,
+                                "generated_count": generated_count,
+                                "post_count": int(system.n_particles),
+                                "snapshot": snapshot,
+                            }
+                        )
+                    raise
+
+                generated_count = int(system.n_particles) - start_count
+                generated_plans.append(
+                    {
+                        "state": state,
+                        "system": system,
+                        "start_count": start_count,
+                        "generated_count": generated_count,
+                        "post_count": int(system.n_particles),
+                        "snapshot": snapshot,
+                    }
+                )
+                if generated_count != expected_count:
+                    raise RuntimeError(
+                        f"generated {generated_count} of {expected_count} particles"
+                    )
+
+            for plan in generated_plans:
+                state = plan["state"]
+                instancer = plan["system"].default_particle_instancer
+                if instancer is None:
+                    raise RuntimeError("particle generation produced no instancer")
+                start = plan["start_count"]
+                stop = start + plan["generated_count"]
+                state["instancer"] = instancer
+                state["instancer_particle_count"] = plan["post_count"]
+                state["indices"] = torch.arange(start, stop, dtype=torch.long)
+                state["suspended"] = False
+        except Exception:
+            rollback_errors = self._remove_generated_particle_plans(
+                generated_plans
+            )
+            for plan in generated_plans:
+                plan["state"].update(plan["snapshot"])
+            if rollback_errors:
+                raise RuntimeError(
+                    "particle generation failed and rollback was incomplete: "
+                    + "; ".join(rollback_errors)
+                )
+            raise
+        return generated_plans
+
+    @staticmethod
+    def _remove_generated_particle_plans(generated_plans):
+        errors = []
+        for plan in reversed(generated_plans):
+            system = plan["system"]
+            if int(system.n_particles) != int(plan["post_count"]):
+                errors.append(
+                    f"{system.name}: count changed before rollback "
+                    f"({int(system.n_particles)} != {int(plan['post_count'])})"
+                )
+                continue
+            start = int(plan["start_count"])
+            stop = start + int(plan["generated_count"])
+            try:
+                system.remove_particles(
+                    idxs=torch.arange(start, stop, dtype=torch.long)
+                )
+                if int(system.n_particles) != start:
+                    raise RuntimeError(
+                        f"remaining count {int(system.n_particles)} != {start}"
+                    )
+            except Exception as exc:
+                errors.append(f"{system.name}: {type(exc).__name__}: {exc}")
+        return errors
+
+    def _sample_symbolic_transfer_positions(self, target_obj, system, count):
+        """Sample existing particle destinations inside a target container."""
+        contained_state = target_obj.states[object_states.ContainedParticles]
+        link = contained_state.link
+        try:
+            low, high = link.visual_aabb
+        except ValueError:
+            low, high = target_obj.aabb
+
+        radius = float(system.particle_radius)
+        spacing = float(system.particle_particle_rest_distance)
+        axes = [
+            torch.arange(
+                float(axis_low) + radius,
+                float(axis_high) - radius + 1e-10,
+                spacing,
+            )
+            for axis_low, axis_high in zip(low, high)
+        ]
+        if any(axis.numel() == 0 for axis in axes):
+            candidates = torch.empty((0, 3), dtype=torch.float32)
+        else:
+            candidates = torch.cartesian_prod(*axes).reshape(-1, 3)
+            candidates = candidates[contained_state.check_in_volume(candidates)]
+
+        contact_free_count = 0
+        if len(candidates) >= count and hasattr(system, "check_in_contact"):
+            try:
+                contact_free = candidates[
+                    ~system.check_in_contact(candidates).to(dtype=torch.bool)
+                ]
+                contact_free_count = len(contact_free)
+                if contact_free_count >= count:
+                    candidates = contact_free
+            except Exception:
+                contact_free_count = 0
+
+        if len(candidates) < count:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                "Target container volume cannot hold the complete particle payload.",
+                {
+                    "target": target_obj.name,
+                    "system": system.name,
+                    "required": int(count),
+                    "sampled inside": int(len(candidates)),
+                    "contact free": int(contact_free_count),
+                },
+            )
+
+        center = torch.tensor(
+            [
+                (float(axis_low) + float(axis_high)) / 2.0
+                for axis_low, axis_high in zip(low, high)
+            ],
+            dtype=candidates.dtype,
+            device=candidates.device,
+        )
+        order = torch.argsort(torch.sum((candidates - center) ** 2, dim=1))
+        selected = candidates[order[:count]]
+        print(
+            "[starter][pour][target_volume] "
+            f"target={target_obj.name} system={system.name} "
+            f"selected={len(selected)} candidates={len(candidates)} "
+            f"contact_free={contact_free_count}"
+        )
+        sys.stdout.flush()
+        return selected
+
+    def _symbolic_carried_particle_states(self, obj):
+        carry_state = self._symbolic_carry_state
+        if not carry_state or carry_state.get("obj") != obj:
+            return []
+        return list(carry_state.get("particle_states", []))
+
+    def defer_symbolic_carried_coverage(self, obj, systems):
+        """Defer physical rinse particles until the carried object is placed."""
+        carry_state = self._symbolic_carry_state
+        if not carry_state or carry_state.get("obj") is not obj:
+            return set()
+
+        pending = {
+            system.name: system
+            for system in carry_state.get("pending_covered_systems", [])
+        }
+        deferred = set()
+        for system in systems:
+            try:
+                is_physical = obj.scene.is_physical_particle_system(
+                    system_name=system.name
+                )
+            except Exception:
+                is_physical = False
+            if not is_physical:
+                continue
+            pending[system.name] = system
+            deferred.add(system.name)
+
+        carry_state["pending_covered_systems"] = list(pending.values())
+        if deferred:
+            print(
+                "[starter][wipe][symbolic_carry] "
+                f"deferred_coverage object={obj.name} systems={sorted(deferred)}"
+            )
+            sys.stdout.flush()
+        return deferred
+
+    def _pending_symbolic_carried_coverage(self, obj):
+        carry_state = self._symbolic_carry_state
+        if not carry_state or carry_state.get("obj") is not obj:
+            return []
+        return list(carry_state.get("pending_covered_systems", []))
+
+    def _finalize_pending_symbolic_coverage(
+        self,
+        obj,
+        systems,
+        max_samples=200,
+    ):
+        """Materialize deferred rinse particles after collisions are restored."""
+        systems = list(systems or [])
+        if not systems:
+            return
+        max_samples = min(
+            int(max_samples),
+            self.deferred_coverage_max_samples,
+        )
+        if max_samples < 1:
+            raise ValueError("max_samples must be at least 1")
+
+        generated = {}
+        failed = []
+        covered_state = getattr(obj, "states", {}).get(object_states.Covered)
+        if covered_state is None:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                "Cannot materialize deferred coverage on an object without Covered state.",
+                {"object": obj.name},
+            )
+
+        for system in systems:
+            try:
+                if covered_state.get_value(system):
+                    generated[system.name] = 0
+                    continue
+                if obj.scene.is_physical_particle_system(system_name=system.name):
+                    before_count = int(system.n_particles)
+                    success = system.generate_particles_on_object(
+                        obj=obj,
+                        max_samples=int(max_samples),
+                        min_samples_for_success=1,
+                    )
+                    generated_count = int(system.n_particles) - before_count
+                    generated[system.name] = generated_count
+                    if (
+                        not success
+                        or generated_count < 1
+                        or generated_count > int(max_samples)
+                    ):
+                        failed.append(system.name)
+                elif not covered_state.set_value(system, True):
+                    generated[system.name] = 0
+                    failed.append(system.name)
+                else:
+                    generated[system.name] = 0
+            except Exception as exc:
+                generated[system.name] = 0
+                failed.append(system.name)
+                self._log_verbose(
+                    "[starter][wipe][symbolic_carry] "
+                    f"failed_to_materialize object={obj.name} system={system.name} "
+                    f"error={type(exc).__name__}: {exc}"
+                )
+
+        for _ in range(2):
+            yield from self._yield_symbolic_refresh_step()
+
+        missing = [
+            system.name
+            for system in systems
+            if not covered_state.get_value(system)
+        ]
+        failed = sorted(set(failed + missing))
+        if failed:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                "Deferred symbolic rinse coverage did not persist after placement.",
+                {
+                    "object": obj.name,
+                    "failed systems": failed,
+                    "generated particles": generated,
+                    "max samples per system": int(max_samples),
+                },
+            )
+
+        print(
+            "[starter][wipe][symbolic_carry] "
+            f"materialized_coverage object={obj.name} "
+            f"systems={sorted(generated)} generated={generated}"
+        )
+        sys.stdout.flush()
+
+    def symbolic_carried_particle_systems(self, obj=None):
+        """Return logically contained systems while symbolic particles are suspended."""
+        carry_state = self._symbolic_carry_state
+        if not carry_state or (obj is not None and carry_state.get("obj") != obj):
+            return []
+        return [
+            particle_state["system"]
+            for particle_state in carry_state.get("particle_states", [])
+        ]
+
+    def transfer_symbolic_carried_particles_to_target(self, source_obj, target_obj):
+        """Atomically stage carried particle rows inside a target container."""
+        carry_state = self._symbolic_carry_state
+        if not carry_state or carry_state.get("obj") != source_obj:
+            return None
+        if object_states.ContainedParticles not in getattr(target_obj, "states", {}):
+            return None
+        if self._pending_symbolic_particle_transfer is not None:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                "A symbolic particle transfer is already awaiting verification.",
+            )
+
+        particle_states = list(carry_state.get("particle_states", []))
+        if not particle_states or not all(
+            state.get("suspended", False) for state in particle_states
+        ):
+            return None
+
+        target_positions = []
+        transfer_results = []
+        for particle_state in particle_states:
+            system = particle_state["system"]
+            available_count = int(particle_state["local_positions"].shape[0])
+            target_positions.append(
+                self._sample_symbolic_transfer_positions(
+                    target_obj,
+                    system,
+                    available_count,
+                )
+            )
+            transfer_results.append(
+                {
+                    "system": system,
+                    "available_count": available_count,
+                    "transferred_count": available_count,
+                    "remaining_count": 0,
+                }
+            )
+
+        try:
+            transfer_plans = self._generate_suspended_particle_states(
+                particle_states,
+                target_positions,
+                zero_velocities=True,
+            )
+        except Exception as exc:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                "Failed to stage the complete particle payload in the target.",
+                {
+                    "source": source_obj.name,
+                    "target": target_obj.name,
+                    "error": str(exc),
+                },
+            ) from exc
+
+        carry_state["particle_states"] = []
+        self._pending_symbolic_particle_transfer = {
+            "source_obj": source_obj,
+            "target_obj": target_obj,
+            "carry_state": carry_state,
+            "particle_states": particle_states,
+            "plans": transfer_plans,
+        }
+        print(
+            "[starter][pour][physical_transfer] "
+            f"source={source_obj.name} target={target_obj.name} "
+            "mode=generated_payload_pending_verification "
+            f"systems={[(result['system'].name, result['transferred_count'], result['remaining_count']) for result in transfer_results]}"
+        )
+        sys.stdout.flush()
+        return transfer_results
+
+    def commit_symbolic_particle_transfer(self, source_obj, target_obj):
+        pending = self._pending_symbolic_particle_transfer
+        if pending is None:
+            return False
+        if (
+            pending["source_obj"] is not source_obj
+            or pending["target_obj"] is not target_obj
+        ):
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                "Pending symbolic particle transfer does not match commit request.",
+            )
+        self._pending_symbolic_particle_transfer = None
+        print(
+            "[starter][pour][physical_transfer] "
+            f"committed source={source_obj.name} target={target_obj.name}"
+        )
+        sys.stdout.flush()
+        return True
+
+    def rollback_symbolic_particle_transfer(self, source_obj, target_obj):
+        pending = self._pending_symbolic_particle_transfer
+        if pending is None:
+            return False
+        if (
+            pending["source_obj"] is not source_obj
+            or pending["target_obj"] is not target_obj
+        ):
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                "Pending symbolic particle transfer does not match rollback request.",
+            )
+
+        try:
+            rollback_errors = self._remove_generated_particle_plans(
+                pending["plans"]
+            )
+            if rollback_errors:
+                raise RuntimeError("; ".join(rollback_errors))
+            for plan in pending["plans"]:
+                plan["state"].update(plan["snapshot"])
+            pending["carry_state"]["particle_states"] = list(
+                pending["particle_states"]
+            )
+            self._pending_symbolic_particle_transfer = None
+        except Exception as exc:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                "Failed to roll back symbolic particle transfer.",
+                {
+                    "source": source_obj.name,
+                    "target": target_obj.name,
+                    "error": str(exc),
+                },
+            ) from exc
+
+        print(
+            "[starter][pour][physical_transfer] "
+            f"rolled_back source={source_obj.name} target={target_obj.name}"
+        )
+        sys.stdout.flush()
+        return True
+
+    def _sync_released_symbolic_particles_to_object(
+        self,
+        particle_states,
+        obj,
+        *,
+        preserve_snapshot_velocities=False,
+    ):
+        if not particle_states:
+            return
+        obj_pos, obj_orn = obj.get_position_orientation()
+        self._sync_symbolic_carried_particles_to_pose(
+            particle_states,
+            obj_pos,
+            obj_orn,
+            zero_velocities=not preserve_snapshot_velocities,
+        )
+
+    @staticmethod
+    def _symbolic_carry_robot_filter_key(obj_link, robot_link):
+        return str(obj_link.prim_path), str(robot_link.prim_path)
+
+    @staticmethod
+    def _robot_collision_pair_is_filtered(obj_link, robot_link):
+        obj_targets = (
+            obj_link._collision_filter_api.GetFilteredPairsRel().GetTargets()
+        )
+        robot_targets = (
+            robot_link._collision_filter_api.GetFilteredPairsRel().GetTargets()
+        )
+        return any(
+            str(target) == str(robot_link.prim_path) for target in obj_targets
+        ) or any(
+            str(target) == str(obj_link.prim_path) for target in robot_targets
+        )
+
+    def _uses_episode_symbolic_carry_robot_filters(self, obj) -> bool:
+        if self.symbolic_carry_robot_collision_filter_scope != "episode":
+            return False
+        configured_names = self.symbolic_carry_robot_collision_filter_objects
+        if not configured_names:
+            return True
+        if obj is None:
+            return False
+        object_names = {
+            str(name).strip().lower()
+            for name in self._name_variants_for_object(obj)
+            if str(name).strip()
+        }
+        return bool(object_names.intersection(configured_names))
+
+    def _register_episode_symbolic_carry_robot_filter(
+        self,
+        obj,
+        obj_link,
+        robot_link,
+    ):
+        key = self._symbolic_carry_robot_filter_key(obj_link, robot_link)
+        self._symbolic_carry_robot_filter_registry.setdefault(
+            key,
+            {
+                "obj": obj,
+                "obj_link": obj_link,
+                "robot_link": robot_link,
+            },
+        )
+        return key
 
     def _suppress_symbolic_carried_object_collisions(self, obj):
         """Disable carried-object collisions while preserving visual carry.
@@ -1648,8 +3457,137 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         robot body and can lift Fetch off the traversable floor.  During carry
         the object is already logically held via ``_ag_obj_in_hand``, so its
         collision meshes can be disabled and restored on PLACE / RELEASE.
+
+        GPU dynamics does not allow changing ``collision_enabled`` while the
+        simulator is playing.  In that mode, use USD filtered-pair
+        relationships against every robot link instead, preserving collisions
+        with scene geometry while preventing the held object from pushing the
+        robot.
         """
         collision_states = []
+        link_visual_only_states = []
+        filtered_pairs = []
+        robot_filter_scope = (
+            "episode"
+            if self._uses_episode_symbolic_carry_robot_filters(obj)
+            else "release"
+        )
+
+        try:
+            sim_requires_filtered_pairs = not bool(og.sim.is_stopped())
+        except Exception:
+            # Collision attributes are only safe to mutate when stopped. If
+            # simulator state cannot be queried, keep the conservative runtime
+            # path instead of risking an ineffective collision update.
+            sim_requires_filtered_pairs = True
+
+        if sim_requires_filtered_pairs:
+            articulation_joints = getattr(obj, "joints", {})
+            if articulation_joints:
+                # Applying filtered-pair USD relationships while PhysX is
+                # running invalidates tensor views for articulated containers.
+                # The kinematic carry pose already keeps the root outside the
+                # robot body; descendants can still use ordinary pair filters.
+                print(
+                    "[starter][grasp][symbolic_carry] "
+                    "skipped_articulated_robot_collision_filter "
+                    f"object={obj.name} joints={len(articulation_joints)}"
+                )
+                sys.stdout.flush()
+                return {
+                    "collision_meshes": collision_states,
+                    "link_visual_only": link_visual_only_states,
+                    "filtered_pairs": filtered_pairs,
+                    "robot_filter_scope": robot_filter_scope,
+                }
+            robot_links = list(getattr(self.robot, "links", {}).values())
+            requested_pairs = 0
+            already_filtered_pairs = 0
+            for obj_link in getattr(obj, "links", {}).values():
+                for robot_link in robot_links:
+                    requested_pairs += 1
+                    try:
+                        already_filtered = (
+                            self._robot_collision_pair_is_filtered(
+                                obj_link,
+                                robot_link,
+                            )
+                        )
+                    except Exception as exc:
+                        self._log_verbose(
+                            "[starter][grasp][symbolic_carry] "
+                            "failed_to_read_robot_collision_filter "
+                            f"object={obj.name} robot_link={robot_link.name} "
+                            f"error={exc}"
+                        )
+                        continue
+                    if already_filtered:
+                        already_filtered_pairs += 1
+                        continue
+                    try:
+                        obj_link.add_filtered_collision_pair(robot_link)
+                    except Exception as exc:
+                        relation_probe_error = None
+                        try:
+                            pair_was_added = (
+                                self._robot_collision_pair_is_filtered(
+                                    obj_link,
+                                    robot_link,
+                                )
+                            )
+                        except Exception as probe_exc:
+                            # The pre-add read proved this relationship was not
+                            # already present. If the mutating call and the
+                            # follow-up read both fail, retain ownership so a
+                            # later release / episode cleanup can remove any
+                            # partial USD mutation instead of leaking it.
+                            pair_was_added = True
+                            relation_probe_error = probe_exc
+                        if not pair_was_added:
+                            self._log_verbose(
+                                "[starter][grasp][symbolic_carry] "
+                                "failed_to_add_robot_collision_filter "
+                                f"object={obj.name} robot_link={robot_link.name} "
+                                f"error={exc}"
+                            )
+                            continue
+                        if relation_probe_error is None:
+                            self._log_verbose(
+                                "[starter][grasp][symbolic_carry] "
+                                "collision_filter_add_raised_after_relation_update "
+                                f"object={obj.name} robot_link={robot_link.name} "
+                                f"error={exc}"
+                            )
+                        else:
+                            self._log_verbose(
+                                "[starter][grasp][symbolic_carry] "
+                                "collision_filter_add_state_unknown_owned_for_cleanup "
+                                f"object={obj.name} robot_link={robot_link.name} "
+                                f"add_error={exc} probe_error={relation_probe_error}"
+                            )
+                    filtered_pairs.append((obj_link, robot_link))
+                    if robot_filter_scope == "episode":
+                        self._register_episode_symbolic_carry_robot_filter(
+                            obj,
+                            obj_link,
+                            robot_link,
+                        )
+            print(
+                "[starter][grasp][symbolic_carry] "
+                f"filtered_robot_collisions object={obj.name} "
+                f"pairs={len(filtered_pairs)} requested={requested_pairs} "
+                f"already_present={already_filtered_pairs} "
+                f"scope={robot_filter_scope} "
+                f"owned={len(self._symbolic_carry_robot_filter_registry)}"
+            )
+            sys.stdout.flush()
+            return {
+                "collision_meshes": collision_states,
+                "link_visual_only": link_visual_only_states,
+                "filtered_pairs": filtered_pairs,
+                "robot_filter_scope": robot_filter_scope,
+            }
+
         for link in getattr(obj, "links", {}).values():
             for collision_mesh in getattr(link, "collision_meshes", {}).values():
                 try:
@@ -1663,16 +3601,47 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                         "failed_to_disable_collision "
                         f"object={obj.name} error={exc}"
                     )
-        return collision_states
+            try:
+                was_visual_only = bool(link.visual_only)
+                link_visual_only_states.append((link, was_visual_only))
+                if not was_visual_only:
+                    link.visual_only = True
+            except Exception as exc:
+                self._log_verbose(
+                    "[starter][grasp][symbolic_carry] "
+                    "failed_to_disable_link_physics "
+                    f"object={obj.name} error={exc}"
+                )
+        return {
+            "collision_meshes": collision_states,
+            "link_visual_only": link_visual_only_states,
+            "filtered_pairs": filtered_pairs,
+            "robot_filter_scope": robot_filter_scope,
+        }
 
-    def _restore_symbolic_carried_object_collisions(self, carry_state=None):
+    def _restore_symbolic_carried_object_collisions(
+        self,
+        carry_state=None,
+    ):
         if carry_state is None:
             carry_state = self._symbolic_carry_state
         if not carry_state:
             return
 
         obj = carry_state.get("obj")
-        for collision_mesh, was_enabled in carry_state.get("collision_states", []):
+        physics_states = carry_state.get("collision_states", {})
+        for link, was_visual_only in physics_states.get("link_visual_only", []):
+            try:
+                link.visual_only = was_visual_only
+            except Exception as exc:
+                self._log_verbose(
+                    "[starter][grasp][symbolic_carry] "
+                    "failed_to_restore_link_physics "
+                    f"object={None if obj is None else obj.name} error={exc}"
+                )
+        for collision_mesh, was_enabled in physics_states.get(
+            "collision_meshes", []
+        ):
             try:
                 collision_mesh.collision_enabled = was_enabled
             except Exception as exc:
@@ -1681,8 +3650,108 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                     "failed_to_restore_collision "
                     f"object={None if obj is None else obj.name} error={exc}"
                 )
+        filtered_pairs = list(physics_states.get("filtered_pairs", []))
+        if physics_states.get("robot_filter_scope") == "episode":
+            print(
+                "[starter][grasp][symbolic_carry] "
+                f"retained_robot_collision_filters object={obj.name} "
+                f"pairs={len(filtered_pairs)} "
+                f"owned={len(self._symbolic_carry_robot_filter_registry)}"
+            )
+            sys.stdout.flush()
+        else:
+            removed_pairs = 0
+            deferred_cleanup_pairs = 0
+            for obj_link, robot_link in filtered_pairs:
+                try:
+                    obj_link.remove_filtered_collision_pair(robot_link)
+                    removed_pairs += 1
+                except Exception as exc:
+                    # A failed release-time removal must not be forgotten. The
+                    # simulator may need to stop before USD accepts the edit,
+                    # so transfer ownership to the lifecycle registry and let
+                    # end_episode() retry it after the stop boundary.
+                    self._register_episode_symbolic_carry_robot_filter(
+                        obj,
+                        obj_link,
+                        robot_link,
+                    )
+                    deferred_cleanup_pairs += 1
+                    self._log_verbose(
+                        "[starter][grasp][symbolic_carry] "
+                        "failed_to_remove_robot_collision_filter "
+                        f"object={None if obj is None else obj.name} "
+                        f"robot_link={getattr(robot_link, 'name', None)} error={exc}"
+                    )
+            if filtered_pairs:
+                print(
+                    "[starter][grasp][symbolic_carry] "
+                    f"removed_robot_collision_filters "
+                    f"object={None if obj is None else obj.name} "
+                    f"removed={removed_pairs} requested={len(filtered_pairs)} "
+                    f"deferred_cleanup={deferred_cleanup_pairs}"
+                )
+                sys.stdout.flush()
+        physics_states["filtered_pairs"] = []
+        physics_states["collision_meshes"] = []
+        physics_states["link_visual_only"] = []
 
-    def _clear_symbolic_grasp_state(self, arm):
+    def end_episode(self):
+        """Remove controller-owned episode filters after simulation stops."""
+        try:
+            simulator_stopped = bool(og.sim.is_stopped())
+        except Exception as exc:
+            raise RuntimeError(
+                "Cannot verify simulator state before collision-filter cleanup"
+            ) from exc
+        if not simulator_stopped:
+            raise RuntimeError(
+                "Episode collision filters may only be removed while the simulator is stopped"
+            )
+
+        owned_pairs = list(self._symbolic_carry_robot_filter_registry.items())
+        removed_pairs = 0
+        failures = []
+        for key, entry in owned_pairs:
+            obj_link = entry["obj_link"]
+            robot_link = entry["robot_link"]
+            try:
+                obj_link.remove_filtered_collision_pair(robot_link)
+                removed_pairs += 1
+                self._symbolic_carry_robot_filter_registry.pop(key, None)
+            except Exception as exc:
+                failures.append(
+                    {
+                        "object_link": key[0],
+                        "robot_link": key[1],
+                        "error": str(exc),
+                    }
+                )
+                self._log_verbose(
+                    "[starter][episode][symbolic_carry] "
+                    "failed_to_remove_owned_robot_collision_filter "
+                    f"object_link={key[0]} robot_link={key[1]} error={exc}"
+                )
+
+        report = {
+            "requested": len(owned_pairs),
+            "removed": removed_pairs,
+            "failed": len(failures),
+            "failures": failures,
+        }
+        print(
+            "[starter][episode][symbolic_carry] "
+            f"collision_filter_cleanup requested={report['requested']} "
+            f"removed={report['removed']} failed={report['failed']}"
+        )
+        sys.stdout.flush()
+        return report
+
+    def _clear_symbolic_grasp_state(
+        self,
+        arm,
+        restore_payload=True,
+    ):
         params = self.robot._ag_obj_constraint_params.get(arm, {})
         joint_prim_path = params.get("ag_joint_prim_path")
         if joint_prim_path:
@@ -1691,10 +3760,22 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             self._symbolic_carry_state is not None
             and self._symbolic_carry_state.get("arm") == arm
         ):
-            self._restore_symbolic_carried_object_collisions(
-                self._symbolic_carry_state
+            carry_state = self._symbolic_carry_state
+            carry_obj = carry_state.get("obj")
+            if carry_obj is not None and restore_payload:
+                self._sync_released_symbolic_payload_to_object(
+                    carry_state.get("particle_states", []),
+                    carry_state.get("rigid_descendant_states", []),
+                    carry_obj,
+                )
+            self._restore_symbolic_carried_rigid_descendant_collisions(
+                carry_state.get("rigid_descendant_states", [])
             )
-            self._symbolic_carry_state = None
+            self._restore_symbolic_carried_object_collisions(carry_state)
+            if restore_payload:
+                self._symbolic_carry_state = None
+            else:
+                carry_state["released_pending_payload"] = True
         self.robot._ag_obj_constraints[arm] = None
         self.robot._ag_obj_constraint_params[arm] = {}
         self.robot._ag_obj_in_hand[arm] = None
@@ -1806,7 +3887,7 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
     def _angle_diff(current, target):
         return math.atan2(math.sin(target - current), math.cos(target - current))
 
-    def _symbolic_release(self):
+    def _symbolic_release(self, restore_payload=True):
         """Release any assisted-grasp constraint immediately."""
         if self._get_obj_in_hand() is None:
             self._restore_assisted_grasp_auto_handling_after_symbolic_hold()
@@ -1816,12 +3897,31 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             )
 
         try:
+            release_fallback_used = False
             try:
                 self.robot.release_grasp_immediately()
             except Exception:
-                self._clear_symbolic_grasp_state(self.arm)
-            if self._get_obj_in_hand() is not None:
-                self._clear_symbolic_grasp_state(self.arm)
+                self._clear_symbolic_grasp_state(
+                    self.arm,
+                    restore_payload=restore_payload,
+                )
+                release_fallback_used = True
+            if (
+                not release_fallback_used
+                and self._symbolic_carry_state is not None
+            ):
+                self._clear_symbolic_grasp_state(
+                    self.arm,
+                    restore_payload=restore_payload,
+                )
+            elif (
+                not release_fallback_used
+                and self._get_obj_in_hand() is not None
+            ):
+                self._clear_symbolic_grasp_state(
+                    self.arm,
+                    restore_payload=restore_payload,
+                )
 
             if self._get_obj_in_hand() is not None:
                 raise ActionPrimitiveError(
@@ -2273,6 +4373,10 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
 
     def _place_inside(self, obj):
         if self.symbolic_place:
+            obj_in_hand = self._get_obj_in_hand()
+            if self._should_use_symbolic_cloth_inside_drop(obj_in_hand, obj):
+                yield from self._symbolic_drop_cloth_inside(obj_in_hand, obj)
+                return
             yield from self._symbolic_place_with_predicate(obj, object_states.Inside)
             return
 
@@ -2290,9 +4394,198 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
 
         yield from super()._place_on_top(obj)
 
+    def _should_use_symbolic_cloth_inside_drop(self, obj_in_hand, container) -> bool:
+        return (
+            self.symbolic_cloth_inside_drop
+            and obj_in_hand is not None
+            and getattr(obj_in_hand, "prim_type", None) == PrimType.CLOTH
+            and getattr(container, "category", "")
+            in self.symbolic_cloth_inside_drop_container_categories
+        )
+
+    def _symbolic_drop_cloth_inside(self, obj_in_hand, container):
+        """Drop a cloth above a container and require native Inside after settling."""
+        particle_states = self._symbolic_carried_particle_states(obj_in_hand)
+        rigid_descendant_states = self._symbolic_carried_rigid_descendant_states(
+            obj_in_hand
+        )
+        pending_coverage = self._pending_symbolic_carried_coverage(obj_in_hand)
+        carry_state = self._symbolic_carry_state
+        cloth_shape = (
+            carry_state.get("cloth_shape")
+            if carry_state is not None and carry_state.get("obj") is obj_in_hand
+            else None
+        )
+
+        if self.symbolic_cloth_inside_pre_settle_steps:
+            print(
+                "[starter][place_inside][cloth_drop] pre_settle "
+                f"object={obj_in_hand.name} container={container.name} "
+                f"steps={self.symbolic_cloth_inside_pre_settle_steps}"
+            )
+            sys.stdout.flush()
+            for _ in range(self.symbolic_cloth_inside_pre_settle_steps):
+                yield from self._yield_symbolic_refresh_step()
+            self._sync_symbolic_carried_object_to_eef()
+
+        target_center, _, target_extent, _ = container.get_base_aligned_bbox()
+        if (
+            self.symbolic_cloth_inside_fit_shape
+            and cloth_shape is not None
+        ):
+            cloth_shape = self._fit_symbolic_cloth_shape_to_extent(
+                cloth_shape,
+                obj_in_hand.get_position_orientation()[1],
+                torch.as_tensor(target_extent, dtype=torch.float32)
+                * self.symbolic_cloth_inside_fit_container_scale,
+            )
+            if carry_state is not None and carry_state.get("obj") is obj_in_hand:
+                carry_state["cloth_shape"] = cloth_shape
+            current_pos, current_orn = obj_in_hand.get_position_orientation()
+            self._restore_symbolic_carried_cloth_shape(
+                obj_in_hand,
+                current_pos,
+                current_orn,
+                cloth_shape,
+            )
+        _, cloth_orientation, cloth_extent, cloth_center_in_base = (
+            obj_in_hand.get_base_aligned_bbox()
+        )
+        desired_cloth_center = torch.as_tensor(
+            target_center, dtype=torch.float32
+        ).clone()
+        desired_cloth_center[2] = (
+            target_center[2]
+            + target_extent[2] / 2.0
+            + self.symbolic_cloth_inside_drop_height
+            + cloth_extent[2] / 2.0
+        )
+        cloth_pose = T.pose2mat(
+            (desired_cloth_center, cloth_orientation)
+        ) @ T.pose_inv(
+            T.pose2mat(
+                (
+                    cloth_center_in_base,
+                    cloth_center_in_base.new_tensor([0.0, 0.0, 0.0, 1.0]),
+                )
+            )
+        )
+        cloth_position, cloth_orientation = T.mat2pose(cloth_pose)
+        print(
+            "[starter][place_inside][cloth_drop] "
+            f"object={obj_in_hand.name} container={container.name} "
+            f"position={self._to_float_list(cloth_position)} "
+            f"container_center={self._to_float_list(target_center)} "
+            f"container_extent={self._to_float_list(target_extent)} "
+            f"cloth_extent={self._to_float_list(cloth_extent)} "
+            f"settle_steps={self.symbolic_cloth_inside_settle_steps}"
+        )
+        sys.stdout.flush()
+
+        yield from self._symbolic_release(restore_payload=False)
+        try:
+            obj_in_hand.set_position_orientation(
+                position=cloth_position,
+                orientation=cloth_orientation,
+            )
+        except Exception:
+            self._sync_released_symbolic_payload_to_object(
+                particle_states,
+                rigid_descendant_states,
+                obj_in_hand,
+            )
+            raise
+        obj_in_hand.keep_still()
+        self._restore_symbolic_carried_cloth_shape(
+            obj_in_hand,
+            cloth_position,
+            cloth_orientation,
+            cloth_shape,
+        )
+        self._sync_released_symbolic_payload_to_object(
+            particle_states,
+            rigid_descendant_states,
+            obj_in_hand,
+        )
+        for _ in range(self.symbolic_cloth_inside_settle_steps):
+            yield from self._yield_symbolic_refresh_step()
+        yield from self._ensure_symbolic_rigid_descendant_postconditions(
+            rigid_descendant_states
+        )
+
+        final_cloth_center, _, final_cloth_extent, _ = (
+            obj_in_hand.get_base_aligned_bbox()
+        )
+        final_container_center, _, final_container_extent, _ = (
+            container.get_base_aligned_bbox()
+        )
+        inside_satisfied = obj_in_hand.states[object_states.Inside].get_value(
+            container
+        )
+        if not inside_satisfied:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                "Cloth settled above the container without satisfying Inside.",
+                {
+                    "dropped object": obj_in_hand.name,
+                    "target object": container.name,
+                    "drop position": self._to_float_list(cloth_position),
+                    "final cloth center": self._to_float_list(final_cloth_center),
+                    "final cloth extent": self._to_float_list(final_cloth_extent),
+                    "final container center": self._to_float_list(
+                        final_container_center
+                    ),
+                    "final container extent": self._to_float_list(
+                        final_container_extent
+                    ),
+                    "pre-settle steps": self.symbolic_cloth_inside_pre_settle_steps,
+                    "settle steps": self.symbolic_cloth_inside_settle_steps,
+                },
+            )
+
+        print(
+            "[starter][place_inside][cloth_drop] succeeded "
+            f"object={obj_in_hand.name} container={container.name} "
+            f"cloth_center={self._to_float_list(final_cloth_center)} "
+            f"container_center={self._to_float_list(final_container_center)}"
+        )
+        sys.stdout.flush()
+        self._register_released_loaded_cloth_stabilization(
+            obj_in_hand,
+            rigid_descendant_states,
+        )
+        yield from self._finalize_pending_symbolic_coverage(
+            obj_in_hand,
+            pending_coverage,
+        )
+
     def _execute_release(self):
         if self.symbolic_release:
-            yield from self._symbolic_release()
+            obj_in_hand = self._get_obj_in_hand()
+            pending_coverage = self._pending_symbolic_carried_coverage(obj_in_hand)
+            rigid_descendant_states = (
+                self._symbolic_carried_rigid_descendant_states(obj_in_hand)
+            )
+            particle_states = self._symbolic_carried_particle_states(obj_in_hand)
+            yield from self._symbolic_release(restore_payload=False)
+            self._sync_released_symbolic_payload_to_object(
+                particle_states,
+                rigid_descendant_states,
+                obj_in_hand,
+            )
+            if rigid_descendant_states:
+                yield from self._yield_symbolic_refresh_step()
+                yield from self._ensure_symbolic_rigid_descendant_postconditions(
+                    rigid_descendant_states
+                )
+                self._register_released_loaded_cloth_stabilization(
+                    obj_in_hand,
+                    rigid_descendant_states,
+                )
+            yield from self._finalize_pending_symbolic_coverage(
+                obj_in_hand,
+                pending_coverage,
+            )
             return
 
         yield from super()._execute_release()
@@ -2305,6 +4598,11 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                 ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
                 "You need to be grasping an object first to place it somewhere.",
             )
+        particle_states = self._symbolic_carried_particle_states(obj_in_hand)
+        rigid_descendant_states = (
+            self._symbolic_carried_rigid_descendant_states(obj_in_hand)
+        )
+        pending_coverage = self._pending_symbolic_carried_coverage(obj_in_hand)
 
         print(
             "[starter][place][symbolic_shortcut] "
@@ -2312,17 +4610,135 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             f"predicate={predicate.__name__}"
         )
         sys.stdout.flush()
-        obj_pose = self._sample_pose_with_object_and_predicate(
-            predicate,
+
+        slot_pose = self._task_placement_slot_pose(obj_in_hand, obj, predicate)
+        if slot_pose is not None:
+            yield from self._symbolic_place_at_configured_slot(
+                obj_in_hand,
+                obj,
+                predicate,
+                slot_pose,
+            )
+            return
+
+        def try_state_setter():
+            try:
+                try:
+                    return obj_in_hand.states[predicate].set_value(
+                        obj,
+                        True,
+                        reset_before_sampling=False,
+                    )
+                except TypeError:
+                    return obj_in_hand.states[predicate].set_value(obj, True)
+            except Exception as exc:
+                print(
+                    "[starter][place][symbolic_fallback] "
+                    f"state setter failed object={obj_in_hand.name} "
+                    f"target={obj.name} predicate={predicate.__name__} "
+                    f"error={type(exc).__name__}: {exc}"
+                )
+                sys.stdout.flush()
+                return False
+
+        try:
+            obj_pose = self._sample_pose_with_object_and_predicate(
+                predicate,
+                obj_in_hand,
+                obj,
+            )
+        except ActionPrimitiveError as exc:
+            if exc.reason != ActionPrimitiveError.Reason.SAMPLING_ERROR:
+                raise
+
+            yield from self._symbolic_release(restore_payload=False)
+            if try_state_setter():
+                obj_in_hand.keep_still()
+                self._sync_released_symbolic_payload_to_object(
+                    particle_states,
+                    rigid_descendant_states,
+                    obj_in_hand,
+                )
+                yield from self._yield_symbolic_refresh_step()
+                yield from self._ensure_symbolic_rigid_descendant_postconditions(
+                    rigid_descendant_states
+                )
+                if obj_in_hand.states[predicate].get_value(obj):
+                    print(
+                        "[starter][place][symbolic_fallback] "
+                        "state setter succeeded after sampling failure "
+                        f"object={obj_in_hand.name} target={obj.name} "
+                        f"predicate={predicate.__name__}"
+                    )
+                    sys.stdout.flush()
+                    yield from self._finalize_pending_symbolic_coverage(
+                        obj_in_hand,
+                        pending_coverage,
+                    )
+                    return
+
+            self._sync_released_symbolic_payload_to_object(
+                particle_states,
+                rigid_descendant_states,
+                obj_in_hand,
+            )
+            raise
+
+        yield from self._symbolic_release(restore_payload=False)
+        try:
+            obj_in_hand.set_position_orientation(*obj_pose)
+        except Exception:
+            self._sync_released_symbolic_payload_to_object(
+                particle_states,
+                rigid_descendant_states,
+                obj_in_hand,
+            )
+            raise
+        obj_in_hand.keep_still()
+        self._sync_released_symbolic_payload_to_object(
+            particle_states,
+            rigid_descendant_states,
             obj_in_hand,
-            obj,
+        )
+        yield from self._yield_symbolic_refresh_step()
+        yield from self._ensure_symbolic_rigid_descendant_postconditions(
+            rigid_descendant_states
         )
 
-        yield from self._symbolic_release()
-        obj_in_hand.set_position_orientation(*obj_pose)
-        obj_in_hand.keep_still()
-
         if not obj_in_hand.states[predicate].get_value(obj):
+            if try_state_setter():
+                obj_in_hand.keep_still()
+                self._sync_released_symbolic_payload_to_object(
+                    particle_states,
+                    rigid_descendant_states,
+                    obj_in_hand,
+                )
+                yield from self._yield_symbolic_refresh_step()
+                yield from self._ensure_symbolic_rigid_descendant_postconditions(
+                    rigid_descendant_states
+                )
+                if obj_in_hand.states[predicate].get_value(obj):
+                    self._register_released_loaded_cloth_stabilization(
+                        obj_in_hand,
+                        rigid_descendant_states,
+                    )
+                    print(
+                        "[starter][place][symbolic_fallback] "
+                        f"state setter succeeded object={obj_in_hand.name} "
+                        f"target={obj.name} predicate={predicate.__name__}"
+                    )
+                    sys.stdout.flush()
+                    yield from self._finalize_pending_symbolic_coverage(
+                        obj_in_hand,
+                        pending_coverage,
+                    )
+                    return
+
+            self._sync_released_symbolic_payload_to_object(
+                particle_states,
+                rigid_descendant_states,
+                obj_in_hand,
+            )
             raise ActionPrimitiveError(
                 ActionPrimitiveError.Reason.EXECUTION_ERROR,
                 "Symbolic placement sampled a pose, but the desired relation is not satisfied.",
@@ -2332,7 +4748,165 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                     "predicate": predicate.__name__,
                 },
             )
+
+        self._register_released_loaded_cloth_stabilization(
+            obj_in_hand,
+            rigid_descendant_states,
+        )
+        yield from self._finalize_pending_symbolic_coverage(
+            obj_in_hand,
+            pending_coverage,
+        )
+
+    def _task_placement_slot_pose(self, obj_in_hand, target_obj, predicate):
+        if predicate is not object_states.OnTop:
+            return None
+        object_variants = self._name_variants_for_object(obj_in_hand)
+        target_variants = self._name_variants_for_object(target_obj)
+        for object_key in object_variants:
+            for target_key in target_variants:
+                slot_pose = self.task_placement_slots.get((object_key, target_key))
+                if slot_pose is not None:
+                    return slot_pose
+                slot_pose = self.task_placement_slots.get(
+                    (object_key.lower(), target_key.lower())
+                )
+                if slot_pose is not None:
+                    return slot_pose
+        return None
+
+    def _symbolic_place_at_configured_slot(
+        self,
+        obj_in_hand,
+        target_obj,
+        predicate,
+        slot_pose,
+    ):
+        particle_states = self._symbolic_carried_particle_states(obj_in_hand)
+        rigid_descendant_states = (
+            self._symbolic_carried_rigid_descendant_states(obj_in_hand)
+        )
+        pending_coverage = self._pending_symbolic_carried_coverage(obj_in_hand)
+        position, orientation = self._build_task_placement_pose(obj_in_hand, slot_pose)
+        print(
+            "[starter][place][slot] applying "
+            f"object={obj_in_hand.name} target={target_obj.name} "
+            f"predicate={predicate.__name__} "
+            f"position={self._to_float_list(position)}"
+        )
+        sys.stdout.flush()
+
+        yield from self._symbolic_release(restore_payload=False)
+        try:
+            obj_in_hand.set_position_orientation(
+                position=position,
+                orientation=orientation,
+            )
+        except Exception:
+            self._sync_released_symbolic_payload_to_object(
+                particle_states,
+                rigid_descendant_states,
+                obj_in_hand,
+            )
+            raise
+        obj_in_hand.keep_still()
+        self._sync_released_symbolic_payload_to_object(
+            particle_states,
+            rigid_descendant_states,
+            obj_in_hand,
+        )
         yield from self._yield_symbolic_refresh_step()
+        yield from self._ensure_symbolic_rigid_descendant_postconditions(
+            rigid_descendant_states
+        )
+
+        if obj_in_hand.states[predicate].get_value(target_obj):
+            self._register_released_loaded_cloth_stabilization(
+                obj_in_hand,
+                rigid_descendant_states,
+            )
+            yield from self._finalize_pending_symbolic_coverage(
+                obj_in_hand,
+                pending_coverage,
+            )
+            return
+
+        try:
+            obj_in_hand.states[predicate].set_value(
+                target_obj,
+                True,
+                reset_before_sampling=False,
+            )
+        except TypeError:
+            obj_in_hand.states[predicate].set_value(target_obj, True)
+        except Exception as exc:
+            print(
+                "[starter][place][slot][warning] "
+                f"state setter failed object={obj_in_hand.name} "
+                f"target={target_obj.name} predicate={predicate.__name__} "
+                f"error={type(exc).__name__}: {exc}"
+            )
+            sys.stdout.flush()
+
+        try:
+            obj_in_hand.set_position_orientation(
+                position=position,
+                orientation=orientation,
+            )
+        except Exception:
+            self._sync_released_symbolic_payload_to_object(
+                particle_states,
+                rigid_descendant_states,
+                obj_in_hand,
+            )
+            raise
+        obj_in_hand.keep_still()
+        self._sync_released_symbolic_payload_to_object(
+            particle_states,
+            rigid_descendant_states,
+            obj_in_hand,
+        )
+        yield from self._yield_symbolic_refresh_step()
+        yield from self._ensure_symbolic_rigid_descendant_postconditions(
+            rigid_descendant_states
+        )
+        if obj_in_hand.states[predicate].get_value(target_obj):
+            self._register_released_loaded_cloth_stabilization(
+                obj_in_hand,
+                rigid_descendant_states,
+            )
+            yield from self._finalize_pending_symbolic_coverage(
+                obj_in_hand,
+                pending_coverage,
+            )
+            return
+
+        raise ActionPrimitiveError(
+            ActionPrimitiveError.Reason.EXECUTION_ERROR,
+            "Configured placement slot did not satisfy the desired relation.",
+            {
+                "dropped object": obj_in_hand.name,
+                "target object": target_obj.name,
+                "predicate": predicate.__name__,
+                "slot pose": dict(slot_pose),
+            },
+        )
+
+    def _build_task_placement_pose(self, obj, slot_pose):
+        raw_position = slot_pose.get("position") or slot_pose.get("pos")
+        if raw_position is None:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                "Configured placement slot has no position.",
+                {"object": obj.name, "slot pose": dict(slot_pose)},
+            )
+        position = torch.tensor(list(raw_position)[:3], dtype=torch.float32)
+        raw_orientation = slot_pose.get("orientation")
+        if raw_orientation is None:
+            orientation = obj.get_position_orientation()[1]
+        else:
+            orientation = torch.tensor(raw_orientation, dtype=torch.float32)
+        return position, orientation
 
     def _should_use_drop_inside_fallback(self, obj_in_hand, container) -> bool:
         if obj_in_hand is None or container is None:
@@ -2685,6 +5259,21 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             return
 
         if self._should_use_grasp_ready_navigation(obj):
+            if self.explicit_grasp_use_object_navigation:
+                max_radius = (
+                    self.explicit_grasp_navigation_max_goal_radius
+                    if self.explicit_grasp_navigation_max_goal_radius is not None
+                    else self.explicit_navigation_max_goal_radius
+                )
+                yield from self._navigate_to_obj(
+                    obj,
+                    navigation_reason="explicit_grasp_object",
+                    require_target_reachable=False,
+                    maximum_goal_radius_override=max_radius,
+                    enforce_navigation_postcondition=max_radius is not None,
+                )
+                return
+
             yield from self._navigate_to_grasp_ready_pose(
                 obj,
                 navigation_reason="explicit_grasp_ready_stance",
@@ -2695,6 +5284,10 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             obj,
             navigation_reason="explicit",
             require_target_reachable=False,
+            maximum_goal_radius_override=self.explicit_navigation_max_goal_radius,
+            enforce_navigation_postcondition=(
+                self.explicit_navigation_max_goal_radius is not None
+            ),
         )
 
     def _should_use_grasp_ready_navigation(self, obj) -> bool:
@@ -2717,15 +5310,22 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         model = getattr(obj, "model", "") or ""
         non_pickup_markers = {
             "ashcan",
+            "bin",
             "trash_can",
             "cabinet",
+            "desk",
             "dish_rack",
+            "dryer",
+            "hamper",
             "rack",
             "shelf",
             "table",
             "counter",
             "sink",
+            "vase",
             "door",
+            "floor",
+            "washer",
         }
         category_text = f"{category} {model}".lower()
         return not any(marker in category_text for marker in non_pickup_markers)
@@ -2860,6 +5460,62 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                     return grasp_data
         return None
 
+    def configure_task_placement_slots(
+        self,
+        placement_slots: Optional[Mapping[str, Any]],
+    ):
+        """Configure deterministic task placement slots for symbolic PLACE."""
+        self.task_placement_slots = {}
+        if not placement_slots:
+            return
+        if not isinstance(placement_slots, Mapping):
+            print(
+                "[starter][place][slot][warning] "
+                f"ignored non-mapping config={placement_slots!r}"
+            )
+            sys.stdout.flush()
+            return
+
+        for target_name, object_slots in dict(placement_slots).items():
+            if not isinstance(object_slots, Mapping):
+                continue
+            target_variants = self._name_variants_for_config_name(target_name)
+            for object_name, slot_pose in dict(object_slots).items():
+                if not isinstance(slot_pose, Mapping):
+                    continue
+                object_variants = self._name_variants_for_config_name(object_name)
+                for object_key in object_variants:
+                    for target_key in target_variants:
+                        self.task_placement_slots[(object_key, target_key)] = dict(slot_pose)
+
+        print(
+            "[starter][place][slot] configured "
+            f"slot_keys={len(self.task_placement_slots)}"
+        )
+        sys.stdout.flush()
+
+    def _name_variants_for_config_name(self, name: Any) -> set[str]:
+        variants = {str(name), str(name).lower()}
+        object_ref = getattr(self.env.task, "object_scope", {}).get(str(name))
+        if object_ref is None:
+            for task_name, candidate_ref in getattr(self.env.task, "object_scope", {}).items():
+                if str(task_name).lower() == str(name).lower():
+                    object_ref = candidate_ref
+                    break
+        obj = getattr(object_ref, "wrapped_obj", None) if object_ref is not None else None
+        if obj is not None:
+            variants.add(str(obj.name))
+            variants.add(str(obj.name).lower())
+        return variants
+
+    def _name_variants_for_object(self, obj) -> set[str]:
+        variants = {str(getattr(obj, "name", "")), str(getattr(obj, "name", "")).lower()}
+        for task_name, object_ref in getattr(self.env.task, "object_scope", {}).items():
+            if getattr(object_ref, "wrapped_obj", None) is obj:
+                variants.add(str(task_name))
+                variants.add(str(task_name).lower())
+        return {variant for variant in variants if variant}
+
     def _navigate_to_obj(
         self,
         obj,
@@ -2893,18 +5549,21 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             f"base_target_xy_distance={start_distance}"
         )
         sys.stdout.flush()
-        yield from self.navigation_backend.navigate_to_object(
-            self,
-            obj,
-            target_pose=target_pose,
-            prefer_target_reachable=require_target_reachable,
-            preferred_goal_direction=preferred_goal_direction,
-            minimum_goal_radius_override=minimum_goal_radius_override,
-            maximum_goal_radius_override=maximum_goal_radius_override,
-            require_goal_direction_aligned=require_goal_direction_aligned,
-            allow_unreachable_goal_fallback=allow_unreachable_goal_fallback,
-            skip_if_already_satisfied=skip_if_already_satisfied,
+        yield from self._with_navigation_hand_actions_suppressed(
+            self.navigation_backend.navigate_to_object(
+                self,
+                obj,
+                target_pose=target_pose,
+                prefer_target_reachable=require_target_reachable,
+                preferred_goal_direction=preferred_goal_direction,
+                minimum_goal_radius_override=minimum_goal_radius_override,
+                maximum_goal_radius_override=maximum_goal_radius_override,
+                require_goal_direction_aligned=require_goal_direction_aligned,
+                allow_unreachable_goal_fallback=allow_unreachable_goal_fallback,
+                skip_if_already_satisfied=skip_if_already_satisfied,
+            )
         )
+
         reachable = self._safe_target_in_reach(target_pose)
         end_distance = self._base_target_xy_distance(target_pose)
         print(

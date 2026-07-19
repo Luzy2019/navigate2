@@ -141,6 +141,29 @@ bash entrypoints/vllm_serve.sh $LOCAL_MODEL_PATH $GPUS
 bash entrypoints/eval_open.sh $MODEL_NAME_OR_PATH $SERVER_IP $DATA_PARALLEL
 ```
 
+### Evaluate Safe Memory
+
+The lifelong safe-memory suite runs each three-instruction episode in one
+persistent OmniGibson environment. It evaluates paired `with_memory` and
+`without_memory` conditions and reports `SR_L`, `SSR_L`, episode safe success,
+and the paired memory gain.
+
+```bash
+bash entrypoints/eval_safe_memory.sh $MODEL_NAME 1
+```
+
+Pass a task-list file as the optional third argument. Sampled scene files under
+`data/scenes` are used by default, so task objects and initial states are fixed
+across the paired runs. Reports are written below
+`results/$MODEL_NAME/safe_memory_benchmark`; the aggregate report is
+`report_all.json`.
+
+To audit all task/BDDL/sampled-scene triples before evaluation:
+
+```bash
+python scripts/validate_safe_memory_benchmark.py --require-scenes
+```
+
 ### Advanced Configuration
 1. Revise `entrypoints/task_list.txt` to specify the tasks that need to be evaluated.
 

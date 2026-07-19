@@ -13,6 +13,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from og_ego_prim.utils.omnigibson_runtime import maybe_reexec_with_omnigibson_python
+from og_ego_prim.benchmark.lifelong_evaluator import (
+    get_subtask_goal,
+    split_safe_goal,
+    validate_lifelong_contract,
+)
 from og_ego_prim.primitives.specs import get_valid_primitives
 from og_ego_prim.utils.task_registry import get_task_config_path
 
@@ -683,6 +688,19 @@ def parse_args():
         help="Save captured robot RGB frames as an mp4.",
     )
     parser.add_argument(
+        "--save-sampled-scene",
+        action="store_true",
+        help=(
+            "Save the initialized task scene under data/scenes/SCENE/json. "
+            "This is intended for an audited online-sampling run."
+        ),
+    )
+    parser.add_argument(
+        "--sampled-scene-dir",
+        default=None,
+        help="Optional output directory for --save-sampled-scene.",
+    )
+    parser.add_argument(
         "--video-path",
         default=None,
         help="Path for the output mp4. Defaults to OUTPUT_DIR/nav_rgb.mp4.",
@@ -756,6 +774,12 @@ def parse_args():
         type=int,
         default=0,
         help="Low-level step interval for scene graph updates. Use 0 to update after each high-level action.",
+    )
+    parser.add_argument(
+        "--scene-graph-update-every",
+        type=int,
+        default=int(os.environ.get("ISBENCH_SCENE_GRAPH_UPDATE_EVERY", "1")),
+        help="Run perception every N scheduled scene graph refreshes.",
     )
     parser.add_argument(
         "--scene-graph-history-interval",
@@ -871,6 +895,8 @@ def parse_args():
         parser.error("--min-free-gpu-mb must be zero or greater")
     if args.min_free_ram_gb < 0:
         parser.error("--min-free-ram-gb must be zero or greater")
+    if args.scene_graph_update_every <= 0:
+        parser.error("--scene-graph-update-every must be greater than zero")
     return args
 
 
@@ -916,25 +942,42 @@ def validate_and_normalize_task(args):
             raise ValueError(f"missing required evaluation_goal_conditions key: {key}")
 
     action_pattern = re.compile(r"([A-Za-z_]+)\((.*)\)")
-    for index, plan in enumerate(config.get("example_planning", []), start=1):
-        action = plan.get("action", "").strip()
-        if action.upper() == "DONE":
-            continue
-        match = action_pattern.fullmatch(action)
-        if match is None:
-            raise ValueError(f"invalid example_planning action #{index}: {action!r}")
-        operator, raw_params = match.groups()
-        operator = operator.upper()
-        if operator not in valid_primitives:
-            raise ValueError(
-                f"example_planning action #{index} uses {operator}, which is not available for {primitive_type}"
+    planning_groups = [("example_planning", config.get("example_planning", []))]
+    planning_groups.extend(
+        (
+            f"subtasks[{subtask_index}].example_planning",
+            subtask.get("example_planning", []),
+        )
+        for subtask_index, subtask in enumerate(config.get("subtasks", []))
+    )
+    for planning_label, plans in planning_groups:
+        for index, plan in enumerate(plans, start=1):
+            action = plan.get("action", "").strip()
+            if action.upper() == "DONE":
+                continue
+            match = action_pattern.fullmatch(action)
+            if match is None:
+                raise ValueError(
+                    f"invalid {planning_label} action #{index}: {action!r}"
+                )
+            operator, raw_params = match.groups()
+            operator = operator.upper()
+            if operator not in valid_primitives:
+                raise ValueError(
+                    f"{planning_label} action #{index} uses {operator}, "
+                    f"which is not available for {primitive_type}"
+                )
+            params = (
+                []
+                if not raw_params.strip()
+                else [item.strip() for item in raw_params.split(",")]
             )
-        params = [] if not raw_params.strip() else [item.strip() for item in raw_params.split(",")]
-        expected = valid_primitives[operator]
-        if len(params) != expected:
-            raise ValueError(
-                f"example_planning action #{index} {operator} expects {expected} params, got {len(params)}"
-            )
+            expected = valid_primitives[operator]
+            if len(params) != expected:
+                raise ValueError(
+                    f"{planning_label} action #{index} {operator} expects "
+                    f"{expected} params, got {len(params)}"
+                )
 
     bddl_path = REPO_ROOT / "data" / "bddl" / task_name / f'problem{task_info["activity_definition_id"]}.bddl'
     if not bddl_path.is_file():
@@ -968,6 +1011,32 @@ def validate_and_normalize_task(args):
         embedded_goals.append(
             ("execution_goal_condition", goal_conditions["execution_goal_condition"])
         )
+    if config.get("subtasks"):
+        contract_errors = validate_lifelong_contract(config)
+        if contract_errors:
+            raise ValueError(
+                "invalid lifelong task contract: " + "; ".join(contract_errors)
+            )
+        for subtask in config["subtasks"]:
+            subtask_index = subtask["subtask_index"]
+            embedded_goals.append(
+                (
+                    f"subtasks[{subtask_index}].G_task",
+                    get_subtask_goal(subtask, "G_task"),
+                )
+            )
+            terminal_goal, process_goals = split_safe_goal(subtask.get("G_safe"))
+            if terminal_goal:
+                embedded_goals.append(
+                    (f"subtasks[{subtask_index}].G_safe", terminal_goal)
+                )
+            embedded_goals.extend(
+                (
+                    f"subtasks[{subtask_index}].G_safe.process[{index}]",
+                    condition["safety_bddl"],
+                )
+                for index, condition in enumerate(process_goals)
+            )
 
     for label, goal_bddl in embedded_goals:
         tokens = scan_tokens(string=goal_bddl)
@@ -1086,6 +1155,9 @@ if ARGS.scene_graph_backend in {"samjam_sam2", "samjam_unigoal"}:
     ARGS.scene_graph_update_every = 1
 
 os.environ["ISBENCH_SCENE_GRAPH_BACKEND"] = ARGS.scene_graph_backend
+os.environ["ISBENCH_SCENE_GRAPH_UPDATE_EVERY"] = str(
+    ARGS.scene_graph_update_every
+)
 os.environ["ISBENCH_SCENE_GRAPH_HISTORY_INTERVAL"] = str(
     ARGS.scene_graph_history_interval
 )
@@ -1168,13 +1240,16 @@ def install_disabled_scene_graph_patch():
         PerceptionSceneGraphUpdater as OriginalPerceptionSceneGraphUpdater,
     )
     from og_ego_prim.scene_graph.schema import SceneGraphSnapshot
+    from og_ego_prim.scene_graph.state_diff import SceneGraphStateTracker
 
     class DisabledSceneGraphUpdater:
         def __init__(self, backend_name=None, update_every=None, sensor_name=None):
             self.backend_name = backend_name or "disabled"
+            self.name = self.backend_name
             self.global_step_index = 0
             self.snapshot = self._snapshot(context=None)
             self.backend = None
+            self.state_tracker = SceneGraphStateTracker()
 
         def _snapshot(self, context=None):
             primitive_name = None if context is None else context.primitive_name
@@ -1202,6 +1277,7 @@ def install_disabled_scene_graph_patch():
 
         def reset(self, env):
             self.global_step_index = 0
+            self.state_tracker.reset()
             self.snapshot = self._snapshot(context=None)
             return self.snapshot
 
@@ -1210,8 +1286,14 @@ def install_disabled_scene_graph_patch():
             self.global_step_index += 1
             return self.snapshot
 
+        def observe(self, context=None):
+            return self.update(context)
+
         def get_snapshot(self):
             return self.snapshot
+
+        def state_changes(self, snapshot, *, subtask_id=None):
+            return self.state_tracker.update(snapshot, subtask_id=subtask_id)
 
         def to_prompt_context(self):
             return ""
@@ -1384,6 +1466,63 @@ def summarize_scene_graph(snapshot):
             "membership_edges": 0,
             "edges": 0,
             "skipped": None,
+        }
+
+    rooms = snapshot.get("rooms", [])
+    if rooms:
+        summary = snapshot.get("summary", {})
+        groups = [
+            group
+            for room in rooms
+            for group in room.get("groups", [])
+            if isinstance(group, dict)
+        ]
+        nodes = [
+            node
+            for room in rooms
+            for node in room.get("nodes", [])
+            if isinstance(node, dict)
+        ]
+        nodes.extend(
+            node
+            for group in groups
+            for node in group.get("nodes", [])
+            if isinstance(node, dict)
+        )
+        edges = [
+            edge
+            for room in rooms
+            for edge in room.get("edges", [])
+            if isinstance(edge, dict)
+        ]
+        edges.extend(
+            edge
+            for group in groups
+            for edge in group.get("edges", [])
+            if isinstance(edge, dict)
+        )
+        object_ids = {node.get("id") for node in nodes if node.get("id") is not None}
+        edge_keys = {
+            (
+                edge.get("source"),
+                edge.get("target"),
+                edge.get("type"),
+                edge.get("source_uid"),
+                edge.get("target_uid"),
+            )
+            for edge in edges
+        }
+        return {
+            "backend": summary.get("backend") or summary.get("perception_backend"),
+            "global_step_index": summary.get("global_step_index"),
+            "frame_index": summary.get("frame_index"),
+            "objects": summary.get("objects", len(object_ids)),
+            "rooms": summary.get("rooms", len(rooms)),
+            "groups": summary.get("groups", len(groups)),
+            "relations": summary.get("relations", len(edge_keys)),
+            "membership_edges": summary.get("membership_edges", 0),
+            "edges": summary.get("edges", len(edge_keys)),
+            "skipped": summary.get("skipped"),
         }
 
     metadata = snapshot.get("metadata", {})
@@ -1865,6 +2004,23 @@ def get_run_output_dir(base_output_dir: str, add_timestamp: bool) -> Path:
     return candidate
 
 
+def save_sampled_scene_if_requested(args, benchmark):
+    if not args.save_sampled_scene:
+        return
+    scene_name = benchmark.scene_name
+    task_name = benchmark.task_name
+    filename = f"{scene_name}_task_{task_name}_0_0_template.json"
+    scene_dir = (
+        Path(args.sampled_scene_dir)
+        if args.sampled_scene_dir
+        else REPO_ROOT / "data" / "scenes" / scene_name / "json"
+    )
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    scene_path = scene_dir / filename
+    benchmark.env.task.save_task(path=str(scene_path), override=True)
+    print(f"saved sampled task scene: {scene_path}", flush=True)
+
+
 def main():
     args = ARGS
     output_dir = get_run_output_dir(args.output_dir, args.timestamp_output)
@@ -1904,6 +2060,7 @@ def main():
         )
     )
     print_scene_graph_summary("initial", benchmark)
+    save_sampled_scene_if_requested(args, benchmark)
 
     if args.init_only:
         print(
@@ -1912,6 +2069,7 @@ def main():
         )
         sys.stdout.flush()
         sys.stderr.flush()
+        benchmark.close()
         if args.clear_on_exit:
             og.clear()
             return
@@ -2208,6 +2366,7 @@ def main():
     sys.stdout.flush()
     sys.stderr.flush()
     run_log_stream.flush()
+    benchmark.close()
     if args.clear_on_exit:
         og.clear()
         return

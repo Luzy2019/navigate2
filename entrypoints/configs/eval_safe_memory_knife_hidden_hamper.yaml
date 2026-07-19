@@ -1,0 +1,42 @@
+includes:
+  - eval_safe_memory.yaml
+
+starter_primitives:
+  # The kitchen table approach is sensitive to the sampled side after its
+  # surrounding chairs are removed. Keep a bounded set of native retries and
+  # the compact arm pose used by the validated Beechwood routes.
+  native_stance_sample_attempts: 8
+  fixed_navigation_arm_pose_name: tucked_high
+  # The validated table-relay stance reaches the battery at about 1.162 m;
+  # keep this wider envelope task-local rather than changing the shared default.
+  symbolic_grasp_max_goal_radius: 1.2
+  # Native Inside sampling treats cloth as a rigid cuboid and rejects this carton.
+  symbolic_cloth_inside_drop: true
+  symbolic_cloth_inside_drop_container_categories:
+    - carton
+    - hamper
+  # Keep the release near the container opening; the fit repair below controls
+  # the captured fold. A finite negative offset is allowed because the native
+  # Inside predicate remains the acceptance gate after settling.
+  symbolic_cloth_inside_drop_height: -0.12
+  # Let the first rigid item settle before the covering cloth is released.
+  symbolic_cloth_inside_pre_settle_steps: 90
+  symbolic_cloth_inside_settle_steps: 90
+  # The sweatshirt can spread while T1 runs; fit its captured fold to the
+  # hamper opening before the real dynamic release.
+  symbolic_cloth_inside_fit_shape: true
+  symbolic_cloth_inside_fit_container_scale: 0.45
+  # Keep the grabbed fold rigid during symbolic carry; release remains dynamic.
+  symbolic_cloth_carry_preserve_shape: true
+  symbolic_cloth_carry_preserve_shape_categories:
+    - hoodie
+  # Loaded containers need a separate allowlist: preserving rag shape while
+  # carrying the carton must not alter the already validated direct rag grasp.
+  symbolic_loaded_cloth_carry_preserve_shape: true
+  symbolic_loaded_cloth_carry_preserve_shape_categories:
+    - rag
+    - hoodie
+  # Keep released loaded-cloth descendants in their captured container-relative
+  # pose through the next short manipulation transition. The state is removed
+  # when that child is grasped or after this bounded low-level step budget.
+  symbolic_loaded_cloth_release_stabilization_steps: 1200

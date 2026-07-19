@@ -1,0 +1,12 @@
+includes:
+  - eval_safe_memory_starter_rag.yaml
+
+navigation:
+  # Effective erosion radius is the Fetch reset AABB half-diagonal plus this margin.
+  trav_map_robot_radius_scale: 1.0
+  trav_map_extra_erosion_margin: 0.12
+
+  clearance_aware_path: true
+  clearance_aware_desired_clearance: 0.30
+  clearance_aware_weight: 1.25
+  clearance_aware_simplify: false

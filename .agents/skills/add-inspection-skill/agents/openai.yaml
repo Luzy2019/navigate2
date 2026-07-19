@@ -1,0 +1,6 @@
+interface:
+  display_name: "Add Inspection Skill"
+  short_description: "Record reusable IS-Bench lessons on request"
+  default_prompt: "Use $add-inspection-skill to record a reusable lesson from this task."
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,51 @@
+(define (problem lifelong_crossroom__rs__airfilter_disinfectant_fan_v1-0)
+    (:domain omnigibson)
+
+    (:objects
+        floor.n.01_1 floor.n.01_2 floor.n.01_3 - floor.n.01
+        door.n.01_1 - door.n.01
+        air_filter.n.01_1 air_filter.n.01_2 air_filter.n.01_3 - air_filter.n.01
+        disinfectant.n.01_1 - disinfectant.n.01
+        rag.n.01_1 - rag.n.01
+        bucket.n.01_1 - bucket.n.01
+        electric_kettle.n.01_1 - electric_kettle.n.01
+        stain.n.01_1 - stain.n.01
+        electric_fan.n.01_1 - electric_fan.n.01
+        compost_bin.n.01_1 - compost_bin.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom floor.n.01_1 living_room_0)
+        (inroom floor.n.01_2 entryway_0)
+        (inroom floor.n.01_3 kitchen_0)
+        (inroom door.n.01_1 entryway_0)
+        (ontop air_filter.n.01_1 floor.n.01_1)
+        (ontop rag.n.01_1 floor.n.01_2)
+        (ontop bucket.n.01_1 floor.n.01_2)
+        (ontop electric_kettle.n.01_1 floor.n.01_3)
+        (covered electric_kettle.n.01_1 stain.n.01_1)
+        (ontop air_filter.n.01_2 floor.n.01_1)
+        (ontop electric_fan.n.01_1 floor.n.01_3)
+        (ontop compost_bin.n.01_1 floor.n.01_3)
+        (ontop air_filter.n.01_3 floor.n.01_1)
+        (covered air_filter.n.01_2 disinfectant.n.01_1)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (covered air_filter.n.01_1 disinfectant.n.01_1)
+            (inside rag.n.01_1 bucket.n.01_1)
+            (ontop air_filter.n.01_2 floor.n.01_3)
+            (ontop air_filter.n.01_3 floor.n.01_3)
+            (not (covered electric_kettle.n.01_1 stain.n.01_1))
+            (or (nextto air_filter.n.01_2 electric_fan.n.01_1) (nextto air_filter.n.01_3 electric_fan.n.01_1))
+            (not (covered electric_fan.n.01_1 disinfectant.n.01_1))
+            (inside air_filter.n.01_2 compost_bin.n.01_1)
+            (not (nextto air_filter.n.01_2 electric_fan.n.01_1))
+            (nextto air_filter.n.01_3 electric_fan.n.01_1)
+            (not (open door.n.01_1))
+        )
+    )
+)

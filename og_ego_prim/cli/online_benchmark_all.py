@@ -19,8 +19,10 @@ from og_ego_prim.utils.task_registry import (
     get_task_config_path,
     iter_task_config_paths,
 )
+from og_ego_prim.config import RuntimeConfig, load_runtime_config_dict
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--config', type=str, default=None)
 parser.add_argument('--model', type=str, default=None)
 parser.add_argument('--work_dir', type=str, default='./work_dir')
 parser.add_argument('--task_list', type=str, default=None)
@@ -45,6 +47,33 @@ parser.add_argument('--not_eval_process_safety', action='store_true')
 parser.add_argument('--not_eval_termination_safety', action='store_true')
 parser.add_argument('--not_eval_awareness', action='store_true')
 parser.add_argument('--not_eval_execution', action='store_true')
+
+
+def _flag_present(flag: str) -> bool:
+    import sys
+
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in sys.argv[1:])
+
+
+def _apply_config(args: argparse.Namespace) -> tuple[argparse.Namespace, RuntimeConfig]:
+    config_dict = load_runtime_config_dict(args.config)
+    runtime_config = RuntimeConfig.from_mapping(config_dict)
+    task_config = runtime_config.task
+    if not _flag_present('--model') and args.model is None:
+        args.model = task_config.model
+    if not _flag_present('--work_dir'):
+        args.work_dir = runtime_config.runtime.output_root
+    if not _flag_present('--primitive_type'):
+        args.primitive_type = task_config.primitive_type
+    if not _flag_present('--prompt_setting'):
+        args.prompt_setting = task_config.prompt_setting
+    if not _flag_present('--use_initial_setup') and task_config.use_initial_setup:
+        args.use_initial_setup = True
+    if not _flag_present('--use_self_caption') and task_config.use_self_caption:
+        args.use_self_caption = True
+    if not _flag_present('--show_robot') and runtime_config.runtime.show_robot:
+        args.show_robot = True
+    return args, runtime_config
 
 def get_time_tag() -> str:
     return datetime.datetime.now().strftime('%Y%m%d-%H:%M:%S')
@@ -132,7 +161,8 @@ def get_launcher(
     not_eval_process_safety: bool=None,
     not_eval_termination_safety: bool=None,
     not_eval_awareness: bool=None,
-    not_eval_execution: bool=None
+    not_eval_execution: bool=None,
+    config: str=None,
 ) -> List[str]:
     entrypoint = []
 
@@ -163,6 +193,8 @@ def get_launcher(
         '--task', task_name, 
         '--scene', scene_name,
     ])
+    if config is not None:
+        entrypoint.extend(['--config', config])
     if model is not None:
         entrypoint.extend(['--model', model])
     if work_dir is not None:
@@ -197,7 +229,7 @@ def get_launcher(
     return entrypoint
 
 
-def worker(task_name: str, scene_name: str, model: str, work_dir: str, online_object_sampling: bool, retry: int, draw_bbox_2d: bool, primitive_type: str, show_robot: bool, use_initial_setup: bool, use_self_caption: bool, local_llm_serve: bool, local_serve_ip: str, prompt_setting: str, not_eval_process_safety: bool, not_eval_termination_safety: bool, not_eval_awareness: bool, not_eval_execution: bool, stream_logs: bool):
+def worker(task_name: str, scene_name: str, model: str, work_dir: str, online_object_sampling: bool, retry: int, draw_bbox_2d: bool, primitive_type: str, show_robot: bool, use_initial_setup: bool, use_self_caption: bool, local_llm_serve: bool, local_serve_ip: str, prompt_setting: str, not_eval_process_safety: bool, not_eval_termination_safety: bool, not_eval_awareness: bool, not_eval_execution: bool, stream_logs: bool, config: str):
     worker_id = multiprocessing.current_process()._identity[0]
     time.sleep(worker_id * 0.5)
     print(f'[{get_time_tag()}][worker_{worker_id}] Processing "{task_name}___{scene_name}"')
@@ -228,6 +260,7 @@ def worker(task_name: str, scene_name: str, model: str, work_dir: str, online_ob
         not_eval_termination_safety,
         not_eval_awareness,
         not_eval_execution,
+        config,
     )
     envs = os.environ.copy()
     envs['OMNIGIBSON_HEADLESS'] = '1'
@@ -280,7 +313,8 @@ def benchmark_all(
     not_eval_process_safety: bool, 
     not_eval_termination_safety: bool, 
     not_eval_awareness: bool, 
-    not_eval_execution: bool   
+    not_eval_execution: bool,
+    config: str,
 ):
     if data_parallel < 1:
         warnings.warn(f'data_parallel can not be set < 1, set to 1 by default.')
@@ -319,6 +353,7 @@ def benchmark_all(
                     not_eval_awareness,
                     not_eval_execution,
                     data_parallel == 1,
+                    config,
                 ))
 
             for future in as_completed(dispatched):
@@ -339,11 +374,14 @@ def benchmark_all(
 
                 metric.num_tasks += 1
                 pbar.update(1)
+                latency_summary = metric.summary()['latency']
                 pbar.set_postfix(dict(
                     TR=f'{metric.termination_rate:.2f} ({metric.num_success_terminations}/{metric.num_tasks})',
                     SR=f'{metric.success_rate:.2f} ({metric.num_success_completions}/{metric.num_tasks})',
                     SSR=f'{metric.safe_success_rate:.2f}',
                     SRec=f'{metric.overall_safety_recall:.2f}',
+                    GraphLat=f'{latency_summary["graph_construction_latency"]:.4f}s',
+                    TotalLat=f'{latency_summary["total_latency"]:.4f}s',
                 ))
 
             wait(dispatched)
@@ -355,6 +393,7 @@ def benchmark_all(
 
 if __name__ == '__main__':
     args = parser.parse_args()
+    args, runtime_config = _apply_config(args)
     benchmark_all(
         model=args.model, 
         work_dir=args.work_dir, 
@@ -374,5 +413,6 @@ if __name__ == '__main__':
         not_eval_process_safety = args.not_eval_process_safety, 
         not_eval_termination_safety = args.not_eval_termination_safety, 
         not_eval_awareness = args.not_eval_awareness, 
-        not_eval_execution = args.not_eval_execution
+        not_eval_execution = args.not_eval_execution,
+        config=args.config,
     )

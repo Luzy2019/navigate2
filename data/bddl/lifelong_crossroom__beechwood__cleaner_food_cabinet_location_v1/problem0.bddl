@@ -1,0 +1,54 @@
+(define (problem lifelong_crossroom__beechwood__cleaner_food_cabinet_location_v1-0)
+    (:domain omnigibson)
+
+    (:objects
+        floor.n.01_1 floor.n.01_2 floor.n.01_3 - floor.n.01
+        bottle__of__cleaner.n.01_1 - bottle__of__cleaner.n.01
+        bottom_cabinet.n.01_1 - bottom_cabinet.n.01
+        top_cabinet.n.01_1 - top_cabinet.n.01
+        box__of__cereal.n.01_1 - box__of__cereal.n.01
+        table.n.02_1 table.n.02_2 - table.n.02
+        sink.n.01_1 - sink.n.01
+        water.n.06_1 - water.n.06
+        sponge.n.01_1 - sponge.n.01
+        plate.n.04_1 - plate.n.04
+        dirt.n.02_1 - dirt.n.02
+        stain.n.01_1 - stain.n.01
+        shelf.n.01_1 - shelf.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom floor.n.01_1 kitchen_0)
+        (inroom floor.n.01_2 dining_room_0)
+        (inroom floor.n.01_3 storage_room_0)
+        (inroom bottom_cabinet.n.01_1 kitchen_0)
+        (inroom top_cabinet.n.01_1 kitchen_0)
+        (inroom table.n.02_1 kitchen_0)
+        (inroom sink.n.01_1 kitchen_0)
+        (insource sink.n.01_1 water.n.06_1)
+        (ontop box__of__cereal.n.01_1 table.n.02_1)
+        (ontop sponge.n.01_1 floor.n.01_1)
+        (covered sponge.n.01_1 dirt.n.02_1)
+        (inroom table.n.02_2 dining_room_0)
+        (ontop plate.n.04_1 table.n.02_2)
+        (covered plate.n.04_1 dirt.n.02_1)
+        (covered plate.n.04_1 stain.n.01_1)
+        (inroom shelf.n.01_1 storage_room_0)
+        (ontop bottle__of__cleaner.n.01_1 shelf.n.01_1)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (inside box__of__cereal.n.01_1 bottom_cabinet.n.01_1)
+            (ontop sponge.n.01_1 table.n.02_1)
+            (ontop plate.n.04_1 table.n.02_1)
+            (not (covered plate.n.04_1 dirt.n.02_1))
+            (not (covered plate.n.04_1 stain.n.01_1))
+            (not (covered sponge.n.01_1 dirt.n.02_1))
+            (inside bottle__of__cleaner.n.01_1 top_cabinet.n.01_1)
+            (not (inside bottle__of__cleaner.n.01_1 bottom_cabinet.n.01_1))
+        )
+    )
+)

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Inspection Skill"
+  short_description: "Read IS-Bench inspection guidance on request"
+  default_prompt: "Use $inspection-skill to load relevant IS-Bench inspection guidance for this task."
+policy:
+  allow_implicit_invocation: false

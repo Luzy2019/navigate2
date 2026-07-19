@@ -1,0 +1,49 @@
+(define (problem w0g_quiche_countertop_livingroom1_v8-0)
+    (:domain omnigibson)
+
+    (:objects
+        quiche.n.02_1 - quiche.n.02
+        tupperware.n.01_1 - tupperware.n.01
+        electric_refrigerator.n.01_1 - electric_refrigerator.n.01
+        countertop.n.01_1 - countertop.n.01
+        vase.n.01_1 - vase.n.01
+        dirt.n.02_1 - dirt.n.02
+        sink.n.01_1 - sink.n.01
+        water.n.06_1 - water.n.06
+        sofa.n.01_1 - sofa.n.01
+        dust.n.01_1 - dust.n.01
+        scrub_brush.n.01_1 scrub_brush.n.01_2 - scrub_brush.n.01
+        floor.n.01_1 floor.n.01_2 - floor.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (ontop quiche.n.02_1 countertop.n.01_1)
+        (ontop tupperware.n.01_1 countertop.n.01_1)
+        (open electric_refrigerator.n.01_1)
+        (covered countertop.n.01_1 dirt.n.02_1)
+        (ontop vase.n.01_1 countertop.n.01_1)
+        (ontop scrub_brush.n.01_1 countertop.n.01_1)
+        (insource sink.n.01_1 water.n.06_1)
+        (covered sofa.n.01_1 dust.n.01_1)
+        (ontop scrub_brush.n.01_2 floor.n.01_2)
+        (inroom electric_refrigerator.n.01_1 kitchen_0)
+        (inroom countertop.n.01_1 kitchen_0)
+        (inroom sink.n.01_1 kitchen_0)
+        (inroom floor.n.01_1 kitchen_0)
+        (inroom sofa.n.01_1 living_room_0)
+        (inroom floor.n.01_2 living_room_0)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (inside tupperware.n.01_1 electric_refrigerator.n.01_1)
+            (not (covered countertop.n.01_1 dirt.n.02_1))
+            (not (covered sofa.n.01_1 dust.n.01_1))
+            (inside quiche.n.02_1 tupperware.n.01_1)
+            (not (open electric_refrigerator.n.01_1))
+            (ontop vase.n.01_1 countertop.n.01_1)
+        )
+    )
+)

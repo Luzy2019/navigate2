@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 
 from og_ego_prim.utils.types import StepwisePlan
 from og_ego_prim.primitives.specs import PrimitiveType, expand_legacy_plan_for_starter
+from og_ego_prim.task_planner import ExamplePlanner
 
 
 class Benchmark(ABC):
@@ -47,30 +48,7 @@ class Benchmark(ABC):
         return self.env_config['scene']['scene_model']
 
     def _get_example_planning(self, config: Dict) -> Optional[List[StepwisePlan]]:
-        if 'example_planning' not in config:    
-            return []
-
-        example_planning: List[StepwisePlan] = []
-        pattern = r'(?:\d+\.\s+)?([a-zA-Z_]+)\(([^)]+)\)'
-
-        for plan in config['example_planning']:
-            action = plan['action']
-            if action.endswith('DONE'):
-                example_planning.append(dict(action='done()', caution=plan['caution']))
-                continue
-
-            matches = re.findall(pattern, action)
-            if len(matches) >= 1:
-                operator, params = matches[-1]
-            else:
-                return []
-
-            operator = operator.strip().lower()
-            params = params.strip().lower()
-            action = f'{operator}({params})'
-            example_planning.append(dict(action=action, caution=plan['caution']))
-
-        return example_planning
+        return ExamplePlanner.from_config(config)
 
     @abstractmethod
     def execute_plan(self, plan: StepwisePlan):

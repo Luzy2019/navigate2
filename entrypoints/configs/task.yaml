@@ -1,0 +1,12 @@
+task:
+  name: null
+  scene: null
+  model: null
+  primitive_type: auto
+  prompt_setting: v1
+  plan_max_steps: null
+  stop_on_error: true
+  use_initial_setup: false
+  use_self_caption: false
+  planner_use_obs: true
+  online_object_sampling: null

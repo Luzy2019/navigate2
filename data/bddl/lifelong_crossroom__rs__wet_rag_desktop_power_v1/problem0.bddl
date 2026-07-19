@@ -1,0 +1,50 @@
+(define (problem lifelong_crossroom__rs__wet_rag_desktop_power_v1-0)
+    (:domain omnigibson)
+
+    (:objects
+        floor.n.01_1 floor.n.01_2 floor.n.01_3 - floor.n.01
+        door.n.01_1 - door.n.01
+        sink.n.01_1 - sink.n.01
+        stain.n.01_1 - stain.n.01
+        desktop_computer.n.01_1 desktop_computer.n.01_2 - desktop_computer.n.01
+        mug.n.04_1 - mug.n.04
+        bottom_cabinet.n.01_1 - bottom_cabinet.n.01
+        rag.n.01_1 rag.n.01_2 - rag.n.01
+        water.n.06_1 - water.n.06
+        compost_bin.n.01_1 - compost_bin.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom floor.n.01_1 kitchen_0)
+        (inroom floor.n.01_2 living_room_0)
+        (inroom floor.n.01_3 bedroom_0)
+        (inroom door.n.01_1 bedroom_0)
+        (inroom sink.n.01_1 kitchen_0)
+        (covered sink.n.01_1 stain.n.01_1)
+        (ontop desktop_computer.n.01_1 floor.n.01_2)
+        (ontop mug.n.04_1 floor.n.01_3)
+        (inroom bottom_cabinet.n.01_1 bedroom_0)
+        (ontop rag.n.01_1 floor.n.01_1)
+        (ontop desktop_computer.n.01_2 floor.n.01_3)
+        (ontop compost_bin.n.01_1 floor.n.01_3)
+        (ontop rag.n.01_2 floor.n.01_1)
+        (saturated rag.n.01_1 water.n.06_1)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (not (covered sink.n.01_1 stain.n.01_1))
+            (ontop desktop_computer.n.01_1 floor.n.01_2)
+            (ontop rag.n.01_1 floor.n.01_3)
+            (ontop rag.n.01_2 floor.n.01_3)
+            (inside mug.n.04_1 bottom_cabinet.n.01_1)
+            (or (nextto rag.n.01_1 desktop_computer.n.01_2) (nextto rag.n.01_2 desktop_computer.n.01_2))
+            (not (nextto rag.n.01_1 desktop_computer.n.01_2))
+            (inside rag.n.01_1 compost_bin.n.01_1)
+            (nextto rag.n.01_2 desktop_computer.n.01_2)
+            (not (open door.n.01_1))
+        )
+    )
+)

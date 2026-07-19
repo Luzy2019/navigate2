@@ -2,6 +2,7 @@ import json
 from typing import Optional, TYPE_CHECKING
 
 from og_ego_prim.utils.task_registry import get_task_config_path
+from og_ego_prim.config.runtime_config import RuntimeConfig
 from og_ego_prim.primitives.specs import PrimitiveType
 
 if TYPE_CHECKING:
@@ -35,6 +36,7 @@ def build_benchmark(
     eval_termination_safety: bool = True,
     eval_awareness: bool = True,
     eval_execution: bool = True,
+    runtime_config: Optional[RuntimeConfig] = None,
 ) -> 'Benchmark':
     from .custom_behavior_task import CustomBehaviorTask  # register customized BehaviorTask
     
@@ -43,6 +45,9 @@ def build_benchmark(
         task_config = json.load(f)
 
     primitive_type = resolve_primitive_type(task_config, primitive_type)
+    runtime_config = runtime_config or RuntimeConfig.defaults()
+    runtime_config.scene_graph.backend = scene_graph_backend or runtime_config.scene_graph.backend
+    runtime_config.scene_graph.step_interval = int(scene_graph_step_interval)
     print(f'primitive_type: {primitive_type}')
 
     if online_object_sampling is not None:
@@ -76,6 +81,7 @@ def build_benchmark(
             'eval_termination_safety': eval_termination_safety,
             'eval_execution': eval_execution,
             'eval_awareness': eval_awareness,
+            'runtime_config': runtime_config,
         })
 
         assert task_type in ONLINE_BENCHMARKS, \

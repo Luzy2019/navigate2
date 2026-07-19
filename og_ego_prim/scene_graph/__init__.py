@@ -1,5 +1,6 @@
 from .base import SceneGraphUpdater
 from .schema import SceneGraphEdge, SceneGraphNode, SceneGraphSnapshot
+from .state_diff import SceneGraphDiffResult, SceneGraphDiffer, SceneGraphStateTracker
 
 
 def __getattr__(name):
@@ -28,8 +29,11 @@ __all__ = [
     "OmniGibsonSceneGraphUpdater",
     "PerceptionSceneGraphUpdater",
     "SceneGraphEdge",
+    "SceneGraphDiffResult",
+    "SceneGraphDiffer",
     "SceneGraphNode",
     "SceneGraphSnapshot",
+    "SceneGraphStateTracker",
     "SceneGraphUpdater",
     "UniGoalMemorySceneGraphUpdater",
 ]

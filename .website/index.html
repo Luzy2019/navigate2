@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>IS-Bench Replay</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand" aria-label="IS-Bench Replay">
+        <span class="brand-mark">IS</span>
+        <span>IS-Bench</span>
+        <span class="brand-section">Replay</span>
+      </div>
+      <div class="header-status">
+        <span id="runCount" class="muted">0 runs</span>
+        <button id="refreshButton" class="command-button" type="button" title="Refresh runs">
+          <span aria-hidden="true">&#8635;</span>
+          <span>Refresh</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="run-pane" aria-label="Benchmark runs">
+        <div class="pane-heading">
+          <div>
+            <p class="eyebrow">RESULTS</p>
+            <h1>Runs</h1>
+          </div>
+        </div>
+        <label class="search-field">
+          <span class="sr-only">Filter runs</span>
+          <input id="runFilter" type="search" placeholder="Filter task or path" autocomplete="off">
+        </label>
+        <div id="runList" class="run-list" role="listbox" aria-label="Available runs"></div>
+        <div id="runEmpty" class="empty-state" hidden>No completed runs found.</div>
+      </aside>
+
+      <section class="replay-pane" aria-label="Replay workspace">
+        <header class="run-header">
+          <div class="run-title-block">
+            <p id="runPath" class="eyebrow">NO RUN SELECTED</p>
+            <h2 id="runTitle">Select a run</h2>
+            <p id="runScene" class="muted"></p>
+          </div>
+          <div class="run-badges">
+            <span id="runModeBadge" class="badge neutral">Idle</span>
+            <span id="runStatusBadge" class="badge neutral">--</span>
+          </div>
+        </header>
+
+        <div id="loadError" class="notice error" hidden></div>
+        <div id="legacyNotice" class="notice legacy" hidden>
+          Legacy artifacts: videos and report are available without frame-to-step synchronization.
+        </div>
+
+        <section class="media-band" aria-label="Camera views">
+          <figure class="video-view">
+            <figcaption>
+              <span>Camera</span>
+              <span id="cameraState" class="view-state">Unavailable</span>
+            </figcaption>
+            <div class="video-shell">
+              <video id="cameraVideo" preload="metadata" playsinline muted></video>
+              <div id="cameraEmpty" class="video-empty">No camera artifact</div>
+            </div>
+          </figure>
+          <figure class="video-view">
+            <figcaption>
+              <span>Top-down</span>
+              <span id="topdownState" class="view-state">Unavailable</span>
+            </figcaption>
+            <div class="video-shell">
+              <video id="topdownVideo" preload="metadata" playsinline muted></video>
+              <div id="topdownEmpty" class="video-empty">No top-down artifact</div>
+            </div>
+          </figure>
+        </section>
+
+        <section class="transport" aria-label="Replay controls">
+          <button id="playButton" class="icon-button" type="button" title="Play synchronized replay" disabled>
+            <span aria-hidden="true">&#9654;</span>
+            <span class="sr-only">Play</span>
+          </button>
+          <div class="transport-main">
+            <input id="frameSlider" type="range" min="0" max="0" step="1" value="0" disabled aria-label="Replay frame">
+            <div class="transport-readout">
+              <span id="frameReadout">Frame -- / --</span>
+              <span id="timeReadout">00:00.000</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="step-band" aria-label="Current execution state">
+          <div class="step-stat">
+            <span>Simulator step</span>
+            <strong id="simStep">--</strong>
+          </div>
+          <div class="step-stat">
+            <span>Subtask</span>
+            <strong id="subtaskStep">--</strong>
+          </div>
+          <div class="step-stat action-stat">
+            <span>Action</span>
+            <strong id="actionStep">--</strong>
+          </div>
+          <div class="progress-stat">
+            <div class="progress-label">
+              <span>Run progress</span>
+              <span id="progressLabel">0%</span>
+            </div>
+            <progress id="runProgress" max="100" value="0">0%</progress>
+          </div>
+        </section>
+
+        <section class="timeline-section" aria-label="Execution timeline">
+          <header class="section-heading">
+            <div>
+              <p class="eyebrow">EVENT STREAM</p>
+              <h3>Timeline</h3>
+            </div>
+            <div class="timeline-tools">
+              <label>
+                <span class="sr-only">Filter component</span>
+                <select id="componentFilter" aria-label="Filter component">
+                  <option value="">All components</option>
+                </select>
+              </label>
+              <span id="eventCount" class="muted">0 events</span>
+            </div>
+          </header>
+          <div class="timeline-columns" aria-hidden="true">
+            <span>Seq</span><span>Component</span><span>Event</span><span>Status</span>
+          </div>
+          <div id="timeline" class="timeline" role="list"></div>
+          <div id="timelineEmpty" class="empty-state" hidden>No timeline events.</div>
+        </section>
+      </section>
+
+      <aside class="detail-pane" aria-label="Event details">
+        <header class="detail-header">
+          <div>
+            <p id="detailComponent" class="eyebrow">DETAIL</p>
+            <h2 id="detailTitle">Run metadata</h2>
+          </div>
+          <button id="copyDetail" class="icon-button secondary" type="button" title="Copy JSON" disabled>
+            <span aria-hidden="true">&#10697;</span>
+            <span class="sr-only">Copy JSON</span>
+          </button>
+        </header>
+        <dl id="detailMeta" class="detail-meta"></dl>
+        <pre id="detailJson" class="json-view">Select a run or timeline event.</pre>
+      </aside>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,7 @@
+includes:
+  - ../eval_safe_memory_starter_physical.yaml
+
+# Keep the arm inside Fetch's base footprint while retaining the normal raised
+# trunk so a symbolically carried object stays clear of the base and floor.
+starter_primitives:
+  fixed_navigation_arm_pose_name: tucked_high

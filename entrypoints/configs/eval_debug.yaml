@@ -1,0 +1,23 @@
+includes:
+  - common.yaml
+  - task.yaml
+
+task:
+  name: store_apple_and_tissue_box_in_bottom_cabinet
+  scene: Wainscott_0_int
+  plan_max_steps: 30
+
+scene_graph:
+  backend: samjam_unigoal
+  step_interval: 30
+  history_interval: 30
+
+navigation:
+  stuck_waypoint_tolerance: 0.25
+
+artifacts:
+  output_dir: outputs/test_apple_tissue_online_plan
+  save_surrounding_observations: true
+  save_video: true
+  video_fps: 30
+  output_size: 512x512

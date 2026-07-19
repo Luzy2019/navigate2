@@ -1,0 +1,53 @@
+(define (problem w0g_canning_vase_bathroom0_v8-0)
+    (:domain omnigibson)
+
+    (:objects
+        water.n.06_1 - water.n.06
+        mason_jar.n.01_1 - mason_jar.n.01
+        peach.n.03_1 - peach.n.03
+        countertop.n.01_1 - countertop.n.01
+        vase.n.01_1 - vase.n.01
+        stain.n.01_1 - stain.n.01
+        toothbrush.n.01_1 - toothbrush.n.01
+        sink.n.01_1 sink.n.01_2 - sink.n.01
+        towel_rack.n.01_1 - towel_rack.n.01
+        dust.n.01_1 - dust.n.01
+        scrub_brush.n.01_1 - scrub_brush.n.01
+        floor.n.01_1 floor.n.01_2 - floor.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (insource sink.n.01_1 water.n.06_1)
+        (ontop mason_jar.n.01_1 countertop.n.01_1)
+        (open mason_jar.n.01_1)
+        (hot mason_jar.n.01_1)
+        (ontop peach.n.03_1 countertop.n.01_1)
+        (covered vase.n.01_1 stain.n.01_1)
+        (ontop vase.n.01_1 countertop.n.01_1)
+        (ontop toothbrush.n.01_1 countertop.n.01_1)
+        (covered sink.n.01_2 dust.n.01_1)
+        (covered towel_rack.n.01_1 dust.n.01_1)
+        (ontop scrub_brush.n.01_1 floor.n.01_2)
+        (inroom countertop.n.01_1 kitchen_0)
+        (inroom sink.n.01_1 kitchen_0)
+        (inroom floor.n.01_1 kitchen_0)
+        (inroom sink.n.01_2 bathroom_0)
+        (inroom towel_rack.n.01_1 bathroom_0)
+        (inroom floor.n.01_2 bathroom_0)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (inside peach.n.03_1 mason_jar.n.01_1)
+            (filled mason_jar.n.01_1 water.n.06_1)
+            (not (covered vase.n.01_1 stain.n.01_1))
+            (not (covered sink.n.01_2 dust.n.01_1))
+            (not (covered towel_rack.n.01_1 dust.n.01_1))
+            (not (hot mason_jar.n.01_1))
+            (not (open mason_jar.n.01_1))
+            (not (toggled_on sink.n.01_2))
+        )
+    )
+)

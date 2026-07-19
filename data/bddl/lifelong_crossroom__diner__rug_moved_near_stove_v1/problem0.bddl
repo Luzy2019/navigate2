@@ -1,0 +1,52 @@
+(define (problem lifelong_crossroom__diner__rug_moved_near_stove_v1-0)
+    (:domain omnigibson)
+
+    (:objects
+        floor.n.01_1 floor.n.01_2 floor.n.01_3 - floor.n.01
+        door.n.01_1 door.n.01_2 - door.n.01
+        table.n.02_1 - table.n.02
+        stain.n.01_1 - stain.n.01
+        bottom_cabinet.n.01_1 bottom_cabinet.n.01_2 - bottom_cabinet.n.01
+        ramen.n.01_1 - ramen.n.01
+        tupperware.n.01_1 tupperware.n.01_2 - tupperware.n.01
+        cooking_oil.n.01_1 - cooking_oil.n.01
+        stove.n.01_1 - stove.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom floor.n.01_1 dining_room_0)
+        (inroom floor.n.01_2 bar_0)
+        (inroom floor.n.01_3 kitchen_0)
+        (inroom door.n.01_1 dining_room_0)
+        (inroom door.n.01_2 kitchen_0)
+        (inroom table.n.02_1 dining_room_0)
+        (covered table.n.02_1 stain.n.01_1)
+        (inroom bottom_cabinet.n.01_1 bar_0)
+        (covered bottom_cabinet.n.01_1 stain.n.01_1)
+        (ontop ramen.n.01_1 floor.n.01_3)
+        (ontop tupperware.n.01_1 floor.n.01_1)
+        (inroom stove.n.01_1 kitchen_0)
+        (inroom bottom_cabinet.n.01_2 kitchen_0)
+        (ontop tupperware.n.01_2 floor.n.01_1)
+        (covered tupperware.n.01_1 cooking_oil.n.01_1)
+        (toggled_on stove.n.01_1)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (not (covered table.n.02_1 stain.n.01_1))
+            (not (covered bottom_cabinet.n.01_1 stain.n.01_1))
+            (ontop tupperware.n.01_1 floor.n.01_3)
+            (ontop tupperware.n.01_2 floor.n.01_3)
+            (cooked ramen.n.01_1)
+            (or (nextto tupperware.n.01_1 stove.n.01_1) (nextto tupperware.n.01_2 stove.n.01_1))
+            (not (nextto tupperware.n.01_1 stove.n.01_1))
+            (not (toggled_on stove.n.01_1))
+            (nextto tupperware.n.01_2 stove.n.01_1)
+            (not (open door.n.01_1))
+            (not (open door.n.01_2))
+        )
+    )
+)

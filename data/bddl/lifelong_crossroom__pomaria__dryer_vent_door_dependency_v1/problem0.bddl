@@ -1,0 +1,40 @@
+(define (problem lifelong_crossroom__pomaria__dryer_vent_door_dependency_v1-0)
+    (:domain omnigibson)
+
+    (:objects
+        floor.n.01_1 floor.n.01_2 floor.n.01_3 - floor.n.01
+        door.n.01_1 door.n.01_2 - door.n.01
+        clothes_dryer.n.01_1 - clothes_dryer.n.01
+        sink.n.01_1 - sink.n.01
+        stain.n.01_1 - stain.n.01
+        mason_jar.n.01_1 - mason_jar.n.01
+        cabinet.n.01_1 - cabinet.n.01
+        countertop.n.01_1 - countertop.n.01
+        table.n.02_1 - table.n.02
+        shelf.n.01_1 - shelf.n.01
+        washer.n.03_1 - washer.n.03
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom floor.n.01_1 utility_room_0)
+        (inroom floor.n.01_2 bathroom_0)
+        (inroom floor.n.01_3 pantry_room_0)
+        (inroom door.n.01_1 utility_room_0)
+        (inroom door.n.01_2 bathroom_0)
+        (inroom clothes_dryer.n.01_1 utility_room_0)
+        (inroom sink.n.01_1 bathroom_0)
+        (inroom cabinet.n.01_1 pantry_room_0)
+        (toggled_on clothes_dryer.n.01_1)
+        (inside mason_jar.n.01_1 cabinet.n.01_1)
+        (ontop agent.n.01_1 floor.n.01_3)
+    )
+
+    (:goal
+        (and
+            (not (open clothes_dryer.n.01_1))
+            (not (covered sink.n.01_1 stain.n.01_1))
+            (inside mason_jar.n.01_1 cabinet.n.01_1)
+        )
+    )
+)

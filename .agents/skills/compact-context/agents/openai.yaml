@@ -1,0 +1,6 @@
+interface:
+  display_name: "Compact Context"
+  short_description: "Manually monitor context and preserve handoffs"
+  default_prompt: "Use $compact-context to enable context monitoring for this session and preserve a handoff when needed."
+policy:
+  allow_implicit_invocation: false

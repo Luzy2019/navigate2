@@ -1,0 +1,11 @@
+includes:
+  - ../eval_safe_memory_starter_physical.yaml
+
+# Isolated stance-clearance experiment. Keep the shared physical-starter
+# baseline unchanged until this variant is reproduced and regression-tested.
+navigation:
+  goal_clearance_radius: 0.40
+
+starter_primitives:
+  symbolic_grasp_max_goal_radius: 1.50
+  explicit_grasp_navigation_max_goal_radius: 1.50

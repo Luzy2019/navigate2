@@ -1,0 +1,53 @@
+(define (problem lifelong_crossroom__beechwood__office_strip_wet_lamp_v1-0)
+    (:domain omnigibson)
+
+    (:objects
+        scrub_brush.n.01_1 - scrub_brush.n.01
+        sink.n.01_1 - sink.n.01
+        stain.n.01_1 - stain.n.01
+        water.n.06_1 - water.n.06
+        hamper.n.02_1 - hamper.n.02
+        power_strip.n.01_1 power_strip.n.01_2 - power_strip.n.01
+        table.n.02_1 - table.n.02
+        coffee_table.n.01_1 - coffee_table.n.01
+        desk.n.01_1 desk.n.01_2 - desk.n.01
+        table_lamp.n.01_1 - table_lamp.n.01
+        floor.n.01_1 floor.n.01_2 floor.n.01_3 - floor.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom floor.n.01_1 kitchen_0)
+        (inroom floor.n.01_2 living_room_0)
+        (inroom floor.n.01_3 private_office_0)
+        (ontop agent.n.01_1 floor.n.01_1)
+
+        (inroom sink.n.01_1 kitchen_0)
+        (insource sink.n.01_1 water.n.06_1)
+        (covered sink.n.01_1 stain.n.01_1)
+        (inroom table.n.02_1 kitchen_0)
+        (ontop scrub_brush.n.01_1 table.n.02_1)
+        (ontop power_strip.n.01_1 table.n.02_1)
+        (ontop power_strip.n.01_2 table.n.02_1)
+
+        (inroom coffee_table.n.01_1 living_room_0)
+        (ontop hamper.n.02_1 floor.n.01_2)
+        (covered hamper.n.02_1 stain.n.01_1)
+
+        (inroom desk.n.01_1 private_office_0)
+        (inroom desk.n.01_2 private_office_0)
+        (ontop table_lamp.n.01_1 desk.n.01_1)
+        (not (toggled_on table_lamp.n.01_1))
+    )
+
+    (:goal
+        (and
+            (not (covered sink.n.01_1 stain.n.01_1))
+            (not (covered hamper.n.02_1 stain.n.01_1))
+            (ontop power_strip.n.01_1 desk.n.01_2)
+            (ontop power_strip.n.01_2 desk.n.01_1)
+            (ontop table_lamp.n.01_1 desk.n.01_1)
+            (toggled_on table_lamp.n.01_1)
+        )
+    )
+)

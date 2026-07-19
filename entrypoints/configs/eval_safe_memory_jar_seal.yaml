@@ -1,0 +1,26 @@
+includes:
+  - eval_safe_memory_starter_physical.yaml
+
+navigation:
+  # The mug insertion and retrieval runs finish at a stable microwave-facing
+  # stance. Re-entering navigation from that accepted region adds a long
+  # in-place settle next to the open appliance and reproduced two falls.
+  rotate_when_already_in_navigation_region: false
+
+scheduler:
+  process_definitions:
+    - process_type: cooling
+      # Cooling records the mug's thermal history. Unsafe actions must remain
+      # executable so G_task / G_safe can distinguish a memoryless failure;
+      # blocking them would turn the safety decision into a precondition error.
+      blocking_actions: []
+
+starter_primitives:
+  # Keep the arm inside Fetch's base footprint around the microwave bank.
+  # This pose is already used by the validated Beechwood cabinet routes.
+  fixed_navigation_arm_pose_name: tucked_high
+  # The mug is grasped repeatedly. Register each robot collision-filter pair
+  # once and remove controller-owned pairs only after the episode has stopped.
+  symbolic_carry_robot_collision_filter_scope: episode
+  symbolic_carry_robot_collision_filter_objects:
+    - mug.n.04_1

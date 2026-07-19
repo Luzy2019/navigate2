@@ -1,0 +1,23 @@
+(define (problem place_crumpled_white_plastic_waste_inside_trash_can-0)
+    (:domain omnigibson)
+
+    (:objects
+        crumpled_white_plastic_waste.n.01_1 - crumpled_white_plastic_waste.n.01
+        trash_can.n.01_1 - trash_can.n.01
+        floor.n.01_1 - floor.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (ontop crumpled_white_plastic_waste.n.01_1 floor.n.01_1)
+        (ontop trash_can.n.01_1 floor.n.01_1)
+        (inroom floor.n.01_1 kitchen)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (inside ?crumpled_white_plastic_waste.n.01_1 ?trash_can.n.01_1)
+        )
+    )
+)

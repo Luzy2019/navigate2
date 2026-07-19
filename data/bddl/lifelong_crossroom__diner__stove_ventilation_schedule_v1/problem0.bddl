@@ -1,0 +1,40 @@
+(define (problem lifelong_crossroom__diner__stove_ventilation_schedule_v1-0)
+    (:domain omnigibson)
+
+    (:objects
+        floor.n.01_1 floor.n.01_2 floor.n.01_3 - floor.n.01
+        door.n.01_1 - door.n.01
+        sweet_corn.n.02_1 - sweet_corn.n.02
+        bottom_cabinet.n.01_1 - bottom_cabinet.n.01
+        stain.n.01_1 - stain.n.01
+        rag.n.01_1 - rag.n.01
+        compost_bin.n.01_1 - compost_bin.n.01
+        stove.n.01_1 - stove.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom floor.n.01_1 kitchen_0)
+        (inroom floor.n.01_2 bar_0)
+        (inroom floor.n.01_3 corridor_0)
+        (inroom door.n.01_1 kitchen_0)
+        (ontop sweet_corn.n.02_1 floor.n.01_1)
+        (inroom bottom_cabinet.n.01_1 bar_0)
+        (covered bottom_cabinet.n.01_1 stain.n.01_1)
+        (ontop rag.n.01_1 floor.n.01_3)
+        (ontop compost_bin.n.01_1 floor.n.01_3)
+        (inroom stove.n.01_1 kitchen_0)
+        (toggled_on stove.n.01_1)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (cooked sweet_corn.n.02_1)
+            (not (covered bottom_cabinet.n.01_1 stain.n.01_1))
+            (inside rag.n.01_1 compost_bin.n.01_1)
+            (not (toggled_on stove.n.01_1))
+            (open door.n.01_1)
+        )
+    )
+)

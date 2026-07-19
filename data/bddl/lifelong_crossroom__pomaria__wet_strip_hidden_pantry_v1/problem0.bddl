@@ -1,0 +1,49 @@
+(define (problem lifelong_crossroom__pomaria__wet_strip_hidden_pantry_v1-0)
+    (:domain omnigibson)
+
+    (:objects
+        floor.n.01_1 floor.n.01_2 floor.n.01_3 - floor.n.01
+        door.n.01_1 door.n.01_2 - door.n.01
+        mug.n.04_1 - mug.n.04
+        water.n.06_1 - water.n.06
+        sink.n.01_1 - sink.n.01
+        stain.n.01_1 - stain.n.01
+        mason_jar.n.01_1 - mason_jar.n.01
+        cabinet.n.01_1 - cabinet.n.01
+        power_strip.n.01_1 power_strip.n.01_2 - power_strip.n.01
+        electric_kettle.n.01_1 - electric_kettle.n.01
+        top_cabinet.n.01_1 - top_cabinet.n.01
+        countertop.n.01_1 - countertop.n.01
+        table.n.02_1 - table.n.02
+        shelf.n.01_1 - shelf.n.01
+        washer.n.03_1 - washer.n.03
+        clothes_dryer.n.01_1 - clothes_dryer.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom floor.n.01_1 kitchen_0)
+        (inroom floor.n.01_2 utility_room_0)
+        (inroom floor.n.01_3 pantry_room_0)
+        (inroom door.n.01_1 kitchen_0)
+        (inroom door.n.01_2 utility_room_0)
+        (ontop mug.n.04_1 countertop.n.01_1)
+        (inroom sink.n.01_1 utility_room_0)
+        (inroom cabinet.n.01_1 pantry_room_0)
+        (ontop power_strip.n.01_1 table.n.02_1)
+        (ontop electric_kettle.n.01_1 countertop.n.01_1)
+        (inroom top_cabinet.n.01_1 pantry_room_0)
+        (inside mason_jar.n.01_1 cabinet.n.01_1)
+        (inside power_strip.n.01_2 top_cabinet.n.01_1)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (ontop mug.n.04_1 countertop.n.01_1)
+            (not (covered sink.n.01_1 stain.n.01_1))
+            (inside mason_jar.n.01_1 cabinet.n.01_1)
+            (inside power_strip.n.01_2 top_cabinet.n.01_1)
+        )
+    )
+)

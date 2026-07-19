@@ -1,0 +1,16 @@
+navigation:
+  # Preserve the raw A* bend around the dining-room floor lamp. The simplified
+  # doorway segment passed inside Fetch's effective collision radius.
+  clearance_aware_simplify: false
+
+starter_primitives:
+  # A center-biased native stance sample can still land behind table geometry.
+  # Keep retries bounded and let the first valid edge approach return early.
+  native_stance_sample_attempts: 8
+  # T2 moves both rags across rooms, but OmniGibson keeps their cached kitchen
+  # in_rooms metadata. Accept the already-facing 1.12 m living-room stance
+  # instead of sending the stale room label back through native sampling.
+  symbolic_grasp_max_goal_radius: 1.2
+  # Keep Fetch's gripper inside the base footprint at the narrow dining doorway
+  # while retaining the normal raised trunk for symbolic carry.
+  fixed_navigation_arm_pose_name: tucked_high

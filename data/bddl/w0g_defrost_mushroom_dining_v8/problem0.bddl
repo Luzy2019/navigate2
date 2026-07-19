@@ -1,0 +1,49 @@
+(define (problem w0g_defrost_mushroom_dining_v8-0)
+    (:domain omnigibson)
+
+    (:objects
+        chicken.n.01_1 - chicken.n.01
+        bowl.n.01_1 - bowl.n.01
+        electric_refrigerator.n.01_1 - electric_refrigerator.n.01
+        mushroom.n.05_1 - mushroom.n.05
+        dust.n.01_1 - dust.n.01
+        scrub_brush.n.01_1 - scrub_brush.n.01
+        countertop.n.01_1 - countertop.n.01
+        plate.n.04_1 plate.n.04_2 - plate.n.04
+        bottom_cabinet.n.01_1 - bottom_cabinet.n.01
+        floor.n.01_1 floor.n.01_2 - floor.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inside chicken.n.01_1 bowl.n.01_1)
+        (inside bowl.n.01_1 electric_refrigerator.n.01_1)
+        (frozen chicken.n.01_1)
+        (not (open electric_refrigerator.n.01_1))
+        (covered mushroom.n.05_1 dust.n.01_1)
+        (ontop mushroom.n.05_1 countertop.n.01_1)
+        (ontop scrub_brush.n.01_1 countertop.n.01_1)
+        (ontop plate.n.04_1 floor.n.01_2)
+        (ontop plate.n.04_2 floor.n.01_2)
+        (not (open bottom_cabinet.n.01_1))
+        (inroom electric_refrigerator.n.01_1 kitchen_0)
+        (inroom countertop.n.01_1 kitchen_0)
+        (inroom floor.n.01_1 kitchen_0)
+        (inroom bottom_cabinet.n.01_1 dining_room_0)
+        (inroom floor.n.01_2 dining_room_0)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (not (frozen chicken.n.01_1))
+            (not (covered mushroom.n.05_1 dust.n.01_1))
+            (inside plate.n.04_1 bottom_cabinet.n.01_1)
+            (inside plate.n.04_2 bottom_cabinet.n.01_1)
+            (inside chicken.n.01_1 bowl.n.01_1)
+            (inside bowl.n.01_1 electric_refrigerator.n.01_1)
+            (not (open electric_refrigerator.n.01_1))
+            (not (open bottom_cabinet.n.01_1))
+        )
+    )
+)

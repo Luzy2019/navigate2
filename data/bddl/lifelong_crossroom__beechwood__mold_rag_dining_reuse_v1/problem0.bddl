@@ -1,0 +1,55 @@
+(define (problem lifelong_crossroom__beechwood__mold_rag_dining_reuse_v1-0)
+    (:domain omnigibson)
+
+    (:objects
+        rag.n.01_1 rag.n.01_2 - rag.n.01
+        water.n.06_1 - water.n.06
+        cabinet.n.01_1 - cabinet.n.01
+        bottom_cabinet.n.01_1 - bottom_cabinet.n.01
+        mold.n.05_1 - mold.n.05
+        plate.n.04_1 - plate.n.04
+        dust.n.01_1 - dust.n.01
+        sponge.n.01_1 - sponge.n.01
+        hamper.n.02_1 - hamper.n.02
+        table.n.02_1 table.n.02_2 table.n.02_3 table.n.02_4 - table.n.02
+        floor.n.01_1 floor.n.01_2 floor.n.01_3 - floor.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom floor.n.01_1 kitchen_0)
+        (ontop agent.n.01_1 floor.n.01_1)
+        (inroom cabinet.n.01_1 kitchen_0)
+        (covered cabinet.n.01_1 mold.n.05_1)
+        (inroom bottom_cabinet.n.01_1 kitchen_0)
+        (ontop rag.n.01_1 bottom_cabinet.n.01_1)
+        (saturated rag.n.01_1 water.n.06_1)
+        (inroom table.n.02_4 kitchen_0)
+        (ontop rag.n.01_2 table.n.02_4)
+        (saturated rag.n.01_2 water.n.06_1)
+
+        (inroom floor.n.01_2 dining_room_0)
+        (inroom table.n.02_1 dining_room_0)
+        (ontop plate.n.04_1 table.n.02_1)
+        (covered plate.n.04_1 dust.n.01_1)
+        (ontop sponge.n.01_1 table.n.02_1)
+
+        (inroom floor.n.01_3 living_room_1)
+        (inroom table.n.02_2 living_room_1)
+        (inroom table.n.02_3 living_room_1)
+        (ontop hamper.n.02_1 floor.n.01_3)
+        (covered hamper.n.02_1 dust.n.01_1)
+        (not (covered hamper.n.02_1 mold.n.05_1))
+    )
+
+    (:goal
+        (and
+            (not (covered cabinet.n.01_1 mold.n.05_1))
+            (not (covered plate.n.04_1 dust.n.01_1))
+            (not (covered hamper.n.02_1 dust.n.01_1))
+            (not (covered hamper.n.02_1 mold.n.05_1))
+            (ontop rag.n.01_1 table.n.02_2)
+            (ontop rag.n.01_2 table.n.02_3)
+        )
+    )
+)

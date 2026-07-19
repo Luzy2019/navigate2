@@ -1,0 +1,6 @@
+interface:
+  display_name: "Scoped File Search"
+  short_description: "Prevent runaway file scans from freezing the desktop"
+  default_prompt: "Use $scoped-file-search before running any recursive file search to ensure it stays within the project directory."
+policy:
+  allow_implicit_invocation: true

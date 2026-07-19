@@ -1,0 +1,66 @@
+(define (problem w0g_mud_pumpkin_bedroom_v8-0)
+    (:domain omnigibson)
+
+    (:objects
+        zucchini.n.02_1 - zucchini.n.02
+        chopping_board.n.01_1 chopping_board.n.01_2 - chopping_board.n.01
+        mud.n.03_1 - mud.n.03
+        scrub_brush.n.01_1 scrub_brush.n.01_2 - scrub_brush.n.01
+        countertop.n.01_1 - countertop.n.01
+        electric_refrigerator.n.01_1 - electric_refrigerator.n.01
+        pumpkin.n.02_1 - pumpkin.n.02
+        oven.n.01_1 - oven.n.01
+        casserole.n.02_1 - casserole.n.02
+        carving_knife.n.01_1 - carving_knife.n.01
+        cabinet.n.01_1 - cabinet.n.01
+        bed.n.01_1 - bed.n.01
+        bottom_cabinet.n.01_1 - bottom_cabinet.n.01
+        book.n.01_1 - book.n.01
+        dust.n.01_1 - dust.n.01
+        floor.n.01_1 floor.n.01_2 - floor.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (covered chopping_board.n.01_1 mud.n.03_1)
+        (ontop chopping_board.n.01_1 countertop.n.01_1)
+        (ontop chopping_board.n.01_2 countertop.n.01_1)
+        (inside zucchini.n.02_1 electric_refrigerator.n.01_1)
+        (ontop scrub_brush.n.01_1 countertop.n.01_1)
+        (inside pumpkin.n.02_1 electric_refrigerator.n.01_1)
+        (not (cooked pumpkin.n.02_1))
+        (ontop casserole.n.02_1 countertop.n.01_1)
+        (not (open oven.n.01_1))
+        (not (toggled_on oven.n.01_1))
+        (ontop carving_knife.n.01_1 countertop.n.01_1)
+        (covered bed.n.01_1 dust.n.01_1)
+        (ontop scrub_brush.n.01_2 floor.n.01_2)
+        (ontop book.n.01_1 floor.n.01_2)
+        (open bottom_cabinet.n.01_1)
+        (inroom countertop.n.01_1 kitchen_0)
+        (inroom electric_refrigerator.n.01_1 kitchen_0)
+        (inroom oven.n.01_1 kitchen_0)
+        (inroom cabinet.n.01_1 kitchen_0)
+        (inroom floor.n.01_1 kitchen_0)
+        (inroom bed.n.01_1 bedroom_0)
+        (inroom bottom_cabinet.n.01_1 bedroom_0)
+        (inroom floor.n.01_2 bedroom_0)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (ontop zucchini.n.02_1 chopping_board.n.01_1)
+            (cooked pumpkin.n.02_1)
+            (not (covered bed.n.01_1 dust.n.01_1))
+            (inside book.n.01_1 bottom_cabinet.n.01_1)
+            (not (open bottom_cabinet.n.01_1))
+            (not (covered chopping_board.n.01_1 mud.n.03_1))
+            (not (open electric_refrigerator.n.01_1))
+            (not (toggled_on oven.n.01_1))
+            (not (open oven.n.01_1))
+            (inside carving_knife.n.01_1 cabinet.n.01_1)
+            (not (open cabinet.n.01_1))
+        )
+    )
+)

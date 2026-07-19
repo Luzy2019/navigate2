@@ -1,0 +1,6 @@
+includes:
+  - eval_safe_memory_starter_rag.yaml
+
+navigation:
+  trav_map_extra_erosion_margin: 0.10
+  clearance_aware_simplify: false

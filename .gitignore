@@ -17,3 +17,10 @@ checkpoints
 data/models/
 
 **/slurm-*.out
+
+output*/
+tests**
+!tests/
+!tests/test_planning_memory_risk_latency.py
+talk/
+lifelong_graph/

@@ -1,0 +1,52 @@
+(define (problem lifelong_crossroom__rs__raw_board_ready_food_v1-0)
+    (:domain omnigibson)
+
+    (:objects
+        floor.n.01_1 floor.n.01_2 floor.n.01_3 - floor.n.01
+        door.n.01_1 - door.n.01
+        chicken.n.01_1 - chicken.n.01
+        table.n.02_1 - table.n.02
+        dust.n.01_1 - dust.n.01
+        mug.n.04_1 - mug.n.04
+        bottom_cabinet.n.01_1 - bottom_cabinet.n.01
+        chopping_board.n.01_1 chopping_board.n.01_2 - chopping_board.n.01
+        stain.n.01_1 - stain.n.01
+        plate.n.04_1 - plate.n.04
+        compost_bin.n.01_1 - compost_bin.n.01
+        agent.n.01_1 - agent.n.01
+    )
+
+    (:init
+        (inroom floor.n.01_1 kitchen_0)
+        (inroom floor.n.01_2 living_room_0)
+        (inroom floor.n.01_3 bedroom_0)
+        (inroom door.n.01_1 bedroom_0)
+        (ontop chicken.n.01_1 floor.n.01_1)
+        (frozen chicken.n.01_1)
+        (inroom table.n.02_1 living_room_0)
+        (covered table.n.02_1 dust.n.01_1)
+        (ontop mug.n.04_1 floor.n.01_3)
+        (inroom bottom_cabinet.n.01_1 bedroom_0)
+        (ontop chopping_board.n.01_1 floor.n.01_1)
+        (ontop plate.n.04_1 floor.n.01_3)
+        (ontop compost_bin.n.01_1 floor.n.01_3)
+        (ontop chopping_board.n.01_2 floor.n.01_1)
+        (covered chopping_board.n.01_1 stain.n.01_1)
+        (ontop agent.n.01_1 floor.n.01_1)
+    )
+
+    (:goal
+        (and
+            (not (frozen chicken.n.01_1))
+            (not (covered table.n.02_1 dust.n.01_1))
+            (ontop chopping_board.n.01_1 floor.n.01_3)
+            (ontop chopping_board.n.01_2 floor.n.01_3)
+            (inside mug.n.04_1 bottom_cabinet.n.01_1)
+            (or (nextto chopping_board.n.01_1 plate.n.04_1) (nextto chopping_board.n.01_2 plate.n.04_1))
+            (not (covered plate.n.04_1 stain.n.01_1))
+            (not (nextto chopping_board.n.01_1 plate.n.04_1))
+            (nextto chopping_board.n.01_2 plate.n.04_1)
+            (not (open door.n.01_1))
+        )
+    )
+)

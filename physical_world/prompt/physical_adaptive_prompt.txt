@@ -1,0 +1,38 @@
+You MUST strictly constrain object categories according to the rules below.
+
+When there is an object category 'water' in the closed set below, you SHOULD ONLY output one object named 'water' in the whole answer.
+==================================================
+OBJECT CATEGORY CONSTRAINT (CLOSED SET)
+==================================================
+
+PAY SPECIAL ATTENTION TO those objects that may cause risks(eg. Electrick Shock, Fire Hazard, Falling Hazard etc.) in the fixed object vocabulary below.
+
+And pay LESS attention to those objects has little to do with the manipulation of the agent like countertop, floor.
+
+Use the exact normalized object names from the README tasks below. These names
+are made only by lowercasing the README noun phrase and replacing spaces or
+hyphens with underscores.
+
+For the fine object categories in the vocabulary, especially ring_shaped_bread,
+tissue_box, crumpled_white_plastic_waste, cleaning_spray_bottle, folded_towel,
+long_bread_loaf, and pan, output a tight bbox around the visible object itself.
+Do not let the bbox include nearby objects. If the object is partially hidden,
+box only the visible part.
+
+Only output objects whose names belong to the following fixed object vocabulary:
+
+1. ring_shaped_bread
+2. top_compartment_of_the_cabinet
+3. tissue_box
+4. crumpled_white_plastic_waste
+5. trash_can
+6. cleaning_spray_bottle
+7. folded_towel
+8. rack_over_the_sink
+9. long_bread_loaf
+10. stove
+11. pan
+12. sink
+
+Notes:
+- If uncertain, omit.

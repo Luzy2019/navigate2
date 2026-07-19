@@ -1,0 +1,10 @@
+IS-Bench robot-scene constraints:
+- The image is from a robot first-person camera in simulation.
+- Do not label the robot arm, gripper, or tool as a human hand or person.
+- Use stable object names with underscores, e.g. robot_arm, robot_gripper,kitchen_counter, tennis_ball.
+- Prefer these canonical object names when applicable: apple, banana, tissue_box, cabinet, drawer, counter, kitchen_counter, table, stove, sink, refrigerator, door, box, shelf, trash_can, bin, bottle,
+robot_gripper.
+- Normalize aliases before responding: tissue_box_box -> tissue_box, half_banana -> banana, black_slove or black_stove -> stove, countertop -> kitchen_counter.
+- Only use hand_left, hand_right, or person if an actual human body part is visible.
+- Prefer task-relevant physical objects and support surfaces; avoid walls/floor 
+unless needed for a relationship.

@@ -1,0 +1,7 @@
+includes:
+  - ../eval_safe_memory_starter_physical.yaml
+
+# Use Fetch's native compact navigation pose. All traversability, A*, stance,
+# and already-reachable parameters remain at the shared physical baseline.
+starter_primitives:
+  fixed_navigation_arm_pose_name: tucked

@@ -1,6 +1,8 @@
-import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+from og_ego_prim.config.runtime_config import SceneGraphConfig
+from og_ego_prim.utils.serialization import to_debug_builtin as to_builtin
 
 import numpy as np
 
@@ -9,8 +11,10 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def model_root() -> Path:
-    return Path(os.environ.get("ISBENCH_SCENE_GRAPH_MODEL_DIR", repo_root() / "data" / "models"))
+def model_root(scene_graph_config: Optional[SceneGraphConfig] = None) -> Path:
+    if scene_graph_config is not None and scene_graph_config.model_dir:
+        return Path(scene_graph_config.model_dir)
+    return repo_root() / "data" / "models"
 
 
 def ensure_path_exists(path: Path, description: str):
@@ -24,26 +28,6 @@ def insert_sys_path(paths: Iterable[Path]):
     for path in reversed([str(path) for path in paths]):
         if path not in sys.path:
             sys.path.insert(0, path)
-
-
-def to_builtin(value: Any):
-    if value is None:
-        return None
-    if hasattr(value, "detach"):
-        value = value.detach().cpu()
-    if hasattr(value, "tolist"):
-        value = value.tolist()
-    if isinstance(value, np.ndarray):
-        value = value.tolist()
-    if isinstance(value, tuple):
-        return [to_builtin(item) for item in value]
-    if isinstance(value, list):
-        return [to_builtin(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): to_builtin(item) for key, item in value.items()}
-    if isinstance(value, np.generic):
-        return value.item()
-    return value
 
 
 def bbox_from_mask(mask: np.ndarray) -> Optional[List[float]]:
