@@ -133,7 +133,7 @@ def validate_lifelong_contract(config: Dict[str, Any]) -> List[str]:
     return errors
 
 
-def _eval_config_mapping(
+def _config_mapping(
     config: Mapping[str, Any] | EvalTaskConfig,
 ) -> Dict[str, Any]:
     if isinstance(config, EvalTaskConfig):
@@ -212,7 +212,7 @@ class LifelongEvaluator:
         env: Any,
         config: Mapping[str, Any] | EvalTaskConfig,
     ) -> None:
-        config = _eval_config_mapping(config)
+        config = _config_mapping(config)
         contract_errors = validate_lifelong_contract(config)
         if contract_errors:
             raise ValueError("invalid lifelong task contract: " + "; ".join(contract_errors))

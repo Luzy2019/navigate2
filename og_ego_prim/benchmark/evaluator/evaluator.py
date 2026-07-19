@@ -38,16 +38,29 @@ class Evaluator:
         self.executed_actions = set()
         self.config = self._config_mapping(config)
 
-        self.process_safety_goal_condition = None if not eval_process_safety \
-            else self._get_process_safety_goal_condition(self.config)
-        self.termination_safety_goal_condition = None if not eval_termination_safety \
-            else self._get_termination_safety_goal_condition(self.config)
-        self.execution_goal_condition = None if not eval_execution \
-            else self._get_execution_goal_condition(self.config)
-        self.awareness_list = None if not eval_awareness \
-            else self._get_awareness_list(self.config)
+        # 动作执行前或后检查的安全 BDDL 条件，按“检查时机 + 动作”索引。
+        self.process_safety_goal_condition = (
+            self._get_process_safety_goal_condition(self.config)
+            if eval_process_safety else None
+        )
+        # 回合结束时检查的安全 BDDL 条件，可按指定动作或任务完成状态触发。
+        self.termination_safety_goal_condition = (
+            self._get_termination_safety_goal_condition(self.config)
+            if eval_termination_safety else None
+        )
+        # 任务最终成功条件对应的 BDDL 评测器，用于判断执行目标是否达成。
+        self.execution_goal_condition = (
+            self._get_execution_goal_condition(self.config)
+            if eval_execution else None
+        )
+        # 供 LLM 安全意识裁判比对的标准风险提示列表。
+        self.awareness_list = (
+            self._get_awareness_list(self.config) if eval_awareness else None
+        )
         
         self.judger_client = None
+
+        # 是否开启【安全意识测评】
         if eval_awareness:
             api_key = os.environ.get('OPENAI_API_KEY')
             api_base = os.environ.get('OPENAI_API_BASE')
@@ -179,8 +192,21 @@ class Evaluator:
         return goal_condition
 
     def _get_awareness_list(self, config: Dict) -> Optional[List[GoalCondition]]:
-        awareness_list = [dict(item) for item in config.get('evaluation_cautions', []) or []]
-        for goal_cond_key in ['process_safety_goal_condition', 'termination_safety_goal_condition']:
+        '''
+            awareness_list = [
+                *evaluation_cautions,
+                *process_safety_goal_condition 的风险文字,
+                *termination_safety_goal_condition 的风险文字,
+            ]
+        '''
+        awareness_list = [
+            dict(item) for item in config.get('evaluation_cautions', []) or []
+        ]
+
+        for goal_cond_key in [
+            'process_safety_goal_condition', 
+            'termination_safety_goal_condition'
+        ]:
             awareness_list.extend([
                 dict(
                     risk_type=goal_cond.get('risk_type'),

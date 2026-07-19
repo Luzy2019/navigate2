@@ -46,6 +46,7 @@ class RuntimeSafetyCue:
         return payload
 
 
+# 从任务 JSON 投影出的只读运行时安全上下文，供风险预测器按动作和子任务查询。
 @dataclass(frozen=True)
 class RuntimeTaskConfig:
     """Read-only runtime safety projection of the task JSON authoring source."""
@@ -237,6 +238,7 @@ def _option_key(name: str) -> str:
     return key
 
 
+# 控制实验进程的基础运行方式，例如无界面模式、输出根目录和机器人显示。
 @dataclass
 class RuntimeSectionConfig:
     headless: bool = True
@@ -256,6 +258,7 @@ class RuntimeSectionConfig:
         )
 
 
+# 配置感知场景图的后端、更新频率、相机参数及后端专属选项。
 @dataclass
 class SceneGraphConfig:
     backend: str = "samjam_unigoal"
@@ -318,6 +321,7 @@ class SceneGraphConfig:
         return float(self.option(name, default))
 
 
+# 配置机器人导航的速度、可达目标筛选、避障净空和卡死判定参数。
 @dataclass
 class NavigationConfig:
     linear_command: float = 0.5
@@ -453,6 +457,7 @@ class NavigationConfig:
         )
 
 
+# 配置 starter primitives 的符号化抓取、放置、开关和布料搬运执行策略。
 @dataclass
 class StarterPrimitivesConfig:
     verbose: bool = False
@@ -698,6 +703,7 @@ class StarterPrimitivesConfig:
         )
 
 
+# 配置评测产物的保存位置、视频采样、图像尺寸和调试证据输出。
 @dataclass
 class ArtifactConfig:
     output_dir: Optional[str] = None
@@ -751,6 +757,7 @@ class ArtifactConfig:
         )
 
 
+# 配置本次任务运行的任务名、场景、模型、规划器和执行行为默认值。
 @dataclass
 class TaskConfig:
     name: Optional[str] = None
@@ -787,6 +794,7 @@ class TaskConfig:
         )
 
 
+# 配置跨动作和跨子任务记忆的容量、检索器、归并方式及其扩展选项。
 @dataclass
 class MemoryConfig:
     enabled: bool = True
@@ -814,6 +822,7 @@ class MemoryConfig:
         )
 
 
+# 配置对象状态模型的操作次数上限、生命周期策略和生命周期规则。
 @dataclass
 class ObjectModelConfig:
     max_manipulations: int = 20
@@ -859,6 +868,7 @@ class ObjectModelConfig:
         )
 
 
+# 配置模拟时钟驱动的过程调度器，以及跨子任务计时器的暴露方式。
 @dataclass
 class SchedulerConfig:
     enabled: bool = True
@@ -907,6 +917,7 @@ class SchedulerConfig:
         )
 
 
+# 配置运行时风险预测器是否启用、风险上下文提供者和处理模式。
 @dataclass
 class RiskPredictorConfig:
     enabled: bool = True
@@ -949,6 +960,7 @@ class RiskPredictorConfig:
         }
 
 
+# 配置供规划模型使用的提示词构建器、提示词组成部分和记忆召回数量。
 @dataclass
 class PromptingConfig:
     builder: str = "semantic"
@@ -980,6 +992,7 @@ class PromptingConfig:
         )
 
 
+# 聚合整份运行 YAML 的所有配置段，并保留模式版本、扩展字段和原始输入。
 @dataclass
 class RuntimeConfig:
     runtime: RuntimeSectionConfig = field(default_factory=RuntimeSectionConfig)
