@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-import re
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from og_ego_prim.config.task_definition import build_agent_task_view
 from og_ego_prim.utils.serialization import to_builtin
@@ -46,30 +45,4 @@ class TaskPlanContext:
         )
 
 
-class ExamplePlanner:
-    """Parse per-task ``example_planning`` entries into executable plans."""
-
-    _ACTION = re.compile(r"(?:\d+\.\s+)?([a-zA-Z_]+)\(([^)]*)\)")
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> List[Dict[str, Any]]:
-        plans = []
-        for item in config.get("example_planning", []) or []:
-            action = str(item.get("action", "")).strip()
-            if action.upper() == "DONE" or action.upper().startswith("DONE("):
-                normalized = "done()"
-            else:
-                match = cls._ACTION.search(action)
-                if match is None:
-                    raise ValueError(f"invalid example planning action: {action!r}")
-                normalized = f"{match.group(1).lower()}({match.group(2).strip().lower()})"
-            plans.append({"action": normalized, "caution": item.get("caution")})
-        return plans
-
-    @classmethod
-    def from_task(cls, task: str) -> List[Dict[str, Any]]:
-        with get_task_config_path(task).open("r", encoding="utf-8") as file:
-            return cls.from_config(json.load(file))
-
-
-__all__ = ["ExamplePlanner", "TaskPlanContext"]
+__all__ = ["TaskPlanContext"]

@@ -1,5 +1,3 @@
-"""Model clients and compatibility exports."""
+"""Model client implementations."""
 
-from og_ego_prim.task_planner import PlanningAgent
-
-__all__ = ["PlanningAgent"]
+__all__ = []

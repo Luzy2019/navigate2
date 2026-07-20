@@ -335,46 +335,9 @@ class ActionRecord:
         return as_versioned_dict(self)
 
 
-@dataclass
-class PlannerEpisodeEntry:
-    """
-    One proposed action and its runtime gate decision, including blocked attempts.
-    """
-
-    step: int
-    action: Action
-    decision: ActionDecision
-    entry_id: str = field(default_factory=lambda: str(uuid4()))
-    attempt: int = 0
-    reason: Optional[str] = None
-
-    schema_version: str = "isbench.planner_episode_entry.v1"
-    extensions: ExtensionMap = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.action, Action):
-            if isinstance(self.action, dict):
-                self.action = Action(**self.action)
-            else:
-                raise TypeError("planner episode action must be an Action")
-        if not isinstance(self.decision, ActionDecision):
-            self.decision = ActionDecision(str(self.decision).strip().upper())
-        self.step = int(self.step)
-        self.entry_id = _identifier(self.entry_id) or str(uuid4())
-        self.attempt = int(self.attempt)
-        if self.attempt < 0:
-            raise ValueError("planner episode attempt must be non-negative")
-        self.reason = _identifier(self.reason)
-        self.extensions = dict(self.extensions or {})
-
-    def to_dict(self) -> Dict[str, Any]:
-        return as_versioned_dict(self)
-
-
 __all__ = [
     "Action",
     "ActionDecision",
     "ActionRecord",
-    "PlannerEpisodeEntry",
     "StateChange",
 ]

@@ -9,7 +9,6 @@ from og_ego_prim.domain import (
     Action,
     ActionDecision,
     ActionRecord,
-    PlannerEpisodeEntry,
     StateChange,
 )
 from og_ego_prim.events import RuntimeEvent
@@ -21,7 +20,7 @@ from og_ego_prim.object_model import (
 )
 from og_ego_prim.prompting import PromptContext
 from og_ego_prim.risk_predictor import RiskEvaluation
-from og_ego_prim.task_planner.episode import PlannerEpisode
+from og_ego_prim.task_planner.episode import PlannerEpisode, PlannerEpisodeEntry
 from og_ego_prim.utils.planning import normalize_planner_action
 
 from .components import RuntimeComponents

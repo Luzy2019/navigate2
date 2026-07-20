@@ -56,8 +56,8 @@ class IteratorPlannerAdapter:
         except StopIteration:
             return None
 
-class PlanningAgentAdapter:
-    """Adapter for the existing GPT/local PlanningAgent generator."""
+class AgentPlannerAdapter:
+    """Adapter for the existing GPT/local AgentPlanner generator."""
 
     supports_rethinking = True
 
@@ -85,8 +85,8 @@ PLANNER_ADAPTERS.register("example", IteratorPlannerAdapter)
 PLANNER_ADAPTERS.register("iterator", IteratorPlannerAdapter)
 PLANNER_ADAPTERS.register("scripted", IteratorPlannerAdapter)
 
-PLANNER_ADAPTERS.register("planning_agent", PlanningAgentAdapter)
-PLANNER_ADAPTERS.register("model", PlanningAgentAdapter)
+PLANNER_ADAPTERS.register("agent_planner", AgentPlannerAdapter)
+PLANNER_ADAPTERS.register("model", AgentPlannerAdapter)
 
 def register_planner_adapter(
     name: str,
@@ -133,7 +133,7 @@ __all__ = [
     "CallablePlannerAdapter",
     "IteratorPlannerAdapter",
     "PLANNER_ADAPTERS",
-    "PlanningAgentAdapter",
+    "AgentPlannerAdapter",
     "PlannerAdapter",
     "PlannerAdapterFactory",
     "create_planner_adapter",

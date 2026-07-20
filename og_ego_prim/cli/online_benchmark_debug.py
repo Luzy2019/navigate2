@@ -201,7 +201,7 @@ def _run(
 
     from og_ego_prim.benchmark import build_benchmark
     from og_ego_prim.task_planner import (
-        PlanningAgent,
+        AgentPlanner,
         create_planner_adapter,
     )
     from og_ego_prim.cli.safe_memory_benchmark_once import capture_robot_rgb_frame
@@ -236,10 +236,10 @@ def _run(
 
     agent = None
     if args.model:
-        agent = PlanningAgent(
+        agent = AgentPlanner(
             task_name=args.task,
             scene_name=args.scene,
-            agent_name=args.model,
+            model_name=args.model,
             work_dir=str(output_dir),
             debug=args.debug,
             prompt_setting=args.prompt_setting,

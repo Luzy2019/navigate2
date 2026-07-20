@@ -29,7 +29,7 @@ from og_ego_prim.observability.media import (
     install_executor_trace,
 )
 from og_ego_prim.task_planner import (
-    PlanningAgent,
+    AgentPlanner,
     create_planner_adapter,
 )
 from og_ego_prim.utils.cli_parsing import parse_optional_bool
@@ -504,10 +504,10 @@ def _online_benchmark_once(
 
     agent = None
     if model or local_llm_serve:
-        agent = PlanningAgent(
+        agent = AgentPlanner(
             task_name=task, 
             scene_name=scene, 
-            agent_name=model,
+            model_name=model,
             work_dir=work_dir,
             local_llm_serve=local_llm_serve, 
             local_serve_ip=local_serve_ip,  

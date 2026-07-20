@@ -515,7 +515,7 @@ def run_resource_guard(args):
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Run a full fixed or PlanningAgent-generated task sequence while "
+            "Run a full fixed or AgentPlanner-generated task sequence while "
             "saving the same FPV/video/scene-graph artifacts as scripts/test.py."
         )
     )
@@ -529,14 +529,14 @@ def parse_args():
         "--model",
         default=None,
         help=(
-            "PlanningAgent model name. When omitted, execute the task's fixed "
+            "AgentPlanner model name. When omitted, execute the task's fixed "
             "example_planning sequence."
         ),
     )
     parser.add_argument(
         "--local-llm-serve",
         action="store_true",
-        help="Use the OpenAI-compatible local model server for PlanningAgent.",
+        help="Use the OpenAI-compatible local model server for AgentPlanner.",
     )
     parser.add_argument("--local-serve-ip", default="")
     parser.add_argument("--local-serve-key", default="sk-123456")
@@ -544,7 +544,7 @@ def parse_args():
         "--work-dir",
         default=None,
         help=(
-            "PlanningAgent work directory. Defaults to OUTPUT_DIR/planner_work_dir. "
+            "AgentPlanner work directory. Defaults to OUTPUT_DIR/planner_work_dir. "
             "The agent's multi-view observations are saved below its benchmark directory."
         ),
     )
@@ -552,7 +552,7 @@ def parse_args():
         "--primitive-type",
         choices=("auto", "ego", "starter", "symbolic"),
         default="auto",
-        help="Primitive set used by both the benchmark and PlanningAgent.",
+        help="Primitive set used by both the benchmark and AgentPlanner.",
     )
     parser.add_argument(
         "--symbolic-smoke",
@@ -567,30 +567,30 @@ def parse_args():
         "--prompt-setting",
         choices=("default", "v0", "v1", "v2", "v3"),
         default="default",
-        help="PlanningAgent prompt variant.",
+        help="AgentPlanner prompt variant.",
     )
     parser.add_argument(
         "--use-initial-setup",
         action=BooleanOptionalAction,
         default=False,
-        help="Include the task's initial setup text in PlanningAgent prompts.",
+        help="Include the task's initial setup text in AgentPlanner prompts.",
     )
     parser.add_argument(
         "--use-self-caption",
         action=BooleanOptionalAction,
         default=False,
-        help="Generate a visual scene caption before PlanningAgent starts planning.",
+        help="Generate a visual scene caption before AgentPlanner starts planning.",
     )
     parser.add_argument(
         "--planner-use-obs",
         action=BooleanOptionalAction,
         default=True,
-        help="Provide saved multi-view observations to PlanningAgent.",
+        help="Provide saved multi-view observations to AgentPlanner.",
     )
     parser.add_argument(
         "--planner-debug",
         action="store_true",
-        help="Pause for confirmation before each PlanningAgent model request.",
+        help="Pause for confirmation before each AgentPlanner model request.",
     )
     parser.add_argument(
         "--plan-max-steps",
@@ -1200,7 +1200,7 @@ from omnigibson.macros import gm
 from PIL import Image, ImageDraw
 
 from og_ego_prim.benchmark import build_benchmark
-from og_ego_prim.models import PlanningAgent
+from og_ego_prim.task_planner import AgentPlanner
 
 gm.USE_GPU_DYNAMICS = not ARGS.disable_gpu_dynamics
 print(f"omnigibson_runtime: USE_GPU_DYNAMICS={gm.USE_GPU_DYNAMICS}")
@@ -1653,7 +1653,7 @@ def save_planner_observations(benchmark, observation_root: Path, step_tag: str):
     for stale_image in save_path.glob("*.png"):
         stale_image.unlink()
     save_surrounding_observations(benchmark, save_path)
-    print(f"saved PlanningAgent observations: {save_path}")
+    print(f"saved AgentPlanner observations: {save_path}")
 
 
 def save_rgb_video(frames, save_path: Path, fps: float):
@@ -2121,10 +2121,10 @@ def main():
         if prompt_setting == "default" and benchmark.primitive_type != "starter":
             prompt_setting = "v1"
 
-        agent = PlanningAgent(
+        agent = AgentPlanner(
             task_name=args.task,
             scene_name=args.scene,
-            agent_name=args.model,
+            model_name=args.model,
             work_dir=str(planner_work_dir),
             local_llm_serve=args.local_llm_serve,
             local_serve_ip=args.local_serve_ip,
@@ -2152,7 +2152,7 @@ def main():
             max_step=max_steps,
         )
         print(
-            f"planning_source: PlanningAgent model={args.model} "
+            f"planning_source: AgentPlanner model={args.model} "
             f"max_steps={max_steps} obs={args.planner_use_obs}"
         )
     else:

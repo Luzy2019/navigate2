@@ -718,12 +718,12 @@ def _run(
     install_video_step_callback(benchmark, args)
     agent = None
     if scripted is None:
-        from og_ego_prim.task_planner import PlanningAgent
+        from og_ego_prim.task_planner import AgentPlanner
 
-        agent = PlanningAgent(
+        agent = AgentPlanner(
             task_name=args.task,
             scene_name=scene,
-            agent_name=args.model,
+            model_name=args.model,
             work_dir=args.work_dir,
             local_llm_serve=args.local_llm_serve,
             local_serve_ip=args.local_serve_ip,
@@ -785,7 +785,7 @@ def _run(
                 task_instruction=instruction,
                 preserve_history=preserve_memory,
             )
-            # PlanningAgent already switched the shared Controller. Keep the
+            # AgentPlanner already switched the shared Controller. Keep the
             # legacy audit catalog and report metadata in sync without invoking
             # Controller.set_subtask a second time.
             benchmark.set_active_subtask(

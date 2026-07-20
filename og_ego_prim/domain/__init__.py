@@ -11,7 +11,6 @@ from .contracts import (
     Action,
     ActionDecision,
     ActionRecord,
-    PlannerEpisodeEntry,
     StateChange,
 )
 from .protocols import ActionExecutor, PerceptionProvider
@@ -30,7 +29,6 @@ __all__ = [
     "DuplicateRegistrationError",
     "ExtensionMap",
     "PerceptionProvider",
-    "PlannerEpisodeEntry",
     "Registry",
     "StateChange",
     "UnknownRegistrationError",
