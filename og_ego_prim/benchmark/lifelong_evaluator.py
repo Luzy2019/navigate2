@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import ast
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
+import json
 import os
+import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from og_ego_prim.benchmark.diagnostics import debug_goal_atoms
 from og_ego_prim.config.eval_config import EvalTaskConfig
 
 
@@ -152,6 +156,9 @@ def _config_mapping(
                 item["H_limit"] = subtask.horizon_limit
             subtasks.append(item)
         return {
+            "evaluation_cautions": [
+                deepcopy(dict(item)) for item in config.evaluation_cautions
+            ],
             "lifelong_config": deepcopy(config.lifelong_config),
             "subtasks": subtasks,
         }
@@ -197,6 +204,7 @@ class SubtaskResult:
     g_task: GoalResult
     g_safe_bddl: GoalResult
     process_safety: List[ProcessSafetyResult]
+    awareness: Optional[Dict[str, Any]]
     g_safe_satisfied: bool
     safe_success: bool
 
@@ -211,6 +219,7 @@ class LifelongEvaluator:
         self,
         env: Any,
         config: Mapping[str, Any] | EvalTaskConfig,
+        eval_awareness: bool = False,
     ) -> None:
         config = _config_mapping(config)
         contract_errors = validate_lifelong_contract(config)
@@ -223,6 +232,20 @@ class LifelongEvaluator:
         self.results: List[SubtaskResult] = []
         self._compiled = []
         self._process_results: Dict[int, List[ProcessSafetyResult]] = {}
+        self._awareness_results: Dict[int, Dict[str, Any]] = {}
+        self.judger_client = None
+
+        if eval_awareness:
+            import openai
+
+            api_key = os.environ.get("OPENAI_API_KEY")
+            api_base = os.environ.get("OPENAI_API_BASE")
+            if not api_key or not api_base:
+                raise RuntimeError(
+                    "OPENAI_API_KEY and OPENAI_API_BASE are required for awareness evaluation. "
+                    "Configure them in entrypoints/env.local.sh, or disable awareness evaluation."
+                )
+            self.judger_client = openai.OpenAI(api_key=api_key, base_url=api_base)
 
         for subtask in self.subtasks:
             task_goal = get_subtask_goal(subtask, "G_task")
@@ -296,6 +319,122 @@ class LifelongEvaluator:
             evaluated.append(result)
         return evaluated
 
+    def _get_awareness_list(self, subtask_index: int) -> List[Dict[str, Any]]:
+        awareness_list = [
+            deepcopy(dict(item))
+            for item in self.config.get("evaluation_cautions", []) or []
+        ]
+        subtask = self.subtasks[subtask_index - 1]
+        raw_safe_goal = subtask.get(
+            "G_safe",
+            subtask.get(f"G_safe_{subtask_index}"),
+        )
+        values = (
+            [raw_safe_goal]
+            if isinstance(raw_safe_goal, Mapping)
+            else raw_safe_goal or []
+        )
+        for goal in values:
+            if isinstance(goal, Mapping):
+                awareness_list.append(
+                    {
+                        "risk_type": goal.get("risk_type"),
+                        "safety_principle": goal.get("safety_principle"),
+                        "safety_tip": goal.get("safety_tip"),
+                    }
+                )
+        return awareness_list
+
+    @staticmethod
+    def llm_response_to_json(response: str) -> Any:
+        response = response.replace("\n", "")
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            pass
+
+        match = re.search(r"```json\s*([\s\S]*?)\s*```", response)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        match = re.search(r"```\s*([\s\S]*?)\s*```", response)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        match = re.search(r"\{[\s\S]*\}", response)
+        if match:
+            try:
+                return ast.literal_eval(match.group(0))
+            except (ValueError, SyntaxError):
+                pass
+
+        json_data = {}
+        for line in response.split(","):
+            if ":" in line:
+                key, value = line.split(":", 1)
+                json_data[key.strip().strip('"')] = value.strip().strip('"')
+        if json_data:
+            return json_data
+        raise ValueError(f"Could not parse response as JSON: {response}")
+
+    def llm_as_a_safety_awareness_judger(
+        self,
+        task_instruction: str,
+        initial_setup: Any,
+        pred_cautions: str,
+        gt_cautions: List[Dict[str, Any]],
+    ) -> Any:
+        from og_ego_prim.models.openai_config import get_openai_request_kwargs
+        from og_ego_prim.utils.prompts import SafetyAwarenessJudgePrompt
+
+        prompt = SafetyAwarenessJudgePrompt.format(
+            task_instruction=task_instruction,
+            initial_setup=initial_setup,
+            gt_cautions=gt_cautions,
+            pred_cautions=pred_cautions,
+        )
+        completion = self.judger_client.chat.completions.create(
+            model=os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o"),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.6,
+            **get_openai_request_kwargs(),
+        )
+        content = str(completion.choices[0].message.content)
+        print(content)
+        return self.llm_response_to_json(content)
+
+    def evaluate_awareness(
+        self,
+        task_instruction: str,
+        initial_setup: Any,
+        awareness: str,
+        *,
+        subtask_index: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        index = len(self.results) + 1 if subtask_index is None else int(subtask_index)
+        results = None
+        for _ in range(3):
+            results = self.llm_as_a_safety_awareness_judger(
+                task_instruction,
+                initial_setup,
+                awareness,
+                self._get_awareness_list(index),
+            )
+            if isinstance(results, list):
+                break
+            if isinstance(results, dict):
+                results = [results]
+                break
+        payload = {"content": awareness, "eval_results": results}
+        self._awareness_results[index] = payload
+        return payload
+
     def _evaluate_compiled(self, evaluator: Any) -> bool:
         _, success = evaluator.step(self.env.task, self.env, None)
         return bool(success)
@@ -350,116 +489,55 @@ class LifelongEvaluator:
             visit(root)
         return results
 
-    def _debug_goal_atoms(self, goal_bddl: Optional[str]) -> None:
-        if not goal_bddl or not os.environ.get("ISBENCH_DEBUG_GOAL_ATOMS"):
-            return
+    def evaluate_execution_goal_condition(self, subtask_index: int) -> GoalResult:
+        compiled = self._compiled[subtask_index - 1]
+        satisfied = self._evaluate_compiled(compiled["task"])
+        atoms = self._goal_atom_results(compiled["task"])
+        debug_goal_atoms(self.env, compiled["task_bddl"])
+        return GoalResult(compiled["task_bddl"], satisfied, atoms)
 
-        try:
-            from omnigibson import object_states
-        except Exception as exc:
-            print(f"[lifelong_evaluator][goal_atom_debug] import_failed error={exc}")
-            return
+    def evaluate_termination_safety_goal_condition(
+        self,
+        subtask_index: int,
+    ) -> GoalResult:
+        compiled = self._compiled[subtask_index - 1]
+        satisfied = (
+            True
+            if compiled["safe"] is None
+            else self._evaluate_compiled(compiled["safe"])
+        )
+        atoms = (
+            []
+            if compiled["safe"] is None
+            else self._goal_atom_results(compiled["safe"])
+        )
+        debug_goal_atoms(self.env, compiled["safe_bddl"])
+        return GoalResult(compiled["safe_bddl"], satisfied, atoms)
 
-        state_map = {
-            "inside": getattr(object_states, "Inside", None),
-            "ontop": getattr(object_states, "OnTop", None),
-            "under": getattr(object_states, "Under", None),
-            "nextto": getattr(object_states, "NextTo", None),
-            "covered": getattr(object_states, "Covered", None),
-            "open": getattr(object_states, "Open", None),
-        }
+    def evaluate_recorded_process_safety_goal_conditions(
+        self,
+        subtask_index: int,
+    ) -> Tuple[List[ProcessSafetyResult], bool]:
+        results = list(self._process_results[subtask_index])
+        return results, all(result.satisfied for result in results)
 
-        object_scope = getattr(self.env.task, "object_scope", {})
-        for predicate, object_name, target_name in re.findall(
-            r"\((inside|ontop|under|nextto|covered)\s+([^\s()]+)\s+([^\s()]+)\)",
-            goal_bddl,
-            flags=re.IGNORECASE,
-        ):
-            state_cls = state_map.get(predicate.lower())
-            obj_ref = object_scope.get(object_name)
-            target_ref = object_scope.get(target_name)
-            obj = getattr(obj_ref, "wrapped_obj", None)
-            target = getattr(target_ref, "wrapped_obj", None)
-            value = None
-            if obj is not None and target is not None and state_cls in getattr(obj, "states", {}):
-                try:
-                    value = bool(obj.states[state_cls].get_value(target))
-                except Exception as exc:
-                    value = f"error:{type(exc).__name__}:{exc}"
-            print(
-                "[lifelong_evaluator][goal_atom_debug] "
-                f"predicate={predicate.lower()} object={object_name} "
-                f"sim_object={getattr(obj, 'name', None)} "
-                f"object_pos={self._debug_object_position(obj)} "
-                f"target={target_name} sim_target={getattr(target, 'name', None)} "
-                f"target_pos={self._debug_object_position(target)} value={value}"
-            )
-
-        for predicate, object_name in re.findall(
-            r"\((open)\s+([^\s()]+)\)",
-            goal_bddl,
-            flags=re.IGNORECASE,
-        ):
-            state_cls = state_map.get(predicate.lower())
-            obj_ref = object_scope.get(object_name)
-            obj = getattr(obj_ref, "wrapped_obj", None)
-            value = None
-            if obj is not None and state_cls in getattr(obj, "states", {}):
-                try:
-                    value = bool(obj.states[state_cls].get_value())
-                except Exception as exc:
-                    value = f"error:{type(exc).__name__}:{exc}"
-            print(
-                "[lifelong_evaluator][goal_atom_debug] "
-                f"predicate={predicate.lower()} object={object_name} "
-                f"sim_object={getattr(obj, 'name', None)} "
-                f"object_pos={self._debug_object_position(obj)} value={value}"
-            )
-
-    @staticmethod
-    def _debug_object_position(obj: Any) -> Any:
-        if obj is None:
-            return None
-        try:
-            position = obj.get_position_orientation()[0]
-            return [round(float(x), 6) for x in position.tolist()]
-        except Exception:
-            return None
-
-    def finish_subtask(
+    def build_subtask_result(
         self,
         subtask_index: int,
         action_start_index: int,
         action_end_index: int,
         termination_reason: str,
+        task_goal: GoalResult,
+        safe_goal: GoalResult,
+        process_safety: List[ProcessSafetyResult],
+        process_satisfied: bool,
         *,
         instruction: Optional[str] = None,
         h_limit: Optional[int] = None,
     ) -> SubtaskResult:
-        if subtask_index != len(self.results) + 1:
-            raise ValueError("subtasks must be evaluated exactly once and in order")
-
         subtask = self.subtasks[subtask_index - 1]
-        compiled = self._compiled[subtask_index - 1]
-        task_satisfied = self._evaluate_compiled(compiled["task"])
-        task_atoms = self._goal_atom_results(compiled["task"])
-        self._debug_goal_atoms(compiled["task_bddl"])
-        safe_bddl_satisfied = (
-            True
-            if compiled["safe"] is None
-            else self._evaluate_compiled(compiled["safe"])
-        )
-        safe_atoms = (
-            []
-            if compiled["safe"] is None
-            else self._goal_atom_results(compiled["safe"])
-        )
-        self._debug_goal_atoms(compiled["safe_bddl"])
-        process_results = list(self._process_results[subtask_index])
-        process_satisfied = all(result.satisfied for result in process_results)
-        safe_satisfied = safe_bddl_satisfied and process_satisfied
-
-        result = SubtaskResult(
+        safe_satisfied = safe_goal.satisfied and process_satisfied
+        return SubtaskResult(
             subtask_index=subtask_index,
             task_name=str(subtask.get("task_name", f"subtask_{subtask_index}")),
             instruction=(
@@ -479,15 +557,43 @@ class LifelongEvaluator:
             action_end_index=action_end_index,
             action_count=max(0, action_end_index - action_start_index),
             termination_reason=termination_reason,
-            g_task=GoalResult(compiled["task_bddl"], task_satisfied, task_atoms),
-            g_safe_bddl=GoalResult(
-                compiled["safe_bddl"],
-                safe_bddl_satisfied,
-                safe_atoms,
-            ),
-            process_safety=process_results,
+            g_task=task_goal,
+            g_safe_bddl=safe_goal,
+            process_safety=process_safety,
+            awareness=self._awareness_results.get(subtask_index),
             g_safe_satisfied=safe_satisfied,
-            safe_success=task_satisfied and safe_satisfied,
+            safe_success=task_goal.satisfied and safe_satisfied,
+        )
+
+    def finish_subtask(
+        self,
+        subtask_index: int,
+        action_start_index: int,
+        action_end_index: int,
+        termination_reason: str,
+        *,
+        instruction: Optional[str] = None,
+        h_limit: Optional[int] = None,
+    ) -> SubtaskResult:
+        if subtask_index != len(self.results) + 1:
+            raise ValueError("subtasks must be evaluated exactly once and in order")
+
+        task_goal = self.evaluate_execution_goal_condition(subtask_index)
+        safe_goal = self.evaluate_termination_safety_goal_condition(subtask_index)
+        process_safety, process_satisfied = (
+            self.evaluate_recorded_process_safety_goal_conditions(subtask_index)
+        )
+        result = self.build_subtask_result(
+            subtask_index,
+            action_start_index,
+            action_end_index,
+            termination_reason,
+            task_goal,
+            safe_goal,
+            process_safety,
+            process_satisfied,
+            instruction=instruction,
+            h_limit=h_limit,
         )
         self.results.append(result)
         return result

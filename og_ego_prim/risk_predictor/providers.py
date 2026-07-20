@@ -63,7 +63,7 @@ class HybridRiskProvider:
     provider_id = "hybrid"
 
     def __init__(self, providers: Iterable[RiskProvider]) -> None:
-        self.providers = tuple(ensure_risk_provider(provider) for provider in providers)
+        self.providers = tuple(provider for provider in providers)
         if not self.providers:
             raise ValueError("hybrid risk provider requires at least one provider")
 
@@ -86,15 +86,6 @@ class NullRiskProvider:
     def assess(self, context: RiskContext) -> Tuple[HazardDraft, ...]:
         return ()
 
-
-def ensure_risk_provider(value: Any) -> RiskProvider:
-    if isinstance(value, RiskProvider) or callable(getattr(value, "assess", None)):
-        return value
-    if callable(value):
-        return ModelRiskProvider(value)
-    raise TypeError("risk provider must implement assess(context) or be a callable assessor")
-
-
 __all__ = [
     "HybridRiskProvider",
     "ModelAssessor",
@@ -102,5 +93,4 @@ __all__ = [
     "NullRiskProvider",
     "RiskProvider",
     "RuleRiskProvider",
-    "ensure_risk_provider",
 ]

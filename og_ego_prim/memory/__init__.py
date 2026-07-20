@@ -2,16 +2,19 @@
 
 from .core import (
     ExactMemoryRetriever,
-    DeduplicateConsolidator,
     MemoryQuery,
     MemoryRecall,
     MemoryRecord,
     MemoryRetriever,
-    MemoryConsolidator,
     MemoryStore,
     TaskMemory,
 )
-from .consolidation import MEMORY_CONSOLIDATORS, create_memory_consolidator
+from .consolidation import (
+    DeduplicateConsolidator,
+    MEMORY_CONSOLIDATORS,
+    MemoryConsolidator,
+    create_memory_consolidator,
+)
 from .retrieval import MEMORY_RETRIEVERS, create_memory_retriever
 from .scene_memory import SceneMemory
 

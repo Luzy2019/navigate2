@@ -15,9 +15,9 @@ class TaskPlanContext:
     """Normalized planner inputs shared by scripted and model planners."""
 
     def __init__(self, config: Dict[str, Any]):
+        
+        # 从task的json文件中读取对应的任务配置
         view = build_agent_task_view(config)
-        self.schema_version = "isbench.task_plan_context.v1"
-        self.extensions: Dict[str, Any] = {}
         self.task_instruction = view.instruction
         self.initial_setup = list(view.initial_setup)
         self.object_list = list(view.object_ids)
@@ -36,14 +36,12 @@ class TaskPlanContext:
     def to_dict(self) -> Dict[str, Any]:
         return to_builtin(
             {
-                "schema_version": self.schema_version,
                 "task_instruction": self.task_instruction,
                 "initial_setup": list(self.initial_setup),
                 "object_list": list(self.object_list),
                 "object_abilities": dict(self.object_abilities),
                 "wash_rules": list(self.wash_rules),
                 "goal_description": self.goal_description,
-                "extensions": dict(self.extensions),
             }
         )
 

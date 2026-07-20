@@ -5,7 +5,7 @@ from transformers import AutoModelForCausalLM, AutoProcessor
 
 from og_ego_prim.models.base_client import BaseClient
 
-
+# offline model
 class HFClient(BaseClient):
 
     def __init__(self, model_path: str):

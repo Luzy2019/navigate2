@@ -27,18 +27,6 @@ class PlannerAdapter(Protocol):
         ...
 
 
-class IteratorPlannerAdapter:
-    supports_rethinking = False
-
-    def __init__(self, plans: Iterable[Any]) -> None:
-        self._plans: Iterator[Any] = iter(plans)
-
-    def propose(self, context: PromptContext) -> Optional[Action]:
-        del context
-        try:
-            return normalize_planner_action(next(self._plans))
-        except StopIteration:
-            return None
 
 
 class CallablePlannerAdapter:
@@ -54,6 +42,19 @@ class CallablePlannerAdapter:
     def propose(self, context: PromptContext) -> Optional[Action]:
         return normalize_planner_action(self.callback(context))
 
+class IteratorPlannerAdapter:
+    """Adapter for the existing Expert Planning generator."""
+    supports_rethinking = False
+
+    def __init__(self, plans: Iterable[Any]) -> None:
+        self._plans: Iterator[Any] = iter(plans)
+
+    def propose(self, context: PromptContext) -> Optional[Action]:
+        del context
+        try:
+            return normalize_planner_action(next(self._plans))
+        except StopIteration:
+            return None
 
 class PlanningAgentAdapter:
     """Adapter for the existing GPT/local PlanningAgent generator."""
@@ -78,13 +79,14 @@ class PlanningAgentAdapter:
 
 PlannerAdapterFactory = Callable[..., PlannerAdapter]
 PLANNER_ADAPTERS: Registry[PlannerAdapterFactory] = Registry()
-PLANNER_ADAPTERS.register("iterator", IteratorPlannerAdapter)
 PLANNER_ADAPTERS.register("callable", CallablePlannerAdapter)
-PLANNER_ADAPTERS.register("planning_agent", PlanningAgentAdapter)
-PLANNER_ADAPTERS.register("model", PlanningAgentAdapter)
+
 PLANNER_ADAPTERS.register("example", IteratorPlannerAdapter)
+PLANNER_ADAPTERS.register("iterator", IteratorPlannerAdapter)
 PLANNER_ADAPTERS.register("scripted", IteratorPlannerAdapter)
 
+PLANNER_ADAPTERS.register("planning_agent", PlanningAgentAdapter)
+PLANNER_ADAPTERS.register("model", PlanningAgentAdapter)
 
 def register_planner_adapter(
     name: str,

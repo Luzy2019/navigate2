@@ -288,7 +288,7 @@ class OnlineBenchmark(Benchmark):
             prompt_builder=prompt_builder,
             executor=self.executor,
             evaluator=None,
-            event_sink=create_event_sink("online_tracker", self.tracker),
+            event_sink=create_event_sink("tracker", self.tracker),
             risk_predictor=risk_predictor,
         )
         self.runtime_controller = AgentRuntimeController(
@@ -1220,8 +1220,10 @@ class OnlineBenchmark(Benchmark):
                 plan['action'],
                 runtime_review.risk_evaluation,
             )
-            risk_latency = runtime_review.risk_evaluation.extensions.get(
-                'latency_seconds'
+            risk_latency = getattr(
+                self.runtime_controller,
+                'last_risk_latency',
+                None,
             )
             if risk_latency is not None:
                 self.tracker.track_latency('risk_prediction', risk_latency)

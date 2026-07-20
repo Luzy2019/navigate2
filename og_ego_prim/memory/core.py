@@ -8,30 +8,12 @@ import time
 from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional, Protocol, Tuple, Union
 
 from og_ego_prim.domain import ActionRecord, StateChange
-from og_ego_prim.utils.serialization import as_versioned_dict, to_builtin as _builtin
+from og_ego_prim.utils.serialization import to_builtin as _builtin
+
+from .consolidation import DeduplicateConsolidator, MemoryConsolidator
 
 
-def _runtime_value(value: Any) -> Any:
-    """Convert a structured runtime value without a field-name deny list."""
-
-    if hasattr(value, "to_dict"):
-        value = value.to_dict()
-    return _builtin(value)
-
-
-def _memory_extensions(value: Any) -> Any:
-    value = _runtime_value(value)
-    if isinstance(value, Mapping):
-        return {
-            str(key): _memory_extensions(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        return [_memory_extensions(item) for item in value]
-    return value
-
-
-@dataclass(frozen=True)
+@dataclass
 class MemoryRecord:
     """Legacy free-text note retained for import and caller compatibility."""
 
@@ -39,30 +21,17 @@ class MemoryRecord:
     source: str = "agent"
     step: Optional[int] = None
     room: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
-    schema_version: str = "isbench.memory_note.v1"
-    extensions: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        content = str(self.content or "").strip()
-        if not content:
+        self.content = (self.content or "").strip()
+        if not self.content:
             raise ValueError("memory content must not be empty")
-        object.__setattr__(self, "content", content)
-        object.__setattr__(self, "source", str(self.source or "agent").strip() or "agent")
-        object.__setattr__(self, "step", None if self.step is None else int(self.step))
-        object.__setattr__(
-            self,
-            "room",
-            None if self.room is None else (str(self.room).strip() or None),
-        )
-        object.__setattr__(self, "metadata", _runtime_value(dict(self.metadata or {})))
-        object.__setattr__(self, "timestamp", float(self.timestamp))
-        object.__setattr__(self, "schema_version", str(self.schema_version).strip())
-        object.__setattr__(self, "extensions", _memory_extensions(dict(self.extensions or {})))
+        self.source = (self.source or "agent").strip() or "agent"
+        self.room = (self.room or "").strip() or None
 
     def to_dict(self) -> Dict[str, Any]:
-        return as_versioned_dict(self)
+        return _builtin(self)
 
 
 class MemoryStore:
@@ -71,11 +40,7 @@ class MemoryStore:
     def __init__(
         self,
         records: Optional[Iterable[MemoryRecord]] = None,
-        *,
-        extensions: Optional[Mapping[str, Any]] = None,
     ) -> None:
-        self.schema_version = "isbench.memory_store.v1"
-        self.extensions = _memory_extensions(dict(extensions or {}))
         self.records: List[MemoryRecord] = []
         for record in records or ():
             self.records.append(
@@ -89,16 +54,12 @@ class MemoryStore:
         source: str = "agent",
         step: Optional[int] = None,
         room: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
     ) -> MemoryRecord:
-        if not str(content).strip():
-            raise ValueError("memory content must not be empty")
         record = MemoryRecord(
-            content=str(content).strip(),
-            source=str(source),
+            content=content,
+            source=source,
             step=step,
             room=room,
-            metadata=dict(metadata or {}),
         )
         self.records.append(record)
         return record
@@ -136,75 +97,39 @@ class MemoryStore:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "schema_version": self.schema_version,
             "records": [record.to_dict() for record in self.records],
-            "extensions": _builtin(self.extensions),
         }
 
 
-@dataclass(frozen=True)
+@dataclass
 class MemoryQuery:
     entity_ids: Tuple[str, ...] = ()
     room_id: Optional[str] = None
     action_name: Optional[str] = None
     limit: int = 20
-    include_notes: bool = False
-    schema_version: str = "isbench.memory_query.v1"
-    extensions: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        entity_ids = self.entity_ids
-        if isinstance(entity_ids, str):
-            entity_ids = (entity_ids,)
-        elif not isinstance(entity_ids, (list, tuple, set, frozenset)):
-            entity_ids = (entity_ids,) if entity_ids is not None else ()
-        object.__setattr__(
-            self,
-            "entity_ids",
-            tuple(
-                dict.fromkeys(
-                    str(value).strip() for value in entity_ids or () if str(value).strip()
-                )
-            ),
-        )
-        for field_name in ("room_id", "action_name"):
-            value = getattr(self, field_name)
-            normalized = None if value is None else (str(value).strip() or None)
-            if field_name == "action_name" and normalized is not None:
-                normalized = normalized.upper()
-            object.__setattr__(self, field_name, normalized)
-        object.__setattr__(self, "limit", max(int(self.limit), 0))
-        object.__setattr__(self, "include_notes", bool(self.include_notes))
-        object.__setattr__(self, "schema_version", str(self.schema_version).strip())
-        object.__setattr__(self, "extensions", _memory_extensions(dict(self.extensions or {})))
+        self.entity_ids = tuple(dict.fromkeys(self.entity_ids))
+        self.action_name = (self.action_name or "").upper() or None
+        self.limit = max(self.limit, 0)
 
     def to_dict(self) -> Dict[str, Any]:
-        return as_versioned_dict(self)
+        return _builtin(self)
 
 
-@dataclass(frozen=True)
+@dataclass
 class MemoryRecall:
     state_changes: Tuple[StateChange, ...] = ()
     actions: Tuple[ActionRecord, ...] = ()
-    notes: Tuple[MemoryRecord, ...] = ()
-    schema_version: str = "isbench.memory_recall.v1"
-    extensions: Dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "state_changes", tuple(self.state_changes or ()))
-        object.__setattr__(self, "actions", tuple(self.actions or ()))
-        object.__setattr__(self, "notes", tuple(self.notes or ()))
-        object.__setattr__(self, "schema_version", str(self.schema_version).strip())
-        object.__setattr__(self, "extensions", _memory_extensions(dict(self.extensions or {})))
 
     def to_dict(self) -> Dict[str, Any]:
-        return as_versioned_dict(self)
+        return _builtin(self)
 
     def to_prompt_context(self) -> str:
         lines: List[str] = []
         lines.extend(
             f"- state step={item.step}: {item.entity_id}.{item.key}: "
-            f"{_runtime_value(item.old)!r} -> {_runtime_value(item.new)!r}"
+            f"{_builtin(item.old)!r} -> {_builtin(item.new)!r}"
             for item in self.state_changes
         )
         lines.extend(
@@ -212,7 +137,6 @@ class MemoryRecall:
             + (f" x{item.count}" if item.count > 1 else "")
             for item in self.actions
         )
-        lines.extend(f"- note: {item.content}" for item in self.notes)
         return "\n".join(lines) if lines else "None"
 
 
@@ -224,7 +148,7 @@ class MemoryRetriever(Protocol):
 class ExactMemoryRetriever:
     """Deterministic entity/room/action retrieval used by v1."""
 
-    def recall(self, memory: "TaskMemory", query: MemoryQuery) -> MemoryRecall:
+    def recall(self, memory: TaskMemory, query: MemoryQuery) -> MemoryRecall:
         entity_ids = set(query.entity_ids)
         states = sorted(
             (
@@ -246,75 +170,12 @@ class ExactMemoryRetriever:
                 or record.action.name == query.action_name
             )
         ]
-        notes = (
-            [
-                record
-                for record in memory.records
-                if query.room_id is None or record.room == query.room_id
-            ]
-            if query.include_notes
-            else []
-        )
         limit = query.limit
         return MemoryRecall(
             state_changes=tuple(states[-limit:] if limit else ()),
             actions=tuple(actions[-limit:] if limit else ()),
-            notes=tuple(notes[-limit:] if limit else ()),
         )
 
-
-class MemoryConsolidator(Protocol):
-    def consolidate_action(
-        self,
-        previous: Optional[ActionRecord],
-        current: ActionRecord,
-    ) -> Optional[ActionRecord]:
-        ...
-
-    def accept_state(
-        self,
-        previous: Optional[StateChange],
-        current: StateChange,
-    ) -> bool:
-        ...
-
-class DeduplicateConsolidator:
-    """Default structural consolidation without generated summaries."""
-
-    def consolidate_action(
-        self,
-        previous: Optional[ActionRecord],
-        current: ActionRecord,
-    ) -> Optional[ActionRecord]:
-        if (
-            previous is not None
-            and previous.action.name == "WAIT"
-            and current.action.name == "WAIT"
-            and previous.action.actor_id == current.action.actor_id
-            and previous.action.object_id == current.action.object_id
-            and previous.action.target_id == current.action.target_id
-            and _builtin(previous.action.parameters) == _builtin(current.action.parameters)
-            and previous.task_id == current.task_id
-            and previous.subtask_id == current.subtask_id
-            and previous.room_id == current.room_id
-        ):
-            previous.count += current.count
-            return None
-        return current
-
-    def accept_state(
-        self,
-        previous: Optional[StateChange],
-        current: StateChange,
-    ) -> bool:
-        return not (
-            current.old == current.new
-            or (
-                previous is not None
-                and previous.key == current.key
-                and previous.new == current.new
-            )
-        )
 
 class TaskMemory(MemoryStore):
     """Bounded task context projected from successful runtime events."""
@@ -328,11 +189,9 @@ class TaskMemory(MemoryStore):
         max_states_per_object: int = 20,
         retriever: Optional[MemoryRetriever] = None,
         consolidator: Optional[MemoryConsolidator] = None,
-        extensions: Optional[Mapping[str, Any]] = None,
     ) -> None:
-        super().__init__(extensions=extensions)
+        super().__init__()
         self.task_id = None if task_id is None else str(task_id)
-        self.schema_version = "isbench.task_memory.v1"
         self.enabled = bool(enabled)
         self.active_subtask_id: Optional[str] = None
         self.action_history: Deque[ActionRecord] = deque(maxlen=max(int(max_actions), 1))
@@ -352,7 +211,7 @@ class TaskMemory(MemoryStore):
     def record_action(self, record: ActionRecord) -> bool:
         if not self.enabled or not record.succeeded:
             return False
-        payload = _memory_extensions(record.to_dict())
+        payload = _builtin(record.to_dict())
         payload["extensions"] = {}
         action_payload = payload.get("action")
         if isinstance(action_payload, Mapping):
@@ -371,7 +230,7 @@ class TaskMemory(MemoryStore):
             return False
         if str(change.key).strip().lower() in {"ground_truth", "oracle", "oracle_state"}:
             return False
-        payload = _memory_extensions(change.to_dict())
+        payload = _builtin(change.to_dict())
         payload["extensions"] = {}
         change = StateChange(**payload)
         changes = self.intermediate_states[change.entity_id]
@@ -427,22 +286,20 @@ class TaskMemory(MemoryStore):
         return super().recall(query, room=room)
 
     def to_prompt_context(self, limit: int = 20) -> str:
-        recall = self.retrieve(MemoryQuery(limit=limit, include_notes=False))
+        recall = self.retrieve(MemoryQuery(limit=limit))
         return recall.to_prompt_context()
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "schema_version": self.schema_version,
             "task_id": self.task_id,
             "active_subtask_id": self.active_subtask_id,
             "enabled": self.enabled,
             "state_changes": [
-                _memory_extensions(change.to_dict())
+                _builtin(change.to_dict())
                 for changes in self.intermediate_states.values()
                 for change in changes
             ],
-            "actions": [_memory_extensions(record.to_dict()) for record in self.action_history],
-            "extensions": _builtin(self.extensions),
+            "actions": [_builtin(record.to_dict()) for record in self.action_history],
         }
 
     def clear(self) -> None:
@@ -453,12 +310,10 @@ class TaskMemory(MemoryStore):
 
 __all__ = [
     "ExactMemoryRetriever",
-    "DeduplicateConsolidator",
     "MemoryQuery",
     "MemoryRecall",
     "MemoryRecord",
     "MemoryRetriever",
-    "MemoryConsolidator",
     "MemoryStore",
     "TaskMemory",
 ]

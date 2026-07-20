@@ -54,33 +54,33 @@ parser.add_argument('--model', type=str, default=None, help="If not local llm, r
 parser.add_argument('--local_llm_serve', action='store_true')
 parser.add_argument('--local_serve_ip', type=str, default="")
 parser.add_argument('--local_serve_key', type=str, default="sk-123456")
-parser.add_argument('--work_dir', type=str, default='./work_dir')
+parser.add_argument('--work_dir', type=str, default=None)
 
 parser.add_argument('--draw_bbox_2d', action='store_true')
 parser.add_argument(
     '--primitive_type',
     choices=('auto', 'ego', 'starter', 'symbolic'),
-    default='auto',
+    default=None,
     help='Semantic action implementation. Auto reads task_info.primitive_type and falls back to ego.',
 )
 parser.add_argument(
     '--scene_graph_step_interval',
     type=int,
-    default=0,
+    default=None,
     help='Low-level step interval for scene graph updates. Use 0 to update only after each high-level action.',
 )
 parser.add_argument(
     '--scene_graph_backend',
     choices=('disabled', 'none', 'omnigibson_truth', 'unigoal_grounded_sam', 'samjam_sam2', 'samjam_unigoal'),
-    default='omnigibson_truth',
+    default=None,
     help='Scene graph source. GroundedSAM and SAM2 require their optional perception dependencies.',
 )
-parser.add_argument('--use_initial_setup', action='store_true')
-parser.add_argument('--use_self_caption', action='store_true')
+parser.add_argument('--use_initial_setup', action='store_true', default=None)
+parser.add_argument('--use_self_caption', action='store_true', default=None)
 parser.add_argument('--online_object_sampling', type=parse_optional_bool, default=None)
 parser.add_argument('--sample_only', action='store_true')
 parser.add_argument('--debug', action='store_true')
-parser.add_argument('--show_robot', action='store_true', help='Keep the robot visible in the viewer for third-person debugging.')
+parser.add_argument('--show_robot', action='store_true', default=None, help='Keep the robot visible in the viewer for third-person debugging.')
 parser.add_argument(
     '--no_capture_observations',
     action='store_true',
@@ -96,7 +96,7 @@ parser.add_argument('--not_eval_process_safety', action='store_true')
 parser.add_argument('--not_eval_termination_safety', action='store_true')
 parser.add_argument('--not_eval_awareness', action='store_true')
 parser.add_argument('--not_eval_execution', action='store_true')
-parser.add_argument('--prompt_setting', type=str, default='default')
+parser.add_argument('--prompt_setting', type=str, default=None)
 
 
 def _attach_replay_session(
@@ -323,23 +323,24 @@ def _finish_replay(
         },
     )
 
-
-def _flag_present(flag: str) -> bool:
-    return any(arg == flag or arg.startswith(f"{flag}=") for arg in sys.argv[1:])
-
-
+# 格式化输出 output_dir
 def _allocate_output_dir(
     work_dir: str,
     benchmark_tag: str,
     model_tag: str,
     try_id: str | None,
 ) -> str:
-    """Return a non-overwriting run directory while preserving ``try_id`` paths.
-
-    Older callers pass ``try_id`` and rely on the resulting stable directory
-    name.  Direct CLI invocations commonly omit it; give those runs a
-    timestamp/process suffix so replay artifacts remain browsable as history.
-    """
+    '''
+        Usage:
+            path = _allocate_output_dir(
+                work_dir="results",
+                benchmark_tag="store_apple___Wainscott_0_int",
+                model_tag="example",
+                try_id=None,
+            )
+        Results:
+            results/benchmark/store_apple___Wainscott_0_int/20260720_153012_4821_example
+    '''
 
     root = os.path.join(work_dir, "benchmark", benchmark_tag)
     if try_id:
@@ -354,35 +355,31 @@ def _allocate_output_dir(
     return candidate
 
 
+# 从 args.config 配置文件中提取参数，并将其应用到 args 中
+# 返回更新后的 args 和 RuntimeConfig 对象
 def _apply_config(args: argparse.Namespace) -> tuple[argparse.Namespace, RuntimeConfig]:
     config_dict = load_runtime_config_dict(args.config)
     runtime_config = RuntimeConfig.from_mapping(config_dict)
     task_config = runtime_config.task
 
-    if not _flag_present('--task') and args.task is None:
-        args.task = task_config.name
-    if not _flag_present('--scene') and args.scene is None:
-        args.scene = task_config.scene
-    if not _flag_present('--model') and args.model is None:
-        args.model = task_config.model
-    if not _flag_present('--work_dir'):
-        args.work_dir = runtime_config.runtime.output_root
-    if not _flag_present('--primitive_type'):
-        args.primitive_type = task_config.primitive_type
-    if not _flag_present('--prompt_setting'):
-        args.prompt_setting = task_config.prompt_setting
-    if not _flag_present('--scene_graph_step_interval'):
-        args.scene_graph_step_interval = runtime_config.scene_graph.step_interval
-    if not _flag_present('--scene_graph_backend'):
-        args.scene_graph_backend = runtime_config.scene_graph.backend
-    if not _flag_present('--online_object_sampling'):
-        args.online_object_sampling = task_config.online_object_sampling
-    if not _flag_present('--use_initial_setup') and task_config.use_initial_setup:
-        args.use_initial_setup = True
-    if not _flag_present('--use_self_caption') and task_config.use_self_caption:
-        args.use_self_caption = True
-    if not _flag_present('--show_robot') and runtime_config.runtime.show_robot:
-        args.show_robot = True
+    config_defaults = {
+        "task": task_config.name,
+        "scene": task_config.scene,
+        "model": task_config.model,
+        "work_dir": runtime_config.runtime.output_root,
+        "primitive_type": task_config.primitive_type,
+        "prompt_setting": task_config.prompt_setting,
+        "scene_graph_step_interval": runtime_config.scene_graph.step_interval,
+        "scene_graph_backend": runtime_config.scene_graph.backend,
+        "online_object_sampling": task_config.online_object_sampling,
+        "use_initial_setup": task_config.use_initial_setup,
+        "use_self_caption": task_config.use_self_caption,
+        "show_robot": runtime_config.runtime.show_robot,
+    }
+    for name, default in config_defaults.items():
+        if getattr(args, name) is None:
+            setattr(args, name, default)
+
     args.capture_observations = (
         False
         if args.no_capture_observations
@@ -451,6 +448,7 @@ def _online_benchmark_once(
     
     output_dir = _allocate_output_dir(work_dir, benchmark_tag, model_tag, try_id)
     os.makedirs(output_dir, exist_ok=True)
+
     replay_session, replay_media = _attach_replay_session(
         benchmark,
         output_dir,

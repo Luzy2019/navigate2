@@ -9,18 +9,19 @@ into runtime objects.  In particular, evaluator BDDL is never copied into a
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 import re
 from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Sequence, Tuple
 
 from .models import (
-    CausalEdge,
     Caution,
-    Countermeasure,
     HazardDraft,
     HazardLevel,
     RiskContext,
-    RISK_SCHEMA_VERSION,
 )
+
+RISK_SCHEMA_VERSION = "isbench.risk_rule.v1"
 
 
 RULE_CATALOG_SCHEMA_VERSION = "isbench.task_safety_rules.v1"
@@ -33,8 +34,11 @@ def _strings(value: Any) -> Tuple[str, ...]:
         value = (value,)
     return tuple(str(item).strip() for item in value if str(item).strip())
 
-
 def _action_parts(value: Any) -> Tuple[Optional[str], Tuple[str, ...]]:
+    '''
+        _action_parts("PLACE_INSIDE(apple, cabinet)")
+        # ("PLACE_INSIDE", ("apple", "cabinet"))
+    '''
     if value is None:
         return None, ()
     text = str(value).strip()
@@ -52,6 +56,17 @@ def _action_parts(value: Any) -> Tuple[Optional[str], Tuple[str, ...]]:
 
 
 def _action_from_context(context: RiskContext) -> Tuple[Optional[str], Tuple[str, ...]]:
+    '''
+        context = RiskContext(
+            action=Action(
+                name="PLACE_INSIDE",
+                object_id="apple",
+                target_id="cabinet",
+            )
+        )
+        _action_from_context(context)
+        # ("PLACE_INSIDE", ("apple", "cabinet"))
+    '''
     action = context.action
     if action is None:
         return None, ()
@@ -67,18 +82,37 @@ def _action_from_context(context: RiskContext) -> Tuple[Optional[str], Tuple[str
 
 
 def _item_id(item: Mapping[str, Any], index: int) -> str:
-    explicit_rule_id = item.get("rule_id")
-    if explicit_rule_id:
-        return str(explicit_rule_id).strip()
-    hazard_id = item.get("hazard_id") or item.get("id")
-    if hazard_id:
-        # ``hazard_id`` labels a semantic hazard and may legitimately repeat
-        # for different actions. Runtime rule identity must still be unique.
-        return f"{str(hazard_id).strip()}:{index}"
-    risk_type = item.get("risk_type") or item.get("hazard_type") or item.get("type") or "safety"
-    action = item.get("action") or item.get("trigger_action") or "standing"
-    slug = re.sub(r"[^a-z0-9]+", "-", f"{risk_type}-{action}".lower()).strip("-")
-    return f"task-{slug or 'safety'}-{index}"
+    """Build a short, deterministic ID from the complete rule identity."""
+    rule_id = str(item.get("rule_id") or "").strip().lower()
+    hazard_id = str(item.get("hazard_id") or item.get("id") or "").strip().lower()
+    risk_type = str(
+        item.get("risk_type")
+        or item.get("hazard_type")
+        or item.get("type")
+        or ""
+    ).strip().lower()
+    action = item.get("action") or item.get("trigger_action")
+    normalized_action = ""
+    if action:
+        operator, arguments = _action_parts(action)
+        normalized_action = operator or ""
+        if arguments:
+            normalized_action += "(" + ",".join(arguments) + ")"
+        normalized_action = normalized_action.lower()
+    identity = {
+        "rule_id": rule_id,
+        "hazard_id": hazard_id,
+        "risk_type": risk_type,
+        "action": normalized_action,
+    }
+    if not any(identity.values()):
+        return f"safety-{index}"
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:8]
+    label = next(value for value in identity.values() if value)
+    prefix = re.sub(r"[^a-z0-9]+", "-", label).strip("-")[:24] or "safety"
+    return f"{prefix}-{digest}"
 
 
 def _item_level(item: Mapping[str, Any]) -> HazardLevel:
@@ -153,11 +187,8 @@ class RiskRule:
     source_entities: Tuple[str, ...] = ()
     affected_entities: Tuple[str, ...] = ()
     trigger_action: Optional[str] = None
-    causal_edges: Tuple[CausalEdge, ...] = ()
-    countermeasures: Tuple[Countermeasure, ...] = ()
     common_cautions: Tuple[Caution, ...] = ()
     specific_cautions: Tuple[Caution, ...] = ()
-    evidence_refs: Tuple[str, ...] = ()
     confidence: float = 1.0
     enabled: bool = True
     schema_version: str = RISK_SCHEMA_VERSION
@@ -180,8 +211,6 @@ class RiskRule:
         self.trigger_action = (
             None if self.trigger_action is None else str(self.trigger_action).strip()
         )
-        self.causal_edges = tuple(self.causal_edges or ())
-        self.countermeasures = tuple(self.countermeasures or ())
         self.common_cautions = tuple(
             item if isinstance(item, Caution) else Caution.from_value(item, default_kind="common")
             for item in (self.common_cautions or ())
@@ -190,7 +219,6 @@ class RiskRule:
             item if isinstance(item, Caution) else Caution.from_value(item, default_kind="specific")
             for item in (self.specific_cautions or ())
         )
-        self.evidence_refs = _strings(self.evidence_refs)
         self.confidence = min(max(float(self.confidence), 0.0), 1.0)
         self.enabled = bool(self.enabled)
         self.extensions = dict(self.extensions or {})
@@ -243,11 +271,8 @@ class RiskRule:
             source_entities=_strings(item.get("source_entities") or entity_ids),
             affected_entities=_strings(item.get("affected_entities") or entity_ids),
             trigger_action=action,
-            causal_edges=item.get("causal_edges") or (),
-            countermeasures=item.get("countermeasures") or item.get("mitigations") or (),
             common_cautions=common,
             specific_cautions=specific,
-            evidence_refs=item.get("evidence_refs") or (),
             confidence=item.get("confidence", 1.0),
             enabled=item.get("enabled", True),
             extensions=extensions,
@@ -293,13 +318,9 @@ class RiskRule:
             source_entities=self.source_entities,
             affected_entities=self.affected_entities,
             trigger_action=self.trigger_action,
-            causal_edges=self.causal_edges,
-            countermeasures=self.countermeasures,
             cautions=cautions,
-            evidence_refs=self.evidence_refs,
             confidence=self.confidence,
             source="task_json",
-            extensions=dict(self.extensions),
         )
 
     def to_dict(self) -> Dict[str, Any]:

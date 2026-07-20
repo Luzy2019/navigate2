@@ -191,7 +191,7 @@ def build_agent_task_view(config: Mapping[str, Any]) -> AgentTaskView:
 
 TaskDefinitionSource = Union[str, Path, Mapping[str, Any]]
 
-
+# 从 source(任务定义的路径或字典)加载任务定义，并返回 TaskDefinition 对象
 class TaskDefinitionLoader:
     def load(self, source: TaskDefinitionSource) -> TaskDefinition:
         source_path: Optional[Path] = None

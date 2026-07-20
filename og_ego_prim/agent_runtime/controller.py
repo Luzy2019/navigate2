@@ -12,7 +12,7 @@ from og_ego_prim.domain import (
     PlannerEpisodeEntry,
     StateChange,
 )
-from og_ego_prim.events import NullEventSink, RuntimeEvent
+from og_ego_prim.events import RuntimeEvent
 from og_ego_prim.memory import MemoryQuery
 from og_ego_prim.object_model import (
     LifecycleContext,
@@ -58,7 +58,7 @@ class AgentRuntimeController:
         
         # 1. 核心依赖
         self.components = components
-        self.event_sink = components.event_sink or NullEventSink()
+        self.event_sink = components.event_sink
         self.planner_episode = PlannerEpisode()
 
         # 2. 任务相关
@@ -101,6 +101,8 @@ class AgentRuntimeController:
         self.last_review: Optional[ActionReview] = None
         # 最近一次动作的执行结果
         self.last_outcome: Optional[ActionOutcome] = None
+        # 最近一次风险评估耗时；不混入 RiskEvaluation 数据模型。
+        self.last_risk_latency: Optional[float] = None
         # 生命周期指令处理器，例如默认注册
         self.lifecycle_directive_handlers: Dict[
             str,
@@ -499,7 +501,6 @@ class AgentRuntimeController:
             risk_evaluation = RiskEvaluation(
                 decision=ActionDecision.ALLOW,
                 action=action,
-                extensions={"risk_mode": "disabled"},
             )
         else:
             risk_context = {
@@ -528,7 +529,7 @@ class AgentRuntimeController:
                     )
                 risk_evaluation = RiskEvaluation(**dict(risk_evaluation))
         risk_latency = max(time.perf_counter() - risk_started_at, 0.0)
-        risk_evaluation.extensions.setdefault("latency_seconds", risk_latency)
+        self.last_risk_latency = risk_latency
         risk_payload = risk_evaluation.to_dict()
         self._emit(
             "risk_evaluated",
@@ -536,6 +537,7 @@ class AgentRuntimeController:
             details={
                 "action": action.to_legacy_plan(),
                 "evaluation": risk_payload,
+                "latency_seconds": risk_latency,
             },
         )
 

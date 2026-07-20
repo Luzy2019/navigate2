@@ -400,30 +400,6 @@ def _finish_safe_replay(
             "memory_mode": None if report is None else report.get("memory_mode"),
         },
     )
-def write_run_readme(
-    work_dir: Path,
-    args: argparse.Namespace,
-    scene: str,
-    planner_source: str,
-) -> Path:
-    readme_path = work_dir / "README.md"
-    started_at = datetime.now().astimezone().isoformat(timespec="seconds")
-    content = (
-        f"# IS-Bench run: {args.run_purpose}\n\n"
-        f"- Task: `{args.task}`\n"
-        f"- Scene: `{scene}`\n"
-        f"- Started: `{started_at}`\n"
-        f"- Purpose: {args.run_purpose}\n"
-        f"- Memory mode: `{args.memory_mode}`\n"
-        f"- Planner source: `{planner_source}`\n"
-        f"- Online object sampling: `{args.online_object_sampling}`\n"
-        f"- First-person video requested: `{args.save_video}`\n"
-        f"- Topdown video requested: `{args.save_topdown_video}`\n\n"
-        "Console output is captured in `console.log`. Benchmark reports, observations, "
-        "`video.mp4`, and `topdown.mp4` are stored below this directory.\n"
-    )
-    readme_path.write_text(content, encoding="utf-8")
-    return readme_path
 
 
 def load_task_config(task_name: str) -> Dict[str, Any]:
@@ -677,10 +653,8 @@ def _run(
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     (work_dir / "benchmark").mkdir(parents=True, exist_ok=True)
-    readme_path = write_run_readme(work_dir, args, scene, planner_source)
     log_path = install_run_log(work_dir)
     print(f"run directory: {work_dir.resolve()}", flush=True)
-    print(f"run README: {readme_path.resolve()}", flush=True)
     print(f"console log: {log_path.resolve()}", flush=True)
 
     if args.actions_file:
@@ -729,7 +703,11 @@ def _run(
 
     observation_adapter = ISBenchObservationAdapter()
     observation_adapter.reset()
-    evaluator = LifelongEvaluator(benchmark.env, benchmark.eval_task_config)
+    evaluator = LifelongEvaluator(
+        benchmark.env,
+        benchmark.eval_task_config,
+        eval_awareness=scripted is None and args.prompt_setting == "v2",
+    )
     evaluator = TracingEvaluatorProxy(
         evaluator,
         replay_session,
@@ -819,7 +797,14 @@ def _run(
             if args.use_self_caption:
                 benchmark.tracker.track_caption(content=agent.generate_caption(use_obs=use_obs))
             if args.prompt_setting == "v2":
-                benchmark.tracker.track_awareness(content=agent.generate_awareness(use_obs=use_obs))
+                awareness = agent.generate_awareness(use_obs=use_obs)
+                awareness_result = evaluator.evaluate_awareness(
+                    instruction,
+                    benchmark.initial_setup,
+                    awareness,
+                    subtask_index=index,
+                )
+                benchmark.tracker.track_awareness(**awareness_result)
             from og_ego_prim.task_planner import create_planner_adapter
 
             planner_adapter = create_planner_adapter(

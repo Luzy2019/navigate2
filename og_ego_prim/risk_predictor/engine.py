@@ -19,25 +19,29 @@ from .models import (
     RiskEvaluation,
     normalize_drafts,
 )
-from .providers import RiskProvider, ensure_risk_provider
+from .providers import RiskProvider
 
-
-def _normalized_identifier(value: Any) -> str:
-    return str(value or "").strip().lower()
-
-
-def _normalized_trigger(value: Optional[str]) -> str:
-    return re.sub(r"\s+", "", str(value or "")).upper()
-
-
+# 给hazard生成一个唯一的key，便于在后续的处理过程中进行识别和管理
 def _hazard_key(draft: HazardDraft, action: Optional[Action] = None) -> str:
+    '''
+    Deterministically generate a unique key for a hazard draft.
+
+    Example:
+        draft.rule_id = "wet_floor"
+        draft.source_entities = ("floor", "sink")
+        draft.affected_entities = ("robot",)
+        draft.trigger_action = "PICK_UP"
+        action.entity_ids = ("robot", "mop", "floor")
+    Output:
+        "wet-floor:2c30d918b215ca31
+    '''
     entity_ids = set(draft.source_entities) | set(draft.affected_entities)
     if action is not None:
         entity_ids.update(action.entity_ids)
     payload = {
-        "rule_id": _normalized_identifier(draft.rule_id),
-        "entity_ids": sorted(_normalized_identifier(item) for item in entity_ids if item),
-        "trigger": _normalized_trigger(draft.trigger_action or (action.name if action else None)),
+        "rule_id": draft.rule_id,
+        "entity_ids": sorted(item for item in entity_ids if item),
+        "trigger": draft.trigger_action or (action.name if action else None),
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
@@ -57,21 +61,15 @@ def create_hazard(value: Any, *, action: Optional[Action] = None) -> Hazard:
             source_entities=value.source_entities,
             affected_entities=value.affected_entities,
             trigger_action=value.trigger_action,
-            causal_edges=value.causal_edges,
-            countermeasures=value.countermeasures,
             cautions=value.cautions,
-            evidence_refs=value.evidence_refs,
             confidence=value.confidence,
             source=value.source,
-            schema_version=value.schema_version,
-            extensions=value.extensions,
         )
     elif isinstance(value, HazardDraft):
         draft = value
-    elif isinstance(value, Mapping):
-        draft = HazardDraft.from_mapping(value)
     else:
-        raise TypeError("create_hazard expects a HazardDraft, Hazard, or mapping")
+        raise TypeError("create_hazard expects a HazardDraft or Hazard")
+
     key = _hazard_key(draft, action)
     cautions = tuple(
         caution
@@ -87,14 +85,9 @@ def create_hazard(value: Any, *, action: Optional[Action] = None) -> Hazard:
         source_entities=draft.source_entities,
         affected_entities=draft.affected_entities,
         trigger_action=draft.trigger_action,
-        causal_edges=draft.causal_edges,
-        countermeasures=draft.countermeasures,
         cautions=cautions,
-        evidence_refs=draft.evidence_refs,
         confidence=draft.confidence,
         source=draft.source,
-        schema_version=draft.schema_version,
-        extensions=draft.extensions,
         hazard_key=key,
     )
 
@@ -123,23 +116,11 @@ def _merge_hazards(left: Hazard, right: Hazard) -> Hazard:
         primary,
         source_entities=tuple(sorted(set(primary.source_entities + secondary.source_entities))),
         affected_entities=tuple(sorted(set(primary.affected_entities + secondary.affected_entities))),
-        causal_edges=_merge_unique(
-            primary.causal_edges,
-            secondary.causal_edges,
-            lambda item: (item.source_ref, item.relation, item.target_ref, item.causal_level.value),
-        ),
-        countermeasures=_merge_unique(
-            primary.countermeasures,
-            secondary.countermeasures,
-            lambda item: (item.action_template, item.required_order),
-        ),
         cautions=_merge_unique(
             primary.cautions,
             secondary.cautions,
             lambda item: (item.kind, item.text),
         ),
-        evidence_refs=tuple(sorted(set(primary.evidence_refs + secondary.evidence_refs))),
-        extensions={**secondary.extensions, **primary.extensions},
     )
 
 
@@ -171,7 +152,7 @@ class RiskEngine:
     MODES = frozenset({"audit", "enforce", "disabled"})
 
     def __init__(self, provider: RiskProvider, *, mode: str = "enforce") -> None:
-        self.provider = ensure_risk_provider(provider)
+        self.provider = provider
         normalized_mode = str(mode).strip().lower()
         if normalized_mode not in self.MODES:
             raise ValueError(f"risk mode must be one of {', '.join(sorted(self.MODES))}")
@@ -197,10 +178,6 @@ class RiskEngine:
             return RiskEvaluation(
                 decision=ActionDecision.ALLOW,
                 action=current.action,
-                extensions={
-                    "risk_mode": self.mode,
-                    "recommended_decision": ActionDecision.ALLOW.value,
-                },
             )
         active: Dict[str, Hazard] = {}
         for draft in normalize_drafts(tuple(self.provider.assess(current) or ())):
@@ -238,10 +215,6 @@ class RiskEngine:
             specific_cautions=specific,
             action=current.action,
             rethinking_reason=reason,
-            extensions={
-                "risk_mode": self.mode,
-                "recommended_decision": recommended.value,
-            },
         )
 
     def evaluate(self, action: Action, context: Any = None) -> RiskEvaluation:
