@@ -54,9 +54,6 @@ def _lifecycle_rule(value: Any, ordinal: int) -> LifecycleRule:
             state_updates=dict(transition.get("state_updates") or {}),
             reason=transition.get("reason"),
             directives=directives,
-            schema_version=str(
-                transition.get("schema_version", "isbench.lifecycle_transition.v1")
-            ),
             extensions=dict(transition.get("extensions") or {}),
         )
     else:
@@ -66,7 +63,6 @@ def _lifecycle_rule(value: Any, ordinal: int) -> LifecycleRule:
         conditions=dict(value.get("conditions") or {}),
         transition=parsed_transition,
         priority=int(value.get("priority", 0)),
-        schema_version=str(value.get("schema_version", "isbench.lifecycle_rule.v1")),
         extensions=dict(value.get("extensions") or {}),
     )
 

@@ -19,12 +19,10 @@ from .handlers import (
 from .models import (
     ProcessStatus,
     ProcessUpdate,
-    SCHEMA_VERSION,
     ScheduledProcess,
     TemporalEvent,
     TemporalGate,
     make_process_id,
-    normalize_action_name,
 )
 from .scheduler import (
     ProcessVisibilityFilter,
@@ -33,6 +31,7 @@ from .scheduler import (
     build_scheduler,
     entity_visibility_filter,
 )
+from .utils import normalize_action_name
 
 __all__ = [
     "BUILTIN_PROCESS_DEFINITIONS",
@@ -50,7 +49,6 @@ __all__ = [
     "ProcessStatus",
     "ProcessUpdate",
     "ProcessVisibilityFilter",
-    "SCHEMA_VERSION",
     "ScheduledProcess",
     "Scheduler",
     "SchedulerConfig",

@@ -3,10 +3,17 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Literal
 
+'''
+specs 是 specifications 的缩写，意思是“规格定义”。这个文件定义了原语系统的接口约定，包括：
+有哪些合法动作
+每个动作需要几个参数
+不同原语集的动作规格
+legacy 动作到 starter 动作的格式转换
+'''
 
 PrimitiveType = Literal["ego", "starter", "symbolic"]
 
-
+# 这里的 0、1、2 表示每个 primitive（原语动作）要求的参数数量，也叫“元数（arity）”
 EGO_VALID_PRIMITIVES: Dict[str, int] = {
     "NAVIGATE_TO": 1,
     "GRASP": 1,
@@ -91,10 +98,33 @@ def get_valid_primitives(primitive_type: PrimitiveType) -> Dict[str, int]:
             f"expected one of {tuple(VALID_PRIMITIVES_BY_TYPE)}"
         ) from exc
 
-
+# 扩展动作序列
 def expand_legacy_plan_for_starter(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Convert legacy two-object actions into grasp + physical starter actions."""
-    action = plan["action"].strip()
+    """
+    Description:
+        将 legacy 双对象动作展开为 starter 原语序列：
+        先抓取第一个对象，再对第二个对象执行相应操作。
+        如果输入动作不是受支持的 legacy 动作，则原样返回该计划。
+        PLACE_NEXTTO 会被展开为 RELEASE，因为 starter 原语通过在导航目标旁释放当前抓取的对象来实现相邻放置。
+
+    Example:
+        1) expand_legacy_plan_for_starter(
+               {"action": "PLACE_INSIDE(apple, bowl)", "caution": "fragile"}
+           )
+        2) expand_legacy_plan_for_starter(
+               {"action": "navigate_to(apple)", "caution": None}
+           )
+
+    Output:
+        1) [
+               {"action": "navigate_to(apple)", "caution": None},
+               {"action": "grasp(apple)", "caution": None},
+               {"action": "navigate_to(bowl)", "caution": None},
+               {"action": "place_inside(bowl)", "caution": "fragile"},
+           ]
+        2) [{"action": "navigate_to(apple)", "caution": None}]
+    """
+    action = plan["action"]
     match = re.fullmatch(
         r"(PLACE_ON_TOP|PLACE_INSIDE|PLACE_NEXTTO|POUR_INTO|DUMP_INTO)\s*\(\s*([^,]+?)\s*,\s*([^)]+?)\s*\)",
         action,
@@ -106,11 +136,11 @@ def expand_legacy_plan_for_starter(plan: Dict[str, Any]) -> List[Dict[str, Any]]
     primitive, target_obj, placement_obj = match.groups()
     expanded = [
         {
-            "action": f"navigate_to({target_obj.strip()})",
+            "action": f"navigate_to({target_obj})",
             "caution": None,
         },
         {
-            "action": f"grasp({target_obj.strip()})",
+            "action": f"grasp({target_obj})",
             "caution": None,
         },
     ]
@@ -118,7 +148,7 @@ def expand_legacy_plan_for_starter(plan: Dict[str, Any]) -> List[Dict[str, Any]]
         expanded.extend(
             [
                 {
-                    "action": f"navigate_to({placement_obj.strip()})",
+                    "action": f"navigate_to({placement_obj})",
                     "caution": None,
                 },
                 {
@@ -132,18 +162,18 @@ def expand_legacy_plan_for_starter(plan: Dict[str, Any]) -> List[Dict[str, Any]]
     expanded.extend(
         [
             {
-                "action": f"navigate_to({placement_obj.strip()})",
+                "action": f"navigate_to({placement_obj})",
                 "caution": None,
             },
             {
-                "action": f"{primitive.lower()}({placement_obj.strip()})",
+                "action": f"{primitive.lower()}({placement_obj})",
                 "caution": plan.get("caution"),
             },
         ]
     )
     return expanded
 
-
+# symbolic -> starter 原语集的动作转换函数
 def starter_evaluation_action(
     action: str,
     grasped_object: str | None,

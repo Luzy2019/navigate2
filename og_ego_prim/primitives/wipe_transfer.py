@@ -4,6 +4,26 @@ from typing import Any, FrozenSet, Iterable, Tuple
 
 WIPE_PAYLOAD_ATTR = "_isbench_wipe_contamination_payload"
 
+'''
+wipe transfer 可以理解为“擦拭过程中的污染物转移”。
+它模拟的不是“用抹布一擦，污染物直接消失”，而是：
+
+目标表面的污染物 -> 转移到清洁工具
+清洁工具原有的污染物 -> 重新沾到目标表面
+
+
+redeposit_systems
+清洁工具在擦拭前已经携带的污染物。
+本次擦拭时，这些污染物会重新沾到目标表面。
+
+acquired_systems
+第 42 行对应的字段。
+本次擦拭从目标表面新获得的视觉污染物。
+
+resulting_payload
+擦拭完成后，清洁工具携带的全部污染物。
+等于原有污染物和新获得污染物的并集。
+'''
 
 def _normalized_names(names: Iterable[str]) -> FrozenSet[str]:
     return frozenset(str(name) for name in names if str(name))

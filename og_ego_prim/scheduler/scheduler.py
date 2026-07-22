@@ -17,22 +17,11 @@ from .handlers import (
 from .models import (
     ProcessStatus,
     ProcessUpdate,
-    SCHEMA_VERSION,
     ScheduledProcess,
     TemporalEvent,
     TemporalGate,
-    normalize_action_name,
 )
-
-
-def _to_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
+from .utils import _to_bool, normalize_action_name
 
 
 @dataclass
@@ -40,7 +29,6 @@ class SchedulerConfig:
     enabled: bool = True
     include_builtins: bool = True
     process_definitions: Dict[str, ProcessDefinition] = field(default_factory=dict)
-    schema_version: str = SCHEMA_VERSION
     extensions: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -64,7 +52,6 @@ class SchedulerConfig:
             enabled=_to_bool(source.get("enabled"), True),
             include_builtins=include_builtins,
             process_definitions=definitions,
-            schema_version=str(source.get("schema_version", SCHEMA_VERSION)),
             extensions=dict(source.get("extensions") or {}),
         )
 
@@ -103,7 +90,6 @@ class Scheduler:
         registry: Optional[ProcessHandlerRegistry] = None,
         state_adapter: Optional[TemporalStateAdapter] = None,
         enabled: bool = True,
-        schema_version: str = SCHEMA_VERSION,
         extensions: Optional[Mapping[str, Any]] = None,
     ):
         self.clock = clock
@@ -112,7 +98,6 @@ class Scheduler:
             state_adapter if state_adapter is not None else NullTemporalStateAdapter()
         )
         self.enabled = bool(enabled)
-        self.schema_version = str(schema_version)
         self.extensions = dict(extensions or {})
         self._pending: Dict[str, ScheduledProcess] = {}
 
@@ -370,7 +355,6 @@ class Scheduler:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "schema_version": self.schema_version,
             "enabled": self.enabled,
             "pending": [process.to_dict() for process in self._pending.values()],
             "extensions": dict(self.extensions),
@@ -420,6 +404,5 @@ def build_scheduler(
         registry=handler_registry,
         state_adapter=state_adapter,
         enabled=scheduler_config.enabled,
-        schema_version=scheduler_config.schema_version,
         extensions=scheduler_config.extensions,
     )

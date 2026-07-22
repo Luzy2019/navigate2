@@ -19,12 +19,11 @@ from .clock import SimulationClock
 from .models import (
     ProcessStatus,
     ProcessUpdate,
-    SCHEMA_VERSION,
     ScheduledProcess,
     TemporalEvent,
     make_process_id,
-    normalize_action_name,
 )
+from .utils import _as_fields, _as_names, _to_bool, normalize_action_name
 
 
 @dataclass
@@ -37,13 +36,15 @@ class HandlerContext:
     def step(self) -> int:
         return self.clock.step
 
+# ============================ TemporalStateAdapter =====================================
 
 @runtime_checkable
 class TemporalStateAdapter(Protocol):
     """Bridge to simulator state or a derived semantic-state store.
 
-    ``readiness`` returns ``None`` when the predicate is unsupported. Effects
-    are never written to a scene graph by this interface.
+    ``readiness`` returns ``None`` when the predicate is unsupported.
+
+    Effects are never written to a scene graph by this interface.
     """
 
     def prepare_start(
@@ -242,6 +243,7 @@ class CallbackTemporalStateAdapter:
             return callback_result
         return self._fallback.apply_effects(process, effects, context)
 
+# ============================= ProcessHandler ====================================
 
 @runtime_checkable
 class ProcessHandler(Protocol):
@@ -249,6 +251,7 @@ class ProcessHandler(Protocol):
     def process_type(self) -> str:
         ...
 
+    # start() 判断一个动作是否触发该过程。例如 TOGGLE_OFF(stove) 可能触发 cooling。
     def start(
         self,
         event: TemporalEvent,
@@ -256,6 +259,9 @@ class ProcessHandler(Protocol):
     ) -> Optional[ScheduledProcess]:
         ...
 
+    # poll() 判断过程当前状态
+    # 时间还没到：PENDING
+    # readiness 已满足：READY
     def poll(
         self,
         process: ScheduledProcess,
@@ -302,31 +308,7 @@ class ProcessHandlerRegistry:
         return len(self._handlers)
 
 
-def _as_names(value: Any) -> Tuple[str, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        value = (value,)
-    return tuple(name for name in (normalize_action_name(item) for item in value) if name)
-
-
-def _as_fields(value: Any, default: Sequence[str]) -> Tuple[str, ...]:
-    if value is None:
-        return tuple(default)
-    if isinstance(value, str):
-        return (value,)
-    return tuple(str(item) for item in value)
-
-
-def _to_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
-
+# ============================= ProcessDefinition ====================================
 
 @dataclass
 class ProcessDefinition:
@@ -340,7 +322,6 @@ class ProcessDefinition:
     completion_effects: Dict[str, Any] = field(default_factory=dict)
     required_attributes: Dict[str, Any] = field(default_factory=dict)
     enabled: bool = True
-    schema_version: str = SCHEMA_VERSION
     extensions: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -398,13 +379,11 @@ class ProcessDefinition:
             completion_effects=dict(source.get("completion_effects") or {}),
             required_attributes=dict(source.get("required_attributes") or {}),
             enabled=_to_bool(source.get("enabled"), True),
-            schema_version=str(source.get("schema_version", SCHEMA_VERSION)),
             extensions=extensions,
         )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "schema_version": self.schema_version,
             "process_type": self.process_type,
             "trigger_actions": list(self.trigger_actions),
             "duration_steps": self.duration_steps,
@@ -560,7 +539,6 @@ class ConfiguredProcessHandler:
             readiness_predicate=self.definition.readiness_predicate,
             blocking_actions=self.definition.blocking_actions,
             completion_effects=self.definition.completion_effects,
-            schema_version=self.definition.schema_version,
             extensions={
                 **self.definition.extensions,
                 **dict(prepared.extensions or {}),

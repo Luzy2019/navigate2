@@ -1,56 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from og_ego_prim.utils.serialization import to_builtin
 
-
-SCHEMA_VERSION = "isbench.scheduler.v1"
-
-
-def normalize_action_name(value: Any) -> str:
-    """Return the stable action identifier used by temporal handlers."""
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    match = re.match(r"^([A-Za-z][A-Za-z0-9_]*)", text)
-    return (match.group(1) if match else text).upper()
-
-
-def _read(value: Any, name: str, default: Any = None) -> Any:
-    if isinstance(value, Mapping):
-        return value.get(name, default)
-    return getattr(value, name, default)
-
-
-def _identifier(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        text = value.strip()
-        return text or None
-    for name in ("entity_id", "object_id", "name"):
-        candidate = _read(value, name)
-        if candidate is not None:
-            return str(candidate)
-    return str(value)
-
-
-def _string_tuple(values: Any) -> Tuple[str, ...]:
-    if values is None:
-        return ()
-    if isinstance(values, str):
-        values = (values,)
-    result = []
-    for value in values:
-        identifier = _identifier(value)
-        if identifier and identifier not in result:
-            result.append(identifier)
-    return tuple(result)
+from .utils import _identifier, _read, _string_tuple, normalize_action_name
 
 
 class ProcessStatus(str, Enum):
@@ -79,7 +36,6 @@ class TemporalEvent:
     parameters: Any = field(default_factory=dict)
     success: bool = True
     attributes: Dict[str, Any] = field(default_factory=dict)
-    schema_version: str = SCHEMA_VERSION
     extensions: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -147,14 +103,11 @@ class TemporalEvent:
                 entity_ids.extend(_string_tuple(positional))
 
         source_success = _read(action, "success", _read(action, "succeeded", True))
-        source_schema_version = _read(action, "schema_version")
         event_extensions = (
             dict(_read(source, "extensions", {}) or {})
             | dict(_read(action, "extensions", {}) or {})
             | dict(extensions or {})
         )
-        if source_schema_version and source_schema_version != SCHEMA_VERSION:
-            event_extensions.setdefault("source_schema_version", str(source_schema_version))
         return cls(
             action_name=normalize_action_name(raw_name),
             step=int(_read(action, "step", step)),
@@ -167,13 +120,11 @@ class TemporalEvent:
             parameters=parameters,
             success=bool(source_success if success is None else success),
             attributes=dict(_read(action, "attributes", {}) or {}) | dict(attributes or {}),
-            schema_version=SCHEMA_VERSION,
             extensions=event_extensions,
         )
 
     def to_dict(self) -> Dict[str, Any]:
         return to_builtin({
-            "schema_version": self.schema_version,
             "action_name": self.action_name,
             "step": self.step,
             "event_id": self.event_id,
@@ -214,7 +165,6 @@ class ScheduledProcess:
     blocking_actions: Tuple[str, ...] = ()
     completion_effects: Dict[str, Any] = field(default_factory=dict)
     status: ProcessStatus = ProcessStatus.PENDING
-    schema_version: str = SCHEMA_VERSION
     extensions: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -229,7 +179,6 @@ class ScheduledProcess:
 
     def to_dict(self) -> Dict[str, Any]:
         return to_builtin({
-            "schema_version": self.schema_version,
             "process_id": self.process_id,
             "process_type": self.process_type,
             "entity_ids": list(self.entity_ids),
@@ -256,7 +205,6 @@ class ScheduledProcess:
             blocking_actions=_string_tuple(value.get("blocking_actions")),
             completion_effects=dict(value.get("completion_effects") or {}),
             status=ProcessStatus(value.get("status", ProcessStatus.PENDING.value)),
-            schema_version=str(value.get("schema_version", SCHEMA_VERSION)),
             extensions=dict(value.get("extensions") or {}),
         )
 
@@ -270,7 +218,6 @@ class ProcessUpdate:
     entity_ids: Tuple[str, ...] = ()
     reason: Optional[str] = None
     state_effects: Dict[str, Any] = field(default_factory=dict)
-    schema_version: str = SCHEMA_VERSION
     extensions: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -290,7 +237,6 @@ class ProcessUpdate:
 
     def to_dict(self) -> Dict[str, Any]:
         return to_builtin({
-            "schema_version": self.schema_version,
             "process_id": self.process_id,
             "process_type": self.process_type,
             "status": self.status.value,
@@ -310,7 +256,6 @@ class TemporalGate:
     blocking_process_ids: Tuple[str, ...] = ()
     reasons: Tuple[str, ...] = ()
     retry_at_step: Optional[int] = None
-    schema_version: str = SCHEMA_VERSION
     extensions: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -330,7 +275,6 @@ class TemporalGate:
 
     def to_dict(self) -> Dict[str, Any]:
         return to_builtin({
-            "schema_version": self.schema_version,
             "action_name": self.action_name,
             "decision": self.decision,
             "allowed": self.allowed,

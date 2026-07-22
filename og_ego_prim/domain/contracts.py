@@ -13,7 +13,21 @@ from og_ego_prim.utils.serialization import ExtensionMap, as_versioned_dict
 
 def _identifier(value: Optional[Any]) -> Optional[str]:
     '''
-        clearn parameter value, if value is None or empty string, return None
+        Description:
+            Normalize an identifier by converting it to a stripped string.
+            Returns None when the input is None or the normalized string is empty.
+
+        Example:
+            1) _identifier("  bread_1  ")
+            2) _identifier(42)
+            3) _identifier("   ")
+            4) _identifier(None)
+
+        Output:
+            1) "bread_1"
+            2) "42"
+            3) None
+            4) None
     '''
     if value is None:
         return None
@@ -23,7 +37,17 @@ def _identifier(value: Optional[Any]) -> Optional[str]:
 
 def _confidence(value: float) -> float:
     '''
-        normalize confidence value, must be between 0 and 1
+        Description:
+            Normalize a confidence value as a float between 0 and 1, inclusive.
+            Raises ValueError when the normalized value is outside that range.
+
+        Example:
+            1) _confidence(0.75)
+            2) _confidence(1.50)
+
+        Output:
+            1) 0.75
+            2) ValueError("confidence must be between 0 and 1")
     '''
     normalized = float(value)
     if not 0.0 <= normalized <= 1.0:
@@ -36,10 +60,30 @@ def _split_action_arguments(text: str) -> Tuple[str, ...]:
         Description:
             Split action arguments from a string, handling quotes, escapes, and nested delimiters.
             Returns a tuple of argument strings.
+            Preserves quotes and nested delimiters in each returned argument.
+            Returns an empty tuple when the input contains no arguments.
+            Raises ValueError for empty arguments, a trailing comma, an unmatched
+            closing delimiter, or an unterminated quote or nested delimiter.
 
         Example:
-            _split_action_arguments("apple, plate")
-            # ("apple", "plate")
+            1) _split_action_arguments("apple, plate")
+            2) _split_action_arguments('apple, "large, bowl", tray(item, plate)')
+            3) _split_action_arguments("")
+            4) _split_action_arguments("apple,,plate")
+            5) _split_action_arguments("apple,")
+            6) _split_action_arguments("apple)")
+            7) _split_action_arguments('"apple')
+            8) _split_action_arguments("tray(apple")
+
+        Output:
+            1) ("apple", "plate")
+            2) ("apple", '"large, bowl"', "tray(item, plate)")
+            3) ()
+            4) ValueError("action arguments must not contain empty values")
+            5) ValueError("action arguments must not end with an empty value")
+            6) ValueError("action arguments contain an unmatched closing delimiter")
+            7) ValueError("action arguments contain an unterminated quote or delimiter")
+            8) ValueError("action arguments contain an unterminated quote or delimiter")
     '''
     arguments = []
     current = []
@@ -93,10 +137,29 @@ def _entity_argument(value: str) -> Tuple[Optional[str], Optional[str]]:
         Description:
             Parse an entity argument of the form "entity@descriptor" or just "entity".
             Returns a tuple of (entity, descriptor), where either may be None if not present.
+            Removes one matching pair of outer single or double quotes before parsing.
+            Splits only on the first "@", so additional "@" characters remain in
+            the descriptor.
 
         Example:
-            _entity_argument("bread@loaf")
-            # ("bread", "loaf")
+            1) _entity_argument("bread@loaf")
+            2) _entity_argument("bread")
+            3) _entity_argument("  'bread@loaf'  ")
+            4) _entity_argument("@loaf")
+            5) _entity_argument("bread@")
+            6) _entity_argument("bread@loaf@fresh")
+            7) _entity_argument("")
+            8) _entity_argument("   ")
+
+        Output:
+            1) ("bread", "loaf")
+            2) ("bread", None)
+            3) ("bread", "loaf")
+            4) (None, "loaf")
+            5) ("bread", None)
+            6) ("bread", "loaf@fresh")
+            7) (None, None)
+            8) (None, None)
     '''
     token = str(value).strip()
     if len(token) >= 2 and token[0] == token[-1] and token[0] in {"'", '"'}:
