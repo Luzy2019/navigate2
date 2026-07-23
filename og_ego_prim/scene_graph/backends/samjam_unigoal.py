@@ -194,7 +194,7 @@ ALLOWED_LIFELONG_RELATIONS = (
 
 def _caption_text(value: Any) -> str:
     text = str(value or "").strip().lower()
-    text = text.replace(".n.01", "")
+    text = re.sub(r"\.n\.\d+", "", text)
     text = re.sub(r"[_\-]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
@@ -209,20 +209,20 @@ def _normalize_caption(caption: Any) -> str:
         return text
     matches = []
     for term in NODE_SPACE_TERMS:
-        index = text.find(term)
-        if index >= 0:
-            matches.append((index, -len(term), term))
+        match = re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text)
+        if match is not None:
+            matches.append((match.end() != len(text), match.start(), -len(term), term))
     if matches:
         matches.sort()
-        return matches[0][2]
+        return matches[0][3]
     return text
 
 
 def _canonical_or_unknown_caption(caption: Any) -> str:
-    normalized = _normalize_caption(caption)
-    if normalized in CANONICAL_OBJECT_VOCAB or normalized == UNKNOWN_OBJECT_NAME:
-        return normalized
-    return UNKNOWN_OBJECT_NAME
+    normalized = _caption_text(caption)
+    if normalized in {"", "object", "unknown object", UNKNOWN_OBJECT_NAME}:
+        return UNKNOWN_OBJECT_NAME
+    return normalized
 
 
 def _is_unknown_caption(caption: Any) -> bool:
@@ -230,7 +230,7 @@ def _is_unknown_caption(caption: Any) -> bool:
 
 
 def _is_coarse_caption(caption: Any) -> bool:
-    return _canonical_or_unknown_caption(caption) not in FINE_VOCAB
+    return _normalize_caption(caption) in COARSE_VOCAB
 
 
 def _normalize_relation_with_direction(relation: Any) -> Tuple[Optional[str], bool]:
@@ -279,6 +279,8 @@ def _normalize_relation_for_type_pair(
     if reverse:
         source_is_coarse, target_is_coarse = target_is_coarse, source_is_coarse
 
+    if normalized == "near" and source_is_coarse != target_is_coarse:
+        return normalized, reverse
     if source_is_coarse and target_is_coarse:
         if normalized not in ALLOWED_COARSE_COARSE_RELATIONS:
             return None
@@ -392,7 +394,7 @@ class SAMJAMUniGoalGraphAdapter:
         match_detail: Optional[Dict[str, Any]],
     ) -> Tuple[str, Dict[str, Any]]:
         track_key = self._track_key(obj) or str(obj.object_id)
-        raw_frame_name = _normalize_caption(
+        raw_frame_name = (
             (match_detail or {}).get("canonical_name")
             or (match_detail or {}).get("vlm_name")
             or obj.name
@@ -2010,12 +2012,14 @@ class SAMJAMUniGoalGraphAdapter:
                 getattr(edge.node1, "is_coarse", True)
                 and getattr(edge.node2, "is_coarse", True)
                 and edge.relation == "near"
+                and getattr(edge.node1, "is_vis", False)
+                and getattr(edge.node2, "is_vis", False)
             ):
                 edge.delete()
         coarse_nodes = [
             node for node in self.graph.nodes
             if getattr(node, "is_coarse", True)
-            and self._node_relation_fresh(node)
+            and getattr(node, "is_vis", False)
             and self._node_position(node) is not None
             and _normalize_caption(getattr(node, "caption", None)) in COARSE_NEAR_OBSTACLE_VOCAB
         ]
@@ -2042,8 +2046,6 @@ class SAMJAMUniGoalGraphAdapter:
         for edge in self.graph.get_edges():
             if edge.relation not in ALLOWED_FINE_COARSE_RELATIONS:
                 continue
-            if not self._node_relation_fresh(edge.node1) or not self._node_relation_fresh(edge.node2):
-                continue
             if (not getattr(edge.node1, "is_coarse", True)) and getattr(edge.node2, "is_coarse", True):
                 parent_map[self._node_uid(edge.node1)] = edge.node2
             elif getattr(edge.node1, "is_coarse", True) and (not getattr(edge.node2, "is_coarse", True)):
@@ -2057,12 +2059,14 @@ class SAMJAMUniGoalGraphAdapter:
                 not getattr(edge.node1, "is_coarse", True)
                 and not getattr(edge.node2, "is_coarse", True)
                 and edge.relation == "near"
+                and getattr(edge.node1, "is_vis", False)
+                and getattr(edge.node2, "is_vis", False)
             ):
                 edge.delete()
         fine_nodes = [
             node for node in self.graph.nodes
             if not getattr(node, "is_coarse", True)
-            and self._node_relation_fresh(node)
+            and getattr(node, "is_vis", False)
             and self._node_uid(node) in fine_parent_map
         ]
         for i, node1 in enumerate(fine_nodes):
@@ -2199,6 +2203,7 @@ class SAMJAMUniGoalGraphAdapter:
         for event in events:
             node, resolution = self._resolve_manipulation_event(event, source_to_node)
             if node is not None:
+                node.role = str(event.get("moved_object") or "").strip() or None
                 self.mark_manipulated_nodes([self._node_uid(node)])
             self.manipulation_resolutions.append(resolution)
         del self.manipulation_resolutions[:-100]
@@ -2452,7 +2457,11 @@ class SAMJAMUniGoalGraphAdapter:
             lifelong_label = _canonical_or_unknown_caption(node.caption or "object")
             samjam_object_id = source_id or (source_history[-1] if source_history else None)
             frame_attributes = frame_object.attributes if frame_object is not None else {}
-            states = dict(frame_attributes.get("states") or {})
+            if "states" in frame_attributes:
+                node.states = dict(frame_attributes.get("states") or {})
+            if "hazard" in frame_attributes:
+                node.hazard = dict(frame_attributes.get("hazard") or {})
+            states = dict(getattr(node, "states", {}) or {})
             is_moving = bool(frame_object and source_id in moving_source_ids)
             is_moved = bool(
                 self.node_moved.get(node, False)
@@ -2489,8 +2498,8 @@ class SAMJAMUniGoalGraphAdapter:
                     or lifelong_label
                 ),
                 "states": states,
-                "hazard": dict(frame_attributes.get("hazard") or {}),
-                "role": frame_attributes.get("role"),
+                "hazard": dict(getattr(node, "hazard", {}) or {}),
+                "role": getattr(node, "role", None) or frame_attributes.get("role"),
                 "room": str(room_id or "unknown_room"),
                 "is_coarse": bool(getattr(node, "is_coarse", _is_coarse_caption(lifelong_label))),
                 "is_vis": bool(getattr(node, "is_vis", visible)),
@@ -2540,8 +2549,6 @@ class SAMJAMUniGoalGraphAdapter:
         for edge in self.graph.get_edges():
             if not edge.relation:
                 continue
-            if not self._node_relation_fresh(edge.node1) or not self._node_relation_fresh(edge.node2):
-                continue
             oriented = _normalize_relation_for_node_pair(edge.node1, edge.node2, edge.relation)
             if oriented is None:
                 continue
@@ -2585,8 +2592,6 @@ class SAMJAMUniGoalGraphAdapter:
         edges = []
         for edge in self.graph.get_edges():
             if not edge.relation or edge.node1 not in node_id_map or edge.node2 not in node_id_map:
-                continue
-            if not self._node_relation_fresh(edge.node1) or not self._node_relation_fresh(edge.node2):
                 continue
             oriented = _normalize_relation_for_node_pair(edge.node1, edge.node2, edge.relation)
             if oriented is None:
@@ -2697,6 +2702,9 @@ class SAMJAMUniGoalBackend:
 
     def note_manipulation_event(self, event: Dict[str, Any]) -> None:
         self.unigoal_adapter.note_manipulation_event(event)
+
+    def set_object_goal(self, target: str) -> None:
+        self.samjam_backend.set_object_goal(target)
 
     def mark_manipulated_nodes(self, node_uids: List[int]) -> None:
         self.unigoal_adapter.mark_manipulated_nodes(node_uids)

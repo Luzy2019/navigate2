@@ -69,8 +69,7 @@ def _edge_endpoint(edge: Mapping[str, Any], role: str) -> Any:
         value = edge.get(f"{role}_uid")
     if isinstance(value, Mapping):
         return (
-            value.get("task_object_id")
-            or value.get("entity_id")
+            value.get("entity_id")
             or value.get("id")
             or value.get("object_id")
             or value.get("uid")
@@ -111,7 +110,6 @@ class SceneSection(BaseSection):
     def _node_view(node: Mapping[str, Any]) -> Dict[str, Any]:
         allowed = (
             "id",
-            "task_object_id",
             "entity_id",
             "object_id",
             "label",
@@ -123,7 +121,6 @@ class SceneSection(BaseSection):
             "room",
             "room_id",
             "group",
-            "aliases",
         )
         return {
             key: _as_dict(node[key])
@@ -136,12 +133,10 @@ class SceneSection(BaseSection):
         uid = node.get("uid")
         values: List[Any] = [
             node.get("id"),
-            node.get("task_object_id"),
             node.get("entity_id"),
             node.get("object_id"),
             node.get("label"),
             node.get("name"),
-            node.get("simulator_name"),
             uid,
         ]
         if uid is not None:
@@ -149,8 +144,6 @@ class SceneSection(BaseSection):
                 values.append(f"obj_{int(uid):04d}")
             except (TypeError, ValueError):
                 pass
-        aliases = node.get("aliases") or ()
-        values.extend((aliases,) if isinstance(aliases, str) else aliases)
         identities: Set[str] = set()
         for value in values:
             identities.update(_identity_keys(value))

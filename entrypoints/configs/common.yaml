@@ -140,14 +140,6 @@ artifacts:
   topdown_output_size: 1920x1080
   save_sampled_scene: false
 
-memory:
-  enabled: true
-  max_actions: 50
-  max_states_per_object: 20
-  retriever: exact
-  consolidation: deduplicate
-  options: {}
-
 object_model:
   max_manipulations: 20
   lifecycle_policy: rules
@@ -162,8 +154,6 @@ object_model:
         clear_location: true
         state_updates:
           actionable: false
-        directives:
-          - directive_type: forget_entity
   options: {}
 
 scheduler:
@@ -175,6 +165,5 @@ scheduler:
 
 prompting:
   builder: semantic
-  sections: [task, scene, objects, memory, timers, action]
-  max_recalled_items: 20
+  sections: [task, timers, action]
   options: {}

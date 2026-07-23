@@ -84,7 +84,9 @@ Physical-action rules:
 - Open an openable destination before GRASPing the object that will be placed inside it.
 - After placement the gripper is empty.
 - Before WIPE, navigate to the target. For sink cleaning, toggle the sink on, toggle it off, then WIPE the sink.
-- Use only exact object names from the task-related object list.
+- Prefer exact object names from the task-related object list. If visually
+  indistinguishable same-category instances cannot be identified, their shared
+  generic category is allowed and will be grounded by the runtime.
 - Output one action per response. Do not combine multiple actions.
 - Set caution to null when no caution is needed.
 

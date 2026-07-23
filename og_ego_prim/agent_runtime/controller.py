@@ -1,7 +1,9 @@
-"""Thin orchestration across perception, time, memory, and execution."""
+"""Thin orchestration across perception, time, risk, and execution."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+import random
 import time
 from typing import Any, Callable, Dict, Iterable, Iterator, Mapping, Optional, Tuple
 
@@ -12,7 +14,6 @@ from og_ego_prim.domain import (
     StateChange,
 )
 from og_ego_prim.events import RuntimeEvent
-from og_ego_prim.memory import MemoryQuery
 from og_ego_prim.object_model import (
     LifecycleContext,
     LifecycleDirective,
@@ -21,7 +22,10 @@ from og_ego_prim.object_model import (
 from og_ego_prim.prompting import PromptContext
 from og_ego_prim.risk_predictor import RiskEvaluation
 from og_ego_prim.task_planner.episode import PlannerEpisode, PlannerEpisodeEntry
-from og_ego_prim.utils.planning import normalize_planner_action
+from og_ego_prim.utils.planning import (
+    normalize_planner_action,
+    planner_entity_candidates,
+)
 
 from .components import RuntimeComponents
 from .models import ActionOutcome, ActionReview
@@ -41,8 +45,7 @@ class AgentRuntimeController:
         *,
         task_id: Optional[str] = None,
         task_view: Any = None,
-        max_rethinking_attempts: int = 2,
-        max_recalled_items: int = 20,
+        max_rethinking_attempts: int = 3,
         expose_cross_subtask_timers: bool = True,
         lifecycle_directive_handlers: Optional[
             Mapping[
@@ -69,16 +72,10 @@ class AgentRuntimeController:
         self.current_task_view = task_view
         # 当前正在执行的子任务 ID
         self.active_subtask_id: Optional[str] = None
-        # 切换子任务时是否保留之前的记忆
-        self.preserve_memory = True
 
         # 3. 配置属性
         # 动作被阻止后，最多允许重新规划多少次
         self.max_rethinking_attempts = max(int(max_rethinking_attempts), 0)
-        # 构造 Prompt 时最多召回多少条记忆
-        self.max_recalled_items = int(max_recalled_items)
-        if self.max_recalled_items <= 0:
-            raise ValueError("max_recalled_items must be greater than zero")
         # 是否允许当前子任务看到其他子任务的计时器
         self.expose_cross_subtask_timers = bool(expose_cross_subtask_timers)
 
@@ -102,14 +99,14 @@ class AgentRuntimeController:
         self.last_outcome: Optional[ActionOutcome] = None
         # 最近一次风险评估耗时；不混入 RiskEvaluation 数据模型。
         self.last_risk_latency: Optional[float] = None
-        # 生命周期指令处理器，例如默认注册
+        # 生命周期指令处理器
         self.lifecycle_directive_handlers: Dict[
             str,
             Callable[
                 [LifecycleDirective, LifecycleContext, LifecycleTransition],
                 None,
             ],
-        ] = {"forget_entity": self._forget_memory_entity}
+        ] = {}
         for name, handler in (lifecycle_directive_handlers or {}).items():
             self.register_lifecycle_directive_handler(name, handler, replace=True)
 
@@ -118,7 +115,7 @@ class AgentRuntimeController:
         clock = getattr(self.components.scheduler, "clock", None)
         return int(getattr(clock, "step", 0))
 
-    def set_subtask(self, subtask_id: Any, *, preserve_memory: bool) -> None:
+    def set_subtask(self, subtask_id: Any) -> None:
         self.active_subtask_id = None if subtask_id is None else str(subtask_id)
         risk_predictor = self.components.risk_predictor
         if risk_predictor is not None:
@@ -137,26 +134,10 @@ class AgentRuntimeController:
             self.current_task_view = subtask_lookup(int(self.active_subtask_id)) or self.task_view
         else:
             self.current_task_view = self.task_view
-        self.preserve_memory = bool(preserve_memory)
         self.rethinking_attempts = 0
         self.last_review = None
         self.last_outcome = None
-        memory_cleared = not preserve_memory
-        if memory_cleared:
-            self.components.memory.clear()
-            clear_manipulations = getattr(self.components.objects, "clear_manipulations", None)
-            if clear_manipulations is not None:
-                clear_manipulations()
-        self.components.memory.begin_subtask(self.active_subtask_id or "")
-        if memory_cleared:
-            self._emit(
-                "memory_cleared",
-                details={"reason": "subtask_boundary", "preserve_memory": False},
-            )
-        self._emit(
-            "subtask_started",
-            details={"preserve_memory": self.preserve_memory},
-        )
+        self._emit("subtask_started")
 
     def observe(self, snapshot: Any) -> Tuple[StateChange, ...]:
         self.latest_scene = snapshot
@@ -169,27 +150,13 @@ class AgentRuntimeController:
         self.latest_changes = tuple(changes)
         self.components.objects.update_from_scene_graph(snapshot)
         self.visible_entity_ids = self._visible_scene_entity_ids(snapshot)
-        memory_writes = []
         for change in self.latest_changes:
             self.components.objects.apply_state_change(change)
-            memory_writes.append(
-                {
-                    "kind": "state_change",
-                    "accepted": bool(self.components.memory.record_state_change(change)),
-                    "record": change.to_dict(),
-                }
-            )
         self._emit(
             "scene_state_changed",
             entity_ids=(change.entity_id for change in self.latest_changes),
             details={"changes": [change.to_dict() for change in self.latest_changes]},
         )
-        if memory_writes:
-            self._emit(
-                "memory_written",
-                entity_ids=(change.entity_id for change in self.latest_changes),
-                details={"writes": memory_writes},
-            )
         return self.latest_changes
 
     def _visible_scene_entity_ids(self, snapshot: Any) -> Tuple[str, ...]:
@@ -214,13 +181,10 @@ class AgentRuntimeController:
             if not bool(node.get("is_vis", node.get("visible", True))):
                 continue
             identities = (
-                node.get("task_object_id"),
                 node.get("id"),
                 node.get("object_id"),
                 node.get("label"),
                 node.get("name"),
-                node.get("simulator_name"),
-                *(node.get("aliases") or ()),
             )
             for identity in identities:
                 if identity is None:
@@ -241,7 +205,6 @@ class AgentRuntimeController:
                     context={
                         "scene": self.latest_scene,
                         "objects": self.components.objects,
-                        "memory": self.components.memory,
                         "executor": self.components.executor,
                         "task": self.current_task_view,
                         "active_subtask": self.active_subtask_id,
@@ -266,8 +229,6 @@ class AgentRuntimeController:
                         source="scheduler_derived",
                     )
                     self.components.objects.apply_state_change(change)
-                    # Timer completion is current module state, not a persisted
-                    # mitigation-result memory record.
             self._emit(
                 "temporal_process_updated",
                 entity_ids=getattr(update, "entity_ids", ()),
@@ -288,37 +249,7 @@ class AgentRuntimeController:
 
     @property
     def _timer_visibility_restricted(self) -> bool:
-        return not (self.preserve_memory and self.expose_cross_subtask_timers)
-
-    def _relevant_entity_ids(self, action: Optional[Action]) -> Tuple[str, ...]:
-        if action is None:
-            return ()
-        candidates = [action.object_id, action.target_id, action.parameters.get("tool_id")]
-        actor_record = self.components.objects.get(action.actor_id)
-        if actor_record is not None:
-            candidates.append(action.actor_id)
-
-        relevant = []
-        for candidate in candidates:
-            if candidate is None:
-                continue
-            raw = str(candidate).strip()
-            if not raw:
-                continue
-            relevant.append(raw)
-            record = self.components.objects.get(raw)
-            if record is None:
-                continue
-            relevant.extend(
-                value
-                for value in (
-                    record.entity_id,
-                    getattr(record, "canonical_name", None),
-                    *(getattr(record, "aliases", ()) or ()),
-                )
-                if value
-            )
-        return tuple(dict.fromkeys(str(value) for value in relevant))
+        return not self.expose_cross_subtask_timers
 
     def build_prompt_context(
         self,
@@ -326,27 +257,6 @@ class AgentRuntimeController:
         candidate_action: Optional[Action] = None,
         rethinking_reason: Optional[str] = None,
     ) -> PromptContext:
-        entity_ids = self._relevant_entity_ids(candidate_action)
-        recall = self.components.memory.retrieve(
-            MemoryQuery(
-                entity_ids=entity_ids,
-                action_name=None if candidate_action is None else candidate_action.name,
-                limit=self.max_recalled_items,
-            )
-        )
-        object_views = []
-        if entity_ids:
-            records = {}
-            for entity_id in entity_ids:
-                record = self.components.objects.get(entity_id)
-                if record is not None:
-                    records[record.entity_id] = record
-            object_views = [record.to_dict() for record in records.values()]
-        else:
-            object_views = [
-                record.to_dict()
-                for record in self.components.objects.actionable()[: self.max_recalled_items]
-            ]
         instruction = (
             getattr(self.current_task_view, "instruction", "")
             if self.current_task_view is not None
@@ -362,9 +272,6 @@ class AgentRuntimeController:
         )
         return PromptContext(
             task_instruction=instruction,
-            current_scene=self.latest_scene,
-            object_views=tuple(object_views),
-            memory_recall=recall,
             pending_timers=tuple(
                 item.to_dict() if hasattr(item, "to_dict") else item
                 for item in self._visible_timers()
@@ -373,7 +280,6 @@ class AgentRuntimeController:
             allowed_actions=allowed_actions,
             rethinking_reason=rethinking_reason,
             section_data={
-                "relevant_entity_ids": entity_ids,
                 "goal_description": task_goal,
                 "task_rules": tuple(getattr(self.task_view, "wash_rules", ()) or ()),
             },
@@ -444,8 +350,53 @@ class AgentRuntimeController:
             if action.name == "DONE":
                 return
 
-    def review_action(self, value: Any) -> ActionReview:
+    def ground_action(self, value: Any) -> Action:
+        """Bind generic planner arguments to exact task entities."""
+
         action = _as_action(value)
+        allowed = tuple(getattr(self.task_view, "object_ids", ()) or ())
+        arguments = tuple(action.arguments)
+        if not arguments or not allowed:
+            return action
+
+        last_navigation = None
+        outcome = self.last_outcome
+        if outcome is not None and outcome.executed and outcome.succeeded:
+            previous = outcome.review.action
+            if previous.name == "NAVIGATE_TO" and previous.object_id is not None:
+                last_navigation = previous.object_id
+
+        resolved = []
+        for argument in arguments:
+            candidates = planner_entity_candidates(argument, allowed)
+            if not candidates:
+                resolved.append(argument)
+            elif len(candidates) == 1:
+                resolved.append(candidates[0])
+            elif (
+                action.name != "NAVIGATE_TO"
+                and last_navigation is not None
+                and last_navigation in candidates
+            ):
+                resolved.append(last_navigation)
+            else:
+                resolved.append(random.SystemRandom().choice(candidates))
+
+        if tuple(resolved) == arguments:
+            return action
+        parameters = dict(action.parameters)
+        parameters["arguments"] = resolved
+        if action.extensions.get("implicit_held_object"):
+            return replace(action, target_id=resolved[0], parameters=parameters)
+        return replace(
+            action,
+            object_id=resolved[0] if resolved else None,
+            target_id=resolved[1] if len(resolved) > 1 else None,
+            parameters=parameters,
+        )
+
+    def review_action(self, value: Any) -> ActionReview:
+        action = self.ground_action(value)
         self.tick_scheduler()
         visible_timers = self._visible_timers()
         temporal_gate = self.components.scheduler.check_action(
@@ -505,7 +456,6 @@ class AgentRuntimeController:
             risk_context = {
                 "scene": self.latest_scene,
                 "objects": self.components.objects,
-                "memory": self.components.memory,
                 "scheduler": self.components.scheduler,
                 "task": self.current_task_view,
                 "active_subtask": self.active_subtask_id,
@@ -634,23 +584,6 @@ class AgentRuntimeController:
             },
         )
         if succeeded:
-            # Persist the successful action first. A lifecycle directive may then
-            # intentionally forget every task-memory record for the retired entity,
-            # including this final disposal action.
-            memory_accepted = bool(self.components.memory.record_action(record))
-            self._emit(
-                "memory_written",
-                entity_ids=review.action.entity_ids,
-                details={
-                    "writes": [
-                        {
-                            "kind": "action",
-                            "accepted": memory_accepted,
-                            "record": record.to_dict(),
-                        }
-                    ]
-                },
-            )
             if record_manipulation:
                 self.components.objects.record_action(
                     record,
@@ -661,7 +594,9 @@ class AgentRuntimeController:
                 "note_manipulation_event",
                 None,
             )
-            if record_manipulation and note_manipulation is not None:
+            if note_manipulation is not None and (
+                record_manipulation or review.action.name == "NAVIGATE_TO"
+            ):
                 note_manipulation(
                     {
                         "raw_plan": review.action.to_legacy_plan(),
@@ -747,38 +682,6 @@ class AgentRuntimeController:
                 f"no lifecycle directive handler registered for {directive.directive_type!r}"
             )
         handler(directive, context, transition)
-
-    def _forget_memory_entity(
-        self,
-        directive: LifecycleDirective,
-        context: LifecycleContext,
-        transition: LifecycleTransition,
-    ) -> None:
-        options = dict(directive.options or {})
-        entity_id = str(options.pop("entity_id", context.subject.entity_id)).strip()
-        forget = getattr(self.components.memory, "forget_entity", None)
-        if forget is None:
-            raise TypeError("configured forget_entity directive requires TaskMemory.forget_entity()")
-        allowed_options = {
-            key: bool(options[key])
-            for key in ("forget_states", "forget_actions")
-            if key in options
-        }
-        unknown = sorted(set(options) - set(allowed_options))
-        if unknown:
-            raise ValueError(
-                "unsupported forget_entity directive options: " + ", ".join(unknown)
-            )
-        removed = forget(entity_id, **allowed_options)
-        self._emit(
-            "memory_entity_forgotten",
-            entity_ids=(entity_id,),
-            details={
-                "directive": directive.to_dict(),
-                "transition": transition.to_dict(),
-                "removed": dict(removed or {}),
-            },
-        )
 
     def record_blocked(self, review: ActionReview) -> ActionOutcome:
         blocked_by_scheduler = bool(

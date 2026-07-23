@@ -46,7 +46,8 @@ def _target_from_raw_plan(raw_plan: Optional[str]) -> Optional[str]:
     target = match.group(1).split(",")[0].strip()
     if "@" in target:
         target = target.split("@", 1)[0].strip()
-    target = target.replace(".n.01", "").replace("_", " ").strip()
+    target = re.sub(r"\.n\.\d+_\d+$", "", target)
+    target = re.sub(r"_+", " ", target).strip()
     return target or None
 
 
@@ -235,6 +236,11 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
 
     def observe(self, context: Optional[LowLevelStepContext] = None) -> SceneGraphSnapshot:
         return self.update(context)
+
+    def set_object_goal_from_action(self, raw_plan: Optional[str]) -> None:
+        target = _target_from_raw_plan(raw_plan)
+        if target and self.backend is not None and hasattr(self.backend, "set_object_goal"):
+            self.backend.set_object_goal(target)
 
     def state_changes(
         self,

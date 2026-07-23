@@ -13,6 +13,7 @@ from .adapters import (
     PlannerAdapter,
     PlannerAdapterFactory,
     AgentPlannerAdapter,
+    VLMClosedLoopPlannerAdapter,
     create_planner_adapter,
     register_planner_adapter,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "IteratorPlannerAdapter",
     "PLANNER_ADAPTERS",
     "AgentPlannerAdapter",
+    "VLMClosedLoopPlannerAdapter",
     "TaskPlanContext",
     "create_planner_adapter",
     "get_obs_from_dir",

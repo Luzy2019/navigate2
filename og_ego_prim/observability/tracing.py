@@ -131,19 +131,6 @@ class TracingPlannerAdapter:
             subtask_id=subtask_id,
             sim_step=sim_step,
         )
-        try:
-            memory_recall = getattr(context, "memory_recall", None)
-        except Exception as error:
-            memory_recall = {"unavailable": type(error).__name__}
-        _safe_emit(self.session,
-            "memory",
-            "memory_recalled",
-            {"memory_recall": to_safe_builtin(memory_recall)},
-            status="completed" if memory_recall is not None else "not_applicable",
-            action_id=action_id,
-            sim_step=sim_step,
-            subtask_id=subtask_id,
-        )
         _safe_emit(self.session,
             "planner",
             "planner_context_built",

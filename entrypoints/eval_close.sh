@@ -41,6 +41,7 @@ else
 fi
 
 WORK_DIR=./results/$MODEL_NAME
+mkdir -p "$WORK_DIR/benchmark"
 
 python -m og_ego_prim.cli.check_close_api --model "$MODEL_NAME"
 

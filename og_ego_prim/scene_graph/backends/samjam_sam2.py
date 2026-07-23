@@ -9,7 +9,7 @@ import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -48,7 +48,6 @@ def _cfg() -> SceneGraphConfig:
 
 OPENAI_BASE_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE", "")
-MODEL_TYPE = "gpt-4o-mini"
 
 def _bbox_iou(a: Optional[List[float]], b: Optional[List[float]]) -> float:
     if a is None or b is None:
@@ -773,8 +772,14 @@ class SAMJAMOutputWriter:
 class SAMJAMVLMAdapter:
     """OpenAI-compatible VLM adapter for SAMJAM frame scene graphs."""
 
-    def __init__(self, scene_graph_config: Optional[SceneGraphConfig] = None):
+    def __init__(
+        self,
+        scene_graph_config: Optional[SceneGraphConfig] = None,
+        task_categories: Iterable[str] = (),
+    ):
         self.scene_graph_config = scene_graph_config or _cfg()
+        self.task_categories = tuple(dict.fromkeys(task_categories))
+        self.object_goal: Optional[str] = None
         self.prompt_path = (
             repo_root()
             / "og_ego_prim"
@@ -785,18 +790,7 @@ class SAMJAMVLMAdapter:
             / "prompts"
             / "generate_frame_scene_graph.txt"
         )
-        self.isbench_adaptive_prompt = (
-            repo_root()
-            / "physical_world"
-            / "prompt"
-            / "isbench_adaptive_prompt.txt"
-        )
-        self.physical_world_prompt_path = (
-            repo_root()
-            / "physical_world"
-            / "prompt"
-            / "physical_adaptive_prompt.txt"
-        )
+        self.isbench_prompt_path = self.prompt_path.with_name("isbench_adaptive_prompt.txt")
         self.prompt: Optional[str] = None
         self.printed_request_config = False
 
@@ -818,16 +812,27 @@ class SAMJAMVLMAdapter:
         if base_url:
             kwargs["base_url"] = base_url
         client = OpenAI(**kwargs)
-        model = MODEL_TYPE
+        model = str(
+            self.scene_graph_config.option("scene_graph_vlm_model", "gpt-4o")
+        ).strip()
         self._print_request_config(base_url, model, api_key)
 
+        prompt = self._load_prompt()
+        if self.object_goal:
+            prompt += (
+                f"\n\nCurrent navigation target: {self.object_goal}. "
+                "The robot has just navigated near this target. Make a dedicated second "
+                "pass over the full image for it, including small or partially visible "
+                "objects, and use this exact category name when it is visible. Do not "
+                "invent it when it is absent."
+            )
         completion = client.chat.completions.create(
             model=model,
             messages=[
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": self._load_prompt()},
+                        {"type": "text", "text": prompt},
                         {
                             "type": "image_url",
                             "image_url": {
@@ -868,17 +873,26 @@ class SAMJAMVLMAdapter:
         self.printed_request_config = True
 
     def _load_prompt(self) -> str:
-
         if self.prompt is None:
             if not self.prompt_path.exists():
                 raise FileNotFoundError(f"SAMJAM VLM prompt not found: {self.prompt_path}")
-            
-            # Base Prompt
-            base_prompt = self.prompt_path.read_text(encoding="utf-8")
-            # Inadditional Prompt
-            inadditional_prompt = self.physical_world_prompt_path.read_text(encoding="utf-8")
-            
-            self.prompt = base_prompt + "\n\n" + inadditional_prompt
+            if not self.isbench_prompt_path.exists():
+                raise FileNotFoundError(
+                    f"SAMJAM IS-Bench prompt not found: {self.isbench_prompt_path}"
+                )
+            self.prompt = "\n\n".join(
+                (
+                    self.prompt_path.read_text(encoding="utf-8"),
+                    self.isbench_prompt_path.read_text(encoding="utf-8"),
+                )
+            )
+            if self.task_categories:
+                self.prompt += (
+                    "\n\nTask object categories:\n- "
+                    + "\n- ".join(self.task_categories)
+                    + "\nUse an exact category above when the visible object matches it. "
+                    "Do not output an object only because its category is listed."
+                )
 
         return self.prompt
 
@@ -951,6 +965,7 @@ class SAMJAMSAM2Backend:
         self.output_writer: Optional[SAMJAMOutputWriter] = None
         self.pending_debug: Optional[Dict[str, Any]] = None
         self.last_result: Optional[PerceptionResult] = None
+        self.object_goal: Optional[str] = None
         self._native_video_tmp: Optional[tempfile.TemporaryDirectory] = None
         self._native_video_dir: Optional[Path] = None
         self._reset_native_state()
@@ -967,6 +982,12 @@ class SAMJAMSAM2Backend:
         self.output_writer = SAMJAMOutputWriter(Path(output_dir)) if output_dir else None
         self._reset_native_state()
         self.last_result = None
+        self.object_goal = None
+
+    def set_object_goal(self, target: str) -> None:
+        self.object_goal = str(target).strip() or None
+        if self.vlm_adapter is not None:
+            self.vlm_adapter.object_goal = self.object_goal
 
     def observe(self, env: Any) -> FrameObservation:
         return self.adapter.observe(env)
@@ -1624,7 +1645,18 @@ class SAMJAMSAM2Backend:
 
     def _ensure_vlm_adapter(self) -> SAMJAMVLMAdapter:
         if self.vlm_adapter is None:
-            self.vlm_adapter = SAMJAMVLMAdapter(self.scene_graph_config)
+            object_scope = getattr(getattr(self.env, "task", None), "object_scope", {}) or {}
+            task_categories = sorted(
+                {
+                    _normalize_name(re.sub(r"\.n\.\d+_\d+$", "", str(object_name)))
+                    for object_name in object_scope
+                }
+            )
+            self.vlm_adapter = SAMJAMVLMAdapter(
+                self.scene_graph_config,
+                task_categories=task_categories,
+            )
+            self.vlm_adapter.object_goal = self.object_goal
         return self.vlm_adapter
 
     def _ensure_mask_generator(self):

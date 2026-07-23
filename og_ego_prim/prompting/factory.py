@@ -60,7 +60,6 @@ def create_prompt_builder(
         name = values.pop("builder", values.pop("type", values.pop("name", "semantic")))
         options = dict(values.pop("options", {}) or {})
         sections = values.pop("sections", None)
-        values.pop("max_recalled_items", None)
         if sections is not None:
             options.setdefault("sections", sections)
         options.update(values)

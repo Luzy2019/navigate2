@@ -17,7 +17,7 @@ fi
 export OPENAI_API_KEY="${OPENAI_API_KEY:-}"
 export OPENAI_API_BASE="${OPENAI_API_BASE:-${API_BASE_URL:-}}"
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-${OPENAI_API_BASE}}"
-export OPENAI_EXTRA_BODY="${OPENAI_EXTRA_BODY:-{\"provider\":{\"sort\":\"success_rate\"}}}"
+export OPENAI_EXTRA_BODY=${OPENAI_EXTRA_BODY:-'{"provider":{"sort":"success_rate"}}'}
 
 # Required only for the google-genai backend.
 export GOOGLE_APPLICATION_CREDENTIALS="${GOOGLE_APPLICATION_CREDENTIALS:-}"

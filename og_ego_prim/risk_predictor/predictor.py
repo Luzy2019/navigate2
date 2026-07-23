@@ -41,19 +41,14 @@ class RiskPredictor(RiskEngine):
     def __init__(
         self,
         provider: RiskProvider,
-        *,
-        mode: str = "enforce",
     ) -> None:
-        super().__init__(provider, mode=mode)
+        super().__init__(provider)
         self.active_subtask: int | None = None
 
     @classmethod
-    def from_task(cls, task: Any, *, mode: str = "enforce") -> "RiskPredictor":
+    def from_task(cls, task: Any) -> "RiskPredictor":
         config = _runtime_task_mapping(task)
-        return cls(
-            RuleRiskProvider.from_task(config),
-            mode=mode,
-        )
+        return cls(RuleRiskProvider.from_task(config))
 
     @property
     def risks(self):
@@ -71,7 +66,6 @@ class RiskPredictor(RiskEngine):
                 action=current.action,
                 scene=current.scene,
                 objects=current.objects,
-                memory=current.memory,
                 scheduler=current.scheduler,
                 task=current.task,
                 active_subtask=self.active_subtask,

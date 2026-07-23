@@ -194,22 +194,39 @@ def _object_record(obj: Any, *, task_names: set[str]) -> dict[str, Any]:
 
 
 def _parse_expected_relations(bddl_path: Path) -> dict[str, Any]:
+    from bddl.parsing import scan_tokens
+
     expected: dict[str, Any] = {"ontop": [], "inside": [], "inroom": [], "states": []}
-    text = bddl_path.read_text(encoding="utf-8")
-    for line in text.splitlines():
-        line = line.strip()
-        match = re.search(r"\(ontop\s+(\S+)\s+(\S+)\)", line)
-        if match:
-            expected["ontop"].append(list(match.groups()))
-        match = re.search(r"\(inside\s+(\S+)\s+(\S+)\)", line)
-        if match:
-            expected["inside"].append(list(match.groups()))
-        match = re.search(r"\(inroom\s+(\S+)\s+(\S+)\)", line)
-        if match:
-            expected["inroom"].append(list(match.groups()))
-        match = re.search(r"\(not\s+\((open|toggled_on|toggled_off|filled)\s+(\S+)\)\)", line)
-        if match:
-            expected["states"].append({"predicate": match.group(1), "object": match.group(2), "value": False})
+    problem = scan_tokens(string=bddl_path.read_text(encoding="utf-8"))
+    init = next(
+        (
+            group
+            for group in problem[1:]
+            if isinstance(group, list) and group and str(group[0]).lower() == ":init"
+        ),
+        None,
+    )
+    if init is None:
+        raise ValueError(f"BDDL problem has no :init section: {bddl_path}")
+
+    for raw_atom in init[1:]:
+        if not isinstance(raw_atom, list) or not raw_atom:
+            continue
+        atom = raw_atom
+        value = True
+        if str(atom[0]).lower() == "not":
+            if len(atom) != 2 or not isinstance(atom[1], list) or not atom[1]:
+                continue
+            atom = atom[1]
+            value = False
+        predicate = str(atom[0]).lower()
+        arguments = [str(item) for item in atom[1:]]
+        if value and predicate in {"ontop", "inside", "inroom"} and len(arguments) == 2:
+            expected[predicate].append(arguments)
+        elif len(arguments) == 1:
+            expected["states"].append(
+                {"predicate": predicate, "object": arguments[0], "value": value}
+            )
     return expected
 
 
@@ -325,6 +342,7 @@ def main() -> int:
     from og_ego_prim.config import RuntimeConfig, load_runtime_config_dict
     from og_ego_prim.benchmark import build_benchmark
     from og_ego_prim.utils.monkey_patch import add_monkey_patch
+    from og_ego_prim.utils.task_registry import get_task_config_path
 
     add_monkey_patch()
     import omnigibson as og
@@ -337,8 +355,9 @@ def main() -> int:
     config.setdefault("scene_graph", {})["backend"] = "disabled"
     config.setdefault("scene_graph", {})["step_interval"] = 0
     runtime_config = RuntimeConfig.from_mapping(config)
-    task_json_path = REPO_ROOT / "data" / "tasks" / "composite" / f"{args.task}.json"
+    task_json_path = get_task_config_path(args.task)
     task_json = json.loads(task_json_path.read_text(encoding="utf-8"))
+    canonical_task_name = str(task_json["task_info"]["task_name"])
 
     benchmark = None
     try:
@@ -438,9 +457,18 @@ def main() -> int:
                     target,
                 )
 
-        bddl_path = Path(args.bddl) if args.bddl else REPO_ROOT / "data" / "bddl" / args.task / "problem0.bddl"
+        bddl_path = (
+            Path(args.bddl)
+            if args.bddl
+            else REPO_ROOT / "data" / "bddl" / canonical_task_name / "problem0.bddl"
+        )
+        if not bddl_path.is_absolute():
+            bddl_path = (REPO_ROOT / bddl_path).resolve()
         expected = _parse_expected_relations(bddl_path)
-        sampled_scene_path = output_dir / f"{args.scene}_task_{args.task}_0_0_template.json"
+        sampled_scene_path = (
+            output_dir
+            / f"{args.scene}_task_{task_json_path.stem}_0_0_template.json"
+        )
         benchmark.env.task.save_task(path=str(sampled_scene_path), override=True)
 
         removed = []
@@ -462,6 +490,9 @@ def main() -> int:
         report = {
             "schema_version": "isbench.scene_initialization_audit.v1",
             "task": args.task,
+            "canonical_task_name": canonical_task_name,
+            "task_json_path": str(task_json_path),
+            "bddl_path": str(bddl_path),
             "scene": args.scene,
             "online_object_sampling": False,
             "idle_window": {
@@ -491,6 +522,10 @@ def main() -> int:
             },
             "object_count": len(records_after),
             "task_object_names": sorted(task_objects),
+            "task_object_mapping": {
+                bddl_name: str(getattr(obj, "name", ""))
+                for bddl_name, obj in sorted(task_objects.items())
+            },
             "objects_before_idle": records_before,
             "objects_after_idle": records_after,
             "sampled_scene_json": str(sampled_scene_path),
@@ -517,11 +552,18 @@ def main() -> int:
                 benchmark.close()
             except Exception:
                 pass
-        try:
-            og.clear()
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = 1
+    try:
+        exit_code = int(main() or 0)
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if "omnigibson" in sys.modules:
+        os._exit(exit_code)
+    raise SystemExit(exit_code)

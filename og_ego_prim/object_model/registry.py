@@ -31,13 +31,6 @@ def _mapping_values(value: Any) -> Iterable[Any]:
     return value or ()
 
 
-def _aliases(value: Any) -> Tuple[str, ...]:
-    if value is None:
-        return ()
-    values = (value,) if isinstance(value, str) else value
-    return tuple(str(item).strip() for item in values if str(item).strip())
-
-
 def _scene_nodes(payload: Mapping[str, Any]) -> Iterable[Tuple[Optional[Any], Mapping[str, Any]]]:
     for room in _mapping_values(payload.get("rooms")):
         if not isinstance(room, Mapping):
@@ -181,8 +174,7 @@ class ObjectRegistry:
         updated: List[ObjectRecord] = []
         for room_id, node in _scene_nodes(payload):
             entity_id = (
-                node.get("task_object_id")
-                or node.get("entity_id")
+                node.get("entity_id")
                 or node.get("id")
                 or node.get("object_id")
                 or node.get("label")
@@ -193,14 +185,11 @@ class ObjectRegistry:
                 dict.fromkeys(
                     str(value).strip()
                     for value in (
-                        node.get("task_object_id"),
                         node.get("entity_id"),
                         node.get("id"),
                         node.get("label"),
                         node.get("name"),
                         node.get("object_id"),
-                        node.get("simulator_name"),
-                        *_aliases(node.get("aliases")),
                     )
                     if value is not None and str(value).strip()
                 )

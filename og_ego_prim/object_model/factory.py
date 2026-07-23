@@ -8,7 +8,6 @@ from og_ego_prim.domain import Registry
 
 from .lifecycle import (
     EntityLifecyclePolicy,
-    LifecycleDirective,
     LifecycleRule,
     LifecycleTransition,
     NullEntityLifecyclePolicy,
@@ -41,13 +40,6 @@ def _lifecycle_rule(value: Any, ordinal: int) -> LifecycleRule:
         parsed_transition = transition
     elif isinstance(transition, Mapping):
         directives = transition.get("directives") or ()
-        if transition.get("forget_memory"):
-            configured = (
-                (directives,)
-                if isinstance(directives, (str, Mapping, LifecycleDirective))
-                else tuple(directives)
-            )
-            directives = configured + (LifecycleDirective("forget_entity"),)
         parsed_transition = LifecycleTransition(
             available=transition.get("available"),
             clear_location=bool(transition.get("clear_location", False)),

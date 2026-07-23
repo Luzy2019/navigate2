@@ -80,10 +80,9 @@ def create_risk_predictor(
     """Build the configured predictor used by the online runtime."""
     options = dict(config or {})
     enabled = bool(options.get("enabled", True))
-    mode = str(options.get("mode", "enforce")) if enabled else "disabled"
     provider_name = str(options.get("provider", "task_json")) if enabled else "disabled"
     provider = create_risk_provider(provider_name, task=task)
-    return RiskPredictor(provider, mode=mode)
+    return RiskPredictor(provider)
 
 
 __all__ = [

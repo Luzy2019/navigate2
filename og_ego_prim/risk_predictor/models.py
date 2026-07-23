@@ -70,7 +70,6 @@ class RiskContext(SerializableRiskModel):
     action: Optional[Action] = None
     scene: Any = None
     objects: Any = None
-    memory: Any = None
     scheduler: Any = None
     task: Any = None
     active_subtask: Optional[int] = None
@@ -94,7 +93,6 @@ class RiskContext(SerializableRiskModel):
             action=action if action is not None else value.get("action"),
             scene=value.get("scene"),
             objects=value.get("objects"),
-            memory=value.get("memory"),
             scheduler=value.get("scheduler"),
             task=value.get("task"),
             active_subtask=value.get("active_subtask"),

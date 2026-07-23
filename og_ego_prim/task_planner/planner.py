@@ -8,14 +8,18 @@ import re
 import sys
 from typing import TYPE_CHECKING, Any, Dict, Generator, List, Optional, Tuple, Union
 
+from og_ego_prim.domain import Action
 from og_ego_prim.primitives import get_valid_primitives
 from og_ego_prim.primitives.specs import PrimitiveType
 from og_ego_prim.benchmark.tracker import EvalTracker
 from og_ego_prim.utils.constants import WORK_DIR
-from og_ego_prim.utils.planning import list_observation_images, parse_json_code_block
+from og_ego_prim.utils.planning import (
+    list_observation_images,
+    parse_json_code_block,
+    planner_entity_candidates,
+)
 from og_ego_prim.utils.prompts import *
 from og_ego_prim.utils.task_registry import get_task_config_path
-from og_ego_prim.memory import TaskMemory
 from .context import TaskPlanContext
 from .model_agent import AgentModelConfig, resolve_agent_model_config
 
@@ -88,13 +92,12 @@ class AgentPlanner:
         )
         self.model_name = self.model_config.model_name
         self.current_step = 0
-        self.history_start_index = 0
         self.observation_dir = observation_dir
-        self.lifelong_instruction_history = []
-        self.active_lifelong_instruction = None
-        self.preserve_lifelong_history = True
         self.runtime_controller = None
         self._pending_rethinking_prompt = None
+        self._pending_manipulation = None
+        self._subtask_plan_start = 0
+        self.held_object_getter = None
 
         self.retry = retry
         self.verbose = verbose
@@ -105,9 +108,6 @@ class AgentPlanner:
         self.valid_primitives = get_valid_primitives(primitive_type)
         self.use_initial_setup = use_initial_setup
         self.use_self_caption = use_self_caption
-        # Semantic history is separate from the scene graph so it survives
-        # room changes and can be shared with future online planners.
-        self.memory = TaskMemory(task_id=task_name)
 
         # initialize data
         (
@@ -135,16 +135,21 @@ class AgentPlanner:
         self.tracker.model = model_name
 
     def set_runtime_controller(self, controller: Any) -> None:
-        """Attach the canonical runtime context without changing legacy construction."""
+        """Attach the canonical runtime context."""
         self.runtime_controller = controller
-        if controller is not None and getattr(controller.components, "memory", None) is not None:
-            self.memory = controller.components.memory
 
     def note_runtime_review(self, review: Any) -> None:
         if review is None or not getattr(review, "should_rethink", False):
             self._pending_rethinking_prompt = None
             return
         self._pending_rethinking_prompt = self.runtime_controller.rethinking_prompt()
+
+    def _held_object(self) -> Optional[str]:
+        getter = self.held_object_getter
+        if not callable(getter):
+            return None
+        value = getter()
+        return None if value is None else str(value)
 
     def _create_model_client(self) -> Any:
         from og_ego_prim.models.server_inference import ServerClient
@@ -187,10 +192,15 @@ class AgentPlanner:
 
     def _prepare_prompt(self) -> str:
         history_sections = []
-        if self.memory.records:
-            history_sections.append(
-                f"Task and action memory:\n{self.memory.to_prompt_context()}"
-            )
+        executed_actions = [
+            record.get("history_text")
+            or f"{record['step']}. {record['plan']['action'].upper()}"
+            for record in self.tracker.plans[self._subtask_plan_start:]
+            if record.get("executed") is True and record.get("succeeded") is True
+        ]
+        if executed_actions:
+            history_sections.append("Executed actions:\n" + "\n".join(executed_actions))
+
         if self.runtime_controller is not None:
             runtime_prompt = (
                 self._pending_rethinking_prompt
@@ -198,7 +208,11 @@ class AgentPlanner:
             )
             if runtime_prompt:
                 history_sections.append(f"Modular runtime context:\n{runtime_prompt}")
-        history_plans = '\n'.join(history_sections) if history_sections else "None"
+        if callable(self.held_object_getter):
+            history_sections.append(
+                f"Current held object: {self._held_object() or 'None'}"
+            )
+        history_plans = "\n".join(history_sections) if history_sections else "None"
 
         if self.primitive_type == "starter":
             scene_description = None
@@ -327,23 +341,15 @@ class AgentPlanner:
     def begin_lifelong_subtask(
         self,
         task_instruction: str,
-        preserve_history: bool,
+        subtask_index: int,
     ) -> None:
         """Switch the active instruction without resetting the simulator."""
-        if self.active_lifelong_instruction is not None:
-            self.lifelong_instruction_history.append(self.active_lifelong_instruction)
-        if not preserve_history and self.runtime_controller is None:
-            self.memory.clear()
-        self.active_lifelong_instruction = task_instruction
-        self.preserve_lifelong_history = preserve_history
         self.task_instruction = task_instruction
-        if not preserve_history:
-            self.history_start_index = len(self.tracker.plans)
+        self._pending_rethinking_prompt = None
+        self._pending_manipulation = None
+        self._subtask_plan_start = len(self.tracker.plans)
         if self.runtime_controller is not None:
-            self.runtime_controller.set_subtask(
-                len(self.lifelong_instruction_history) + 1,
-                preserve_memory=preserve_history,
-            )
+            self.runtime_controller.set_subtask(subtask_index)
 
 
     def _verify_plan(self, plan: Optional[StepwisePlan]) -> Optional[Tuple[str, str, str]]:
@@ -373,7 +379,7 @@ class AgentPlanner:
         if len(objects) != self.valid_primitives[operator.upper()]:
             return None
         for obj in objects:
-            if obj not in self.objects_str:
+            if not planner_entity_candidates(obj, self.allowed_entity_ids):
                 return None
 
         if 'caution' not in plan:
@@ -381,10 +387,26 @@ class AgentPlanner:
         else:
             caution = plan['caution']
 
+        placement_actions = {
+            "PLACE_ON_TOP", "PLACE_INSIDE", "POUR_INTO", "DUMP_INTO"
+        }
+        if (
+            self.primitive_type == "starter"
+            and operator.upper() in placement_actions
+            and callable(self.held_object_getter)
+            and self._held_object() is None
+        ):
+            print(
+                "[agent][planner_guard] rejecting starter placement while "
+                "the gripper is empty"
+            )
+            sys.stdout.flush()
+            return None
+
         if (
             self.primitive_type == "starter"
             and operator.upper() in {
-                "PLACE_ON_TOP", "PLACE_INSIDE", "POUR_INTO", "DUMP_INTO"
+                "GRASP", "PLACE_ON_TOP", "PLACE_INSIDE", "POUR_INTO", "DUMP_INTO"
             }
             and objects
             and not self._last_plan_is_navigation_to(objects[0])
@@ -395,6 +417,12 @@ class AgentPlanner:
                 f"NAVIGATE_TO({destination}) before {operator.upper()}({destination})"
             )
             sys.stdout.flush()
+            self._pending_manipulation = (
+                operator.lower(),
+                params,
+                caution,
+                destination,
+            )
             return "navigate_to", destination, None
 
         return operator.lower(), params, caution
@@ -403,14 +431,16 @@ class AgentPlanner:
         if not getattr(self, "tracker", None) or not self.tracker.plans:
             return False
 
-        executed_plans = [
-            record
-            for record in self.tracker.plans
-            if record.get('executed') is not False
-        ]
-        if not executed_plans:
+        current_subtask_plans = self.tracker.plans[self._subtask_plan_start:]
+        if not current_subtask_plans:
             return False
-        last_action = executed_plans[-1]["plan"]["action"].strip().lower()
+        last_record = current_subtask_plans[-1]
+        if not (
+            last_record.get("executed") is True
+            and last_record.get("succeeded") is True
+        ):
+            return False
+        last_action = last_record["plan"]["action"].strip().lower()
         expected_action = f"navigate_to({target.strip().lower()})"
         return last_action == expected_action
 
@@ -453,12 +483,50 @@ class AgentPlanner:
         output = self.client.model(prompt_sa, image_file=obs)
         return output
 
+    def record_plan(
+        self,
+        action: Action | str,
+        *,
+        caution: Optional[str] = None,
+        raw_output: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Record one model-produced action for the legacy tracker and executor."""
 
+        parsed = action if isinstance(action, Action) else Action.from_raw(action)
+        action_text = parsed.to_legacy_plan()
+        self.current_step += 1
+        plan = {"action": action_text, "caution": caution}
+        self.tracker.track_plan(
+            step=self.current_step,
+            plan=plan,
+            history_text=f"{self.current_step}. {parsed.to_legacy_plan(lowercase=False)}",
+        )
+        if raw_output is not None:
+            self.tracker.track_raw_output(step=self.current_step, content=raw_output)
+        self._pending_rethinking_prompt = None
+        return plan
 
     def step(self, use_obs=True, max_step=None) -> Generator[str, None, None]:
         retry = 0
         start_step = self.current_step
         while True:
+            if self._pending_manipulation is not None:
+                operator, params, caution, navigation_target = self._pending_manipulation
+                self._pending_manipulation = None
+                if self._last_plan_is_navigation_to(navigation_target):
+                    next_plan = self.record_plan(
+                        f'{operator}({params})',
+                        caution=caution,
+                    )
+                    yield next_plan
+                    if max_step is not None and self.current_step - start_step >= max_step:
+                        self.tracker.track_termination(
+                            reason='exceeding_max_steps',
+                            msg=f'exceeding max steps {max_step}'
+                        )
+                        return
+                    continue
+
             # get obs after last execution
             last_plan, obs = self._get_last_execution_info(use_obs)
             prompt = self._prepare_prompt()
@@ -496,21 +564,11 @@ class AgentPlanner:
                 retry = 0
 
                 operator, params, caution = results
-                self.current_step += 1
-                next_plan: StepwisePlan = dict(
-                    action=f'{operator}({params})',
-                    caution=caution
+                next_plan: StepwisePlan = self.record_plan(
+                    f'{operator}({params})',
+                    caution=caution,
+                    raw_output=output,
                 )
-                self.tracker.track_plan(
-                    step=self.current_step,
-                    plan=next_plan,
-                    history_text=f'{self.current_step}. {operator.upper()}({params.lower()})'
-                )
-                self.tracker.track_raw_output(
-                    step=self.current_step,
-                    content=output,
-                )
-                self._pending_rethinking_prompt = None
                 yield next_plan
                 if operator == 'done':
                     return
@@ -543,6 +601,7 @@ class AgentPlanner:
         else:
             wash_rules_str = json.dumps(wash_rules, indent=4, ensure_ascii=False)
 
+        self.allowed_entity_ids = tuple(context.object_list)
         return (
             task_instruction,
             objects_str,

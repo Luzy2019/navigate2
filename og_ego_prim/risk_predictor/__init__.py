@@ -18,6 +18,7 @@ from .models import (
     normalize_drafts,
 )
 from .predictor import RiskPredictor
+from .risk_assessor import RiskAssessor
 from .providers import (
     HybridRiskProvider,
     ModelAssessor,
@@ -48,6 +49,7 @@ __all__ = [
     "ProviderFactory",
     "RULE_CATALOG_SCHEMA_VERSION",
     "RiskContext",
+    "RiskAssessor",
     "RiskEngine",
     "RiskEvaluation",
     "RiskPredictor",

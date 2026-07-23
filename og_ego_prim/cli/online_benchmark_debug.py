@@ -204,6 +204,7 @@ def _run(
         AgentPlanner,
         create_planner_adapter,
     )
+    from og_ego_prim.risk_predictor.utils import install_vlm_risk_provider
     from og_ego_prim.cli.safe_memory_benchmark_once import capture_robot_rgb_frame
     from og_ego_prim.utils.metric import track_planning_latency
 
@@ -246,14 +247,22 @@ def _run(
             primitive_type=benchmark.primitive_type,
             use_initial_setup=args.use_initial_setup,
             use_self_caption=args.use_self_caption,
+            observation_dir=str(output_dir),
         )
+        if not benchmark.scene_graph_updater.disabled:
+            install_vlm_risk_provider(benchmark, agent.client)
         agent.set_tracker(benchmark.tracker)
         agent.set_runtime_controller(benchmark.runtime_controller)
         planner_adapter = create_planner_adapter(
-            'model',
+            'vlm_closed_loop',
             agent,
-            use_obs=args.planner_use_obs,
+            use_obs=(
+                args.planner_use_obs
+                and runtime_config.artifacts.save_surrounding_observations
+                and not args.no_capture_observations
+            ),
             max_step=args.plan_max_steps or (len(benchmark._example_planning) + 10),
+            held_object_getter=benchmark._current_grasped_object_id,
         )
         benchmark.bind_planner_adapter(planner_adapter, source=type(agent).__name__)
     else:
@@ -292,15 +301,15 @@ def _run(
                 capture_robot_rgb_frame(benchmark.env.robots[0], args.video_output_size)
             )
         if runtime_config.artifacts.save_surrounding_observations and not args.no_capture_observations:
+            step = benchmark.tracker.plans[-1]["step"]
             benchmark.get_surrounding_viewer_obs(
-                save_img=str(output_dir / _safe_step_tag(index, action))
+                save_img=str(output_dir / _safe_step_tag(step, action))
             )
         if ok is False:
             review = benchmark.runtime_controller.last_review
             outcome = benchmark.runtime_controller.last_outcome
             if outcome is not None and not outcome.executed:
                 if args.model and review is not None and review.should_rethink:
-                    agent.note_runtime_review(review)
                     continue
                 if benchmark.tracker.termination is None:
                     benchmark.tracker.track_termination(

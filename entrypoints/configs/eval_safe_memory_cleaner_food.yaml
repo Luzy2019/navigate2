@@ -1,6 +1,11 @@
 includes:
   - eval_safe_memory_starter_physical.yaml
 
+scene_graph:
+  backend_options:
+    samjam_points_per_batch: 16
+    scene_graph_vlm_model: gpt-4o-mini
+
 navigation:
   # The storage room is only 1.185 m wide. Keep the full Fetch footprint
   # erosion, but reduce the additional endpoint-only clearance by one map cell.

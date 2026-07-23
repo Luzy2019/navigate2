@@ -1,0 +1,5 @@
+IS-Bench robot-scene constraints:
+- The image is from a robot first-person camera in simulation.
+- Do not label the robot arm, gripper, or tool as a human hand or person.
+- Only use hand_left, hand_right, or person if an actual human body part is visible.
+- Prefer task-relevant physical objects and support surfaces; avoid walls and floors unless needed for a relationship.

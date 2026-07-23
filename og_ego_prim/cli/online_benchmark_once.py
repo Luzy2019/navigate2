@@ -28,6 +28,7 @@ from og_ego_prim.observability.media import (
     ReplayMediaRecorder,
     install_executor_trace,
 )
+from og_ego_prim.risk_predictor.utils import install_vlm_risk_provider
 from og_ego_prim.task_planner import (
     AgentPlanner,
     create_planner_adapter,
@@ -517,15 +518,19 @@ def _online_benchmark_once(
             primitive_type=primitive_type,
             use_initial_setup=use_initial_setup,
             use_self_caption=use_self_caption,
+            observation_dir=output_dir,
         )
         agent.client = TracingModelClient(agent.client, replay_session)
+        if not benchmark.scene_graph_updater.disabled:
+            install_vlm_risk_provider(benchmark, agent.client)
         agent.set_tracker(benchmark.tracker)
         agent.set_runtime_controller(benchmark.runtime_controller)
         base_planner_adapter = create_planner_adapter(
-            'model',
+            'vlm_closed_loop',
             agent,
-            use_obs=True,
+            use_obs=capture_observations,
             max_step=(len(benchmark._example_planning) + 10),
+            held_object_getter=benchmark._current_grasped_object_id,
         )
         planner_adapter = _trace_planner_adapter(
             base_planner_adapter,
@@ -609,7 +614,6 @@ def _online_benchmark_once(
                 and review is not None
                 and review.should_rethink
             ):
-                agent.note_runtime_review(review)
                 continue
             if benchmark.tracker.termination is None:
                 reason = (
@@ -619,7 +623,8 @@ def _online_benchmark_once(
                 )
                 benchmark.tracker.track_termination(reason=reason)
             break
-        step_tag = f'{i+1}_' + action_text.replace('(', '__').replace(')', '__')
+        step = benchmark.tracker.plans[-1]['step']
+        step_tag = f'{step}_' + action_text.replace('(', '__').replace(')', '__')
         if capture_observations:
             benchmark.get_surrounding_viewer_obs(save_img=os.path.join(output_dir, step_tag))
 

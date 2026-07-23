@@ -7,8 +7,10 @@ task:
   prompt_setting: v1
 
 scene_graph:
-  backend: disabled
   step_interval: 0
+
+prompting:
+  sections: [task, timers, action]
 
 navigation:
   already_reachable_max_goal_radius: 1.30

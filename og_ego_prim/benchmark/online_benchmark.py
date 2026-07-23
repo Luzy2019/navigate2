@@ -35,11 +35,6 @@ from og_ego_prim.config.task_definition import (
 )
 from og_ego_prim.agent_runtime import AgentRuntimeController, RuntimeComponents
 from og_ego_prim.events import create_event_sink
-from og_ego_prim.memory import (
-    TaskMemory,
-    create_memory_consolidator,
-    create_memory_retriever,
-)
 from og_ego_prim.object_model import create_object_registry
 from og_ego_prim.prompting import create_prompt_builder
 from og_ego_prim.risk_predictor import create_risk_predictor
@@ -244,20 +239,6 @@ class OnlineBenchmark(Benchmark):
             self.runtime_config.object_model,
             task_view=definition.agent,
         )
-        memory = TaskMemory(
-            task_id=task,
-            enabled=self.runtime_config.memory.enabled,
-            max_actions=self.runtime_config.memory.max_actions,
-            max_states_per_object=self.runtime_config.memory.max_states_per_object,
-            retriever=create_memory_retriever(
-                self.runtime_config.memory.retriever,
-                **dict(self.runtime_config.memory.options.get('retriever', {}) or {}),
-            ),
-            consolidator=create_memory_consolidator(
-                self.runtime_config.memory.consolidation,
-                **dict(self.runtime_config.memory.options.get('consolidation', {}) or {}),
-            ),
-        )
         scheduler_config = {
             'enabled': self.runtime_config.scheduler.enabled,
             'include_builtins': self.runtime_config.scheduler.handler_options.get(
@@ -284,7 +265,6 @@ class OnlineBenchmark(Benchmark):
             perception=self.scene_graph_updater,
             objects=objects,
             scheduler=scheduler,
-            memory=memory,
             prompt_builder=prompt_builder,
             executor=self.executor,
             evaluator=None,
@@ -295,7 +275,6 @@ class OnlineBenchmark(Benchmark):
             components,
             task_id=task,
             task_view=definition.agent,
-            max_recalled_items=self.runtime_config.prompting.max_recalled_items,
             expose_cross_subtask_timers=(
                 self.runtime_config.scheduler.expose_cross_subtask_timers
             ),
@@ -309,8 +288,6 @@ class OnlineBenchmark(Benchmark):
             'scheduler': type(scheduler).__name__,
             'risk_predictor': type(risk_predictor).__name__,
             'risk_provider': type(risk_predictor.provider).__name__,
-            'risk_mode': risk_predictor.mode,
-            'memory': type(memory).__name__,
             'prompt_builder': type(prompt_builder).__name__,
             'executor': type(self.executor).__name__,
             'event_sink': type(components.event_sink).__name__,
@@ -324,21 +301,17 @@ class OnlineBenchmark(Benchmark):
                 )
                 else 'bddl.goal'
             ),
-            'memory_enabled': memory.enabled,
             'scheduler_enabled': scheduler.enabled,
-            'cross_subtask_memory_enabled': bool(memory.enabled),
             'cross_subtask_timers_configured': (
                 self.runtime_config.scheduler.expose_cross_subtask_timers
             ),
             'cross_subtask_timers_exposed': (
                 self.runtime_config.scheduler.expose_cross_subtask_timers
             ),
-            'max_recalled_items': self.runtime_config.prompting.max_recalled_items,
         }
         self.tracker.risk_predictor = {
             'type': type(risk_predictor).__name__,
             'provider': type(risk_predictor.provider).__name__,
-            'mode': risk_predictor.mode,
             'task_json_rule_count': len(
                 getattr(getattr(risk_predictor.provider, 'catalog', None), 'rules', ())
             ),
@@ -422,7 +395,13 @@ class OnlineBenchmark(Benchmark):
         if hasattr(self, 'runtime_controller'):
             self.runtime_controller.tick_scheduler()
 
-    def _refresh_scene_graph(self, force: bool = False):
+    def _refresh_scene_graph(
+        self,
+        force: bool = False,
+        raw_plan: Optional[str] = None,
+    ):
+        if raw_plan is not None:
+            self.scene_graph_updater.set_object_goal_from_action(raw_plan)
         started_at = time.perf_counter()
         snapshot = self.scene_graph_updater.update()
         if self._is_graph_construction(snapshot):
@@ -441,29 +420,9 @@ class OnlineBenchmark(Benchmark):
     def set_active_subtask(
         self,
         subtask_index: Optional[int],
-        *,
-        preserve_memory: bool = True,
-        sync_runtime_controller: bool = True,
     ) -> None:
-        if sync_runtime_controller and hasattr(self, 'runtime_controller'):
-            self.runtime_controller.set_subtask(
-                subtask_index,
-                preserve_memory=preserve_memory,
-            )
-            risk_predictor = self.runtime_controller.components.risk_predictor
-            if risk_predictor is not None:
-                set_active_subtask = getattr(risk_predictor, 'set_active_subtask', None)
-                if callable(set_active_subtask):
-                    set_active_subtask(subtask_index)
-        if self.tracker.runtime_modules is not None:
-            self.tracker.runtime_modules['cross_subtask_memory_enabled'] = bool(
-                preserve_memory
-                and self.runtime_controller.components.memory.enabled
-            )
-            self.tracker.runtime_modules['cross_subtask_timers_exposed'] = bool(
-                preserve_memory
-                and self.runtime_config.scheduler.expose_cross_subtask_timers
-            )
+        if hasattr(self, 'runtime_controller'):
+            self.runtime_controller.set_subtask(subtask_index)
 
     def _sync_starter_grasped_object(self):
         self._starter_grasped_object = self._current_grasped_object_id()
@@ -1212,12 +1171,13 @@ class OnlineBenchmark(Benchmark):
         if isinstance(plan, str):
             plan: StepwisePlan = dict(action=plan, caution=None)
 
+        proposal_action = plan['action']
         runtime_review = self.runtime_controller.review_action(
-            self._runtime_action(plan['action'])
+            self._runtime_action(proposal_action)
         )
         if runtime_review.risk_evaluation is not None:
             self.tracker.track_risk_evaluation(
-                plan['action'],
+                proposal_action,
                 runtime_review.risk_evaluation,
             )
             risk_latency = getattr(
@@ -1232,21 +1192,25 @@ class OnlineBenchmark(Benchmark):
         if not runtime_review.allowed:
             outcome = self.runtime_controller.record_blocked(runtime_review)
             self.tracker.mark_plan_runtime(
-                plan['action'],
+                proposal_action,
                 executed=False,
                 succeeded=False,
                 runtime_decision=runtime_review.decision.value,
                 runtime_reason=outcome.reason,
             )
             return False
-        
-        evaluation_plan = plan
+
+        execution_plan = {
+            **plan,
+            'action': runtime_review.action.to_legacy_plan(),
+        }
+        evaluation_plan = execution_plan
         if self.primitive_type == "starter":
             evaluation_plan = {
-                **plan,
+                **execution_plan,
                 # action wrapper
                 "action": starter_evaluation_action(
-                    plan["action"],
+                    execution_plan["action"],
                     self._starter_grasped_object,
                 ),
             }
@@ -1257,18 +1221,18 @@ class OnlineBenchmark(Benchmark):
 
         execution_succeeded = True
         if self.debug:
-            self.executor.execute_plan(plan['action'])
+            self.executor.execute_plan(execution_plan['action'])
         else:
             try:
-                self.executor.execute_plan(plan['action'])
+                self.executor.execute_plan(execution_plan['action'])
             except Exception as e:
                 execution_succeeded = False
                 print(
-                    f"[benchmark][execution_error] action={plan['action']!r} "
+                    f"[benchmark][execution_error] action={execution_plan['action']!r} "
                     f"type={e.__class__.__name__} message={e}"
                 )
                 self.tracker.track_error(
-                    action=plan['action'],
+                    action=execution_plan['action'],
                     err_type=e.__class__.__name__,
                     msg=str(e)
                 )
@@ -1281,7 +1245,7 @@ class OnlineBenchmark(Benchmark):
             diagnostics=self.executor.last_execution_diagnostics,
         )
         self.tracker.mark_plan_runtime(
-            plan['action'],
+            proposal_action,
             executed=True,
             succeeded=execution_succeeded,
             runtime_decision=runtime_review.decision.value,
@@ -1294,7 +1258,7 @@ class OnlineBenchmark(Benchmark):
         if self.primitive_type == "starter" and execution_succeeded:
             self._sync_starter_grasped_object()
         if self.scene_graph_step_interval <= 0:
-            self._refresh_scene_graph()
+            self._refresh_scene_graph(raw_plan=execution_plan['action'])
         return execution_succeeded
 
     def _evaluate_lifelong_process_safety(
@@ -1316,7 +1280,9 @@ class OnlineBenchmark(Benchmark):
             callback(plan, phase)
 
     def _runtime_action(self, raw_action: str) -> Action:
-        action = Action.from_raw(raw_action, actor_id='Root')
+        action = self.runtime_controller.ground_action(
+            Action.from_raw(raw_action, actor_id='Root')
+        )
         action.extensions['record_manipulation'] = not (
             action.name in {'NAVIGATE_TO', 'DONE'} or action.name.startswith('WAIT')
         )

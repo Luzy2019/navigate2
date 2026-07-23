@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Evaluate one lifelong cross-room task without resetting the environment."
     )
-    parser.add_argument("--config", default=None)
+    parser.add_argument("--config", default="entrypoints/configs/eval_safe_memory.yaml")
     parser.add_argument("--task")
     parser.add_argument("--scene")
     parser.add_argument("--model")
@@ -75,7 +75,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-serve-key", default="EMPTY")
     parser.add_argument("--prompt-setting", choices=("v0", "v1", "v2", "v3"), default="v1")
     parser.add_argument("--primitive-type", choices=("auto", "ego", "starter", "symbolic"), default="auto")
-    parser.add_argument("--scene-graph-backend", default="disabled")
     parser.add_argument("--scene-graph-step-interval", type=int, default=0)
     parser.add_argument("--online-object-sampling", action="store_true")
     parser.add_argument("--use-initial-setup", action="store_true")
@@ -167,8 +166,6 @@ def apply_config(args: argparse.Namespace) -> tuple[argparse.Namespace, RuntimeC
         args.prompt_setting = task_config.prompt_setting
     if not _flag_present("--primitive-type"):
         args.primitive_type = task_config.primitive_type
-    if not _flag_present("--scene-graph-backend"):
-        args.scene_graph_backend = runtime_config.scene_graph.backend
     if not _flag_present("--scene-graph-step-interval"):
         args.scene_graph_step_interval = runtime_config.scene_graph.step_interval
     if not _flag_present("--online-object-sampling") and task_config.online_object_sampling:
@@ -677,7 +674,11 @@ def _run(
         draw_bbox_2d=args.draw_bbox_2d,
         primitive_type=None if args.primitive_type == "auto" else args.primitive_type,
         scene_graph_step_interval=args.scene_graph_step_interval,
-        scene_graph_backend=args.scene_graph_backend,
+        scene_graph_backend=(
+            "samjam_unigoal"
+            if args.memory_mode == "with_memory"
+            else "disabled"
+        ),
         use_initial_setup=args.use_initial_setup,
         use_self_caption=args.use_self_caption,
         online_object_sampling=args.online_object_sampling,
@@ -718,6 +719,7 @@ def _run(
     install_video_step_callback(benchmark, args)
     agent = None
     if scripted is None:
+        from og_ego_prim.risk_predictor.utils import install_vlm_risk_provider
         from og_ego_prim.task_planner import AgentPlanner
 
         agent = AgentPlanner(
@@ -736,6 +738,8 @@ def _run(
             observation_dir=str(output_dir),
         )
         agent.client = TracingModelClient(agent.client, replay_session)
+        if args.memory_mode == "with_memory":
+            install_vlm_risk_provider(benchmark, agent.client)
         agent.set_tracker(benchmark.tracker)
         agent.set_runtime_controller(benchmark.runtime_controller)
         benchmark.tracker.runtime_modules["planner"] = type(agent).__name__
@@ -762,7 +766,6 @@ def _run(
 
     for index, subtask in enumerate(config["subtasks"], 1):
         benchmark.tracker.termination = None
-        preserve_memory = args.memory_mode == "with_memory"
         instruction = get_subtask_instruction(subtask)
         h_limit = int(subtask.get("H_limit", config["lifelong_config"]["H_per_task"]))
         action_start = len(benchmark.tracker.plans)
@@ -773,7 +776,6 @@ def _run(
             {
                 "subtask_id": index,
                 "instruction": instruction,
-                "preserve_memory": preserve_memory,
             },
             status="started",
             subtask_id=str(index),
@@ -783,15 +785,7 @@ def _run(
         if agent is not None:
             agent.begin_lifelong_subtask(
                 task_instruction=instruction,
-                preserve_history=preserve_memory,
-            )
-            # AgentPlanner already switched the shared Controller. Keep the
-            # legacy audit catalog and report metadata in sync without invoking
-            # Controller.set_subtask a second time.
-            benchmark.set_active_subtask(
-                index,
-                preserve_memory=preserve_memory,
-                sync_runtime_controller=False,
+                subtask_index=index,
             )
             use_obs = not args.no_capture_observations
             if args.use_self_caption:
@@ -808,10 +802,11 @@ def _run(
             from og_ego_prim.task_planner import create_planner_adapter
 
             planner_adapter = create_planner_adapter(
-                "model",
+                "vlm_closed_loop",
                 agent,
                 use_obs=use_obs,
                 max_step=h_limit,
+                held_object_getter=benchmark._current_grasped_object_id,
             )
             planner_adapter = TracingPlannerAdapter(
                 planner_adapter,
@@ -827,7 +822,7 @@ def _run(
                 emit_proposals=False,
             )
         else:
-            benchmark.set_active_subtask(index, preserve_memory=preserve_memory)
+            benchmark.set_active_subtask(index)
             from og_ego_prim.task_planner import create_planner_adapter
 
             planner_adapter = create_planner_adapter(
@@ -875,7 +870,6 @@ def _run(
                     and review is not None
                     and review.should_rethink
                 ):
-                    agent.note_runtime_review(review)
                     continue
                 if outcome is not None and not outcome.executed:
                     blocked_reason = outcome.reason or "blocked_by_scheduler"
@@ -951,8 +945,7 @@ def _run(
         "primitive_type": benchmark.primitive_type,
         "memory_mode": args.memory_mode,
         "runtime_ablation": {
-            "memory_enabled": args.memory_mode == "with_memory",
-            "cross_subtask_history_enabled": args.memory_mode == "with_memory",
+            "scene_graph_memory_enabled": args.memory_mode == "with_memory",
             "use_initial_setup": args.use_initial_setup,
             "use_self_caption": args.use_self_caption,
             "prompt_setting": args.prompt_setting,

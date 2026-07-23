@@ -88,9 +88,6 @@ class SceneGraphNode:
     room_id: Optional[Any] = None
     group: Optional[str] = None
     role: Optional[str] = None
-    task_object_id: Optional[str] = None
-    simulator_name: Optional[str] = None
-    aliases: List[str] = field(default_factory=list)
 
     # Legacy input aliases.  They are accepted so older updaters can keep
     # constructing nodes, but they are intentionally not emitted in v2 output.
@@ -136,9 +133,6 @@ class SceneGraphNode:
                 "room_id": self.room_id,
                 "group": self.group,
                 "role": self.role,
-                "task_object_id": self.task_object_id,
-                "simulator_name": self.simulator_name,
-                "aliases": self.aliases,
             }
         )
 

@@ -62,92 +62,87 @@ class ServerClient(BaseClient):
         if gen_args is None:
             gen_args = {"max_completion_tokens": 512, "temperature": 0.0}
 
-        if not image_file: 
-            messages = [
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
-        else:
-            if isinstance(image_file, str):  # support single and multi image
-                image_file = [image_file]   
-            if 'gemini_direct' in self.model_name.lower(): # support gemini api
-                parts=[
-                        types.Part.from_text(text=prompt)
-                    ]
-                for image in image_file:
-                    image_base64 = read_image(image)
-                    image_type = "image/png"
-                    image_content = types.Part.from_bytes(
-                        data=image_base64,
-                        mime_type=image_type,
-                    )
-                    parts.append(image_content)
-                contents = [
-                    types.Content(
-                        role="user",
-                        parts=parts
-                    )
-                ]
+        if isinstance(image_file, str):  # support single and multi image
+            image_file = [image_file]
+        image_file = image_file or []
+        last_error = None
 
-                for _ in range(3):
-                    result = ""
-                    try:
-                        for chunk in self.client.models.generate_content_stream(
-                            model = self.model_name,
-                            contents = contents,
-                            config = self.generate_content_config,
-                            ):
-                            result += chunk.text
-                        if len(result) == 0:  
-                            continue
+        if 'gemini_direct' in self.model_name.lower(): # support gemini api
+            parts = [types.Part.from_text(text=prompt)]
+            for image in image_file:
+                image_base64 = read_image(image)
+                image_content = types.Part.from_bytes(
+                    data=image_base64,
+                    mime_type="image/png",
+                )
+                parts.append(image_content)
+            contents = [
+                types.Content(
+                    role="user",
+                    parts=parts
+                )
+            ]
+
+            for _ in range(3):
+                result = ""
+                try:
+                    for chunk in self.client.models.generate_content_stream(
+                        model=self.model_name,
+                        contents=contents,
+                        config=self.generate_content_config,
+                    ):
+                        result += chunk.text
+                    if result.strip():
                         return result
-                    except Exception as e:
-                        print(e)
-                        time.sleep(10)
-                        continue        
-            else:
-                messages = [
+                except Exception as e:
+                    last_error = e
+                    print(e)
+                    time.sleep(10)
+            raise RuntimeError("Gemini model returned no content after 3 attempts") from last_error
+
+        if image_file:
+            content = [
+                {
+                    "type": "text",
+                    "text": prompt
+                },
+            ]
+            for image in image_file:
+                image_base64 = encode_image(image)
+                image_type = guess_image_type_from_base64(image_base64)
+                content.append(
                     {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": prompt
-                            },
-                        ],
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{image_type};base64,{image_base64}"
+                        },
                     }
-                ]
-                for image in image_file:
-                    image_base64 = encode_image(image)
-                    image_type = guess_image_type_from_base64(image_base64)
-                    messages[0]["content"].append(
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{image_type};base64,{image_base64}"
-                            },
-                        }
-                    )
-                for _ in range(3):
-                    result = ""
-                    try:
-                        request_kwargs = {}
-                        if self.model_type != "local":
-                            request_kwargs = get_openai_request_kwargs()
-                        chat_completion = self.client.chat.completions.create(
-                            messages=messages,
-                            model=self.model_name,
-                            **gen_args,
-                            **request_kwargs,
-                        )
-                        result = chat_completion.choices[0].message.content
-                        if not result :   # 避免none的出现
-                            continue
-                        return result
-                    except Exception as e:
-                        print(e)
-                        time.sleep(10)
-                        continue
-        return result
+                )
+        else:
+            content = prompt
+        messages = [
+            {
+                "role": "user",
+                "content": content
+            }
+        ]
+
+        for _ in range(3):
+            try:
+                request_kwargs = {}
+                if self.model_type != "local":
+                    request_kwargs = get_openai_request_kwargs()
+                chat_completion = self.client.chat.completions.create(
+                    messages=messages,
+                    model=self.model_name,
+                    **gen_args,
+                    **request_kwargs,
+                )
+                result = chat_completion.choices[0].message.content
+                if result and result.strip():   # 避免none或空白响应
+                    return result
+            except Exception as e:
+                last_error = e
+                print(e)
+                time.sleep(10)
+        raise RuntimeError("OpenAI model returned no content after 3 attempts") from last_error

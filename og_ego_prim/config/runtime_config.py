@@ -794,10 +794,10 @@ class TaskConfig:
         )
 
 
-# 配置跨动作和跨子任务记忆的容量、检索器、归并方式及其扩展选项。
+# 保留旧 TaskMemory 的配置契约；当前 runtime 不构造该模块。
 @dataclass
 class MemoryConfig:
-    enabled: bool = True
+    enabled: bool = False
     max_actions: int = 50
     max_states_per_object: int = 20
     max_object_manipulations: int = 20
@@ -917,12 +917,11 @@ class SchedulerConfig:
         )
 
 
-# 配置运行时风险预测器是否启用、风险上下文提供者和处理模式。
+# 配置运行时风险预测器是否启用及其风险上下文提供者。
 @dataclass
 class RiskPredictorConfig:
     enabled: bool = True
     provider: str = "task_json"
-    mode: str = "enforce"
     provider_options: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -937,17 +936,11 @@ class RiskPredictorConfig:
         provider = str(
             options.pop("provider", options.pop("type", cls.provider))
         ).strip().lower()
-        mode = str(options.pop("mode", cls.mode)).strip().lower()
         if not provider:
             raise ValueError("risk.provider must not be empty")
-        if mode not in {"audit", "enforce", "disabled"}:
-            raise ValueError(
-                "risk.mode must be one of audit, enforce, disabled"
-            )
         return cls(
             enabled=enabled,
             provider=provider,
-            mode=mode,
             provider_options=options,
         )
 
@@ -955,24 +948,19 @@ class RiskPredictorConfig:
         return {
             "enabled": self.enabled,
             "provider": self.provider,
-            "mode": self.mode,
             **copy.deepcopy(self.provider_options),
         }
 
 
-# 配置供规划模型使用的提示词构建器、提示词组成部分和记忆召回数量。
+# 配置供规划模型使用的提示词构建器和提示词组成部分。
 @dataclass
 class PromptingConfig:
     builder: str = "semantic"
     sections: Tuple[str, ...] = (
         "task",
-        "scene",
-        "objects",
-        "memory",
         "timers",
         "action",
     )
-    max_recalled_items: int = 20
     options: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -985,9 +973,6 @@ class PromptingConfig:
         return cls(
             builder=str(_pop(mapping, "builder", cls.builder)),
             sections=tuple(str(item).strip() for item in sections if str(item).strip()),
-            max_recalled_items=int(
-                _pop(mapping, "max_recalled_items", cls.max_recalled_items)
-            ),
             options=dict(mapping.get("options") or {}),
         )
 

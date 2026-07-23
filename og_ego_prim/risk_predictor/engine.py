@@ -149,14 +149,8 @@ def _deduplicate_cautions(values: Iterable[Caution]) -> Tuple[Caution, ...]:
 class RiskEngine:
     """Recompute current hazards for every candidate action."""
 
-    MODES = frozenset({"audit", "enforce", "disabled"})
-
-    def __init__(self, provider: RiskProvider, *, mode: str = "enforce") -> None:
+    def __init__(self, provider: RiskProvider) -> None:
         self.provider = provider
-        normalized_mode = str(mode).strip().lower()
-        if normalized_mode not in self.MODES:
-            raise ValueError(f"risk mode must be one of {', '.join(sorted(self.MODES))}")
-        self.mode = normalized_mode
         self._active_hazards: Dict[str, Hazard] = {}
 
     @property
@@ -173,12 +167,6 @@ class RiskEngine:
         action: Optional[Action] = None,
     ) -> RiskEvaluation:
         current = RiskContext.from_value(context, action=action)
-        if self.mode == "disabled":
-            self.clear()
-            return RiskEvaluation(
-                decision=ActionDecision.ALLOW,
-                action=current.action,
-            )
         active: Dict[str, Hazard] = {}
         for draft in normalize_drafts(tuple(self.provider.assess(current) or ())):
             hazard = create_hazard(draft, action=current.action)
@@ -188,8 +176,7 @@ class RiskEngine:
             )
         self._active_hazards = active
         hazards = self.active_hazards
-        recommended = decision_for_hazards(hazards)
-        decision = recommended if self.mode == "enforce" else ActionDecision.ALLOW
+        decision = decision_for_hazards(hazards)
         common = _deduplicate_cautions(
             caution
             for hazard in hazards
@@ -203,7 +190,7 @@ class RiskEngine:
             if caution.kind == "specific"
         )
         reason = None
-        if recommended == ActionDecision.BLOCK:
+        if decision == ActionDecision.BLOCK:
             messages = [item.text for item in specific + common]
             if not messages:
                 messages = [hazard.name or hazard.hazard_type for hazard in hazards]

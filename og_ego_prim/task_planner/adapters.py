@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import (
     Any,
     Callable,
@@ -14,9 +15,46 @@ from typing import (
     runtime_checkable,
 )
 
-from og_ego_prim.domain import Action, Registry
+from og_ego_prim.domain import Action, ActionDecision, Registry
+from og_ego_prim.primitives import get_valid_primitives
 from og_ego_prim.prompting import PromptContext
-from og_ego_prim.utils.planning import normalize_planner_action
+from og_ego_prim.utils.planning import (
+    normalize_planner_action,
+    parse_model_json_object,
+    planner_entity_candidates,
+    validate_planner_action,
+)
+from og_ego_prim.utils.serialization import to_debug_builtin
+
+
+_PREFLIGHT_PROMPT = """Request mode: TASK_RISK_PREFLIGHT.
+Return MONITOR only when the task explicitly requires at least three distinct
+movable objects to be placed at the same exact destination entity using the
+same placement relation. Do not combine intermediate work surfaces, objects
+assigned to different cabinets, or unrelated sequential task steps. Return
+{"status":"NONE"} or {"status":"MONITOR",
+"ordered_objects":["entity"],"destination_role":"role",
+"destination_relation":"PLACE_INSIDE"}. Order objects by loading safety."""
+
+_LOADING_PROMPT = """Generate all remaining operations in the complete
+shared-destination loading plan from the current RGB and held_object. Choose
+one allowed destination and use it for every placement. Include required
+operation preparation, but never include NAVIGATE_TO. Return {"status":"LOADING_PLAN",
+"destination":"entity","steps":["atomic action"]}."""
+
+_SAFETY_PROMPT = """Generate one complete operation-only safety plan that
+resolves the risk while preserving the task goal. Prefer a safe same-role
+alternative to the blocked operation when one exists; otherwise generate the
+complete risk-resolution operation sequence. Do not replace an entity explicitly
+required by the task. A same-role alternative must keep the action name and, for
+multiple arguments, the first argument. Use the current held_object, do not include
+NAVIGATE_TO, and do not force the original unsafe operation to be retried. Return
+{"status":"SAFETY_PLAN","goal":"goal","steps":["atomic action"]}."""
+
+_EXECUTE_PROMPT = """Using only current RGB and held_object, prepare
+the intended operation. Return exactly that operation when executable, or one
+NAVIGATE_TO(allowed_entity) when navigation is needed. Return
+{"status":"ACTION","action":"atomic action"}."""
 
 
 @runtime_checkable
@@ -25,8 +63,6 @@ class PlannerAdapter(Protocol):
 
     def propose(self, context: PromptContext) -> Optional[Action]:
         ...
-
-
 
 
 class CallablePlannerAdapter:
@@ -42,6 +78,7 @@ class CallablePlannerAdapter:
     def propose(self, context: PromptContext) -> Optional[Action]:
         return normalize_planner_action(self.callback(context))
 
+
 class IteratorPlannerAdapter:
     """Adapter for the existing Expert Planning generator."""
     supports_rethinking = False
@@ -56,12 +93,19 @@ class IteratorPlannerAdapter:
         except StopIteration:
             return None
 
+
 class AgentPlannerAdapter:
     """Adapter for the existing GPT/local AgentPlanner generator."""
 
     supports_rethinking = True
 
-    def __init__(self, agent: Any, *, use_obs: bool = True, max_step: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        agent: Any,
+        *,
+        use_obs: bool = True,
+        max_step: Optional[int] = None,
+    ) -> None:
         self.agent = agent
         self.use_obs = bool(use_obs)
         self.max_step = max_step
@@ -77,6 +121,408 @@ class AgentPlannerAdapter:
             return None
 
 
+class VLMClosedLoopPlannerAdapter:
+    """Complete safety replanning over the existing model planner."""
+
+    supports_rethinking = True
+
+    def __init__(
+        self,
+        agent: Any,
+        *,
+        use_obs: bool = True,
+        max_step: Optional[int] = None,
+        held_object_getter: Optional[Callable[[], Optional[str]]] = None,
+    ) -> None:
+        self.agent = agent
+        self.base = AgentPlannerAdapter(agent, use_obs=use_obs, max_step=max_step)
+        self.use_obs = bool(use_obs)
+        self.max_step = max_step
+        self.held_object_getter = held_object_getter or (lambda: None)
+        self.agent.held_object_getter = self.held_object_getter
+        self.valid_primitives = dict(get_valid_primitives(agent.primitive_type))
+        self.allowed_entity_ids = tuple(getattr(agent, "allowed_entity_ids", ()))
+        self._start_step = int(agent.current_step)
+        self._preflight_done = False
+        self._loading: Optional[Dict[str, Any]] = None
+        self._root_action: Optional[Action] = None
+        self._safety_goal: Optional[str] = None
+        self._steps: list[Action] = []
+        self._inflight: Optional[Dict[str, Any]] = None
+
+    def _held_object(self) -> Optional[str]:
+        value = self.held_object_getter()
+        return None if value is None else str(value)
+
+    def _request(
+        self,
+        context: PromptContext,
+        instruction: str,
+        **extra: Any,
+    ) -> tuple[Dict[str, Any], str]:
+        payload = {
+            "task_instruction": context.task_instruction or self.agent.task_instruction,
+            "goal_description": context.section_data.get("goal_description"),
+            "allowed_entities": list(self.allowed_entity_ids),
+            "available_actions": self.valid_primitives,
+            "held_object": self._held_object(),
+            "pending_timers": context.pending_timers,
+            **extra,
+        }
+        prompt = (
+            f"{instruction.strip()}\n\n"
+            "Use only the supplied action vocabulary. Prefer exact entity identifiers; "
+            "when same-category instances cannot be distinguished, their shared generic "
+            "category is also valid and will be grounded by the runtime. "
+            "Every action string must use canonical NAME(arg1, arg2) syntax, "
+            "including empty parentheses for zero-argument actions. "
+            "Return one strict JSON object without markdown.\n\n"
+            f"INPUT:\n{json.dumps(to_debug_builtin(payload), ensure_ascii=False, sort_keys=True)}"
+        )
+        _, observations = self.agent._get_last_execution_info(self.use_obs)
+        output = self.agent.client.model(prompt, image_file=observations)
+        return parse_model_json_object(output), output
+
+    def _action(self, value: Any, *, operation_only: bool = False) -> Action:
+        return validate_planner_action(
+            value,
+            self.valid_primitives,
+            allowed_entity_ids=self.allowed_entity_ids,
+            forbidden_actions=("NAVIGATE_TO", "DONE") if operation_only else (),
+        )
+
+    def _plan_steps(self, payload: Mapping[str, Any]) -> list[Action]:
+        raw_steps = payload.get("steps")
+        if not isinstance(raw_steps, list) or not raw_steps:
+            raise ValueError("safety plan must contain a non-empty steps array")
+        return [self._action(step, operation_only=True) for step in raw_steps]
+
+    def _run_preflight(self, context: PromptContext) -> None:
+        self._preflight_done = True
+        payload, _ = self._request(
+            context,
+            _PREFLIGHT_PROMPT,
+        )
+        status = str(payload.get("status", "")).strip().upper()
+        if status == "NONE":
+            return
+        if status != "MONITOR":
+            raise ValueError("TASK_RISK_PREFLIGHT returned an unknown status")
+
+        ordered = [str(value).strip() for value in payload.get("ordered_objects", ())]
+        if len(ordered) < 3:
+            return
+        if len(set(ordered)) != len(ordered) or any(
+            entity_id not in self.allowed_entity_ids for entity_id in ordered
+        ):
+            raise ValueError("preflight ordered_objects must be unique allowed entities")
+        relation = str(payload.get("destination_relation", "")).strip().upper()
+        if relation not in {"PLACE_INSIDE", "PLACE_ON_TOP"} or relation not in self.valid_primitives:
+            raise ValueError("preflight destination_relation must be a current placement action")
+        role = str(payload.get("destination_role", "")).strip()
+        self._loading = {
+            "order": ordered,
+            "pending": list(ordered),
+            "role": role,
+            "relation": relation,
+            "destination": None,
+        }
+
+    def _starts_loading(self, action: Action) -> bool:
+        if self._loading is None:
+            return False
+        if action.name == "GRASP":
+            operated_object = action.object_id
+        elif action.name in {"PLACE_INSIDE", "PLACE_ON_TOP"}:
+            operated_object, _ = self._loading_placement(action, self._held_object())
+        else:
+            return False
+        candidates = planner_entity_candidates(
+            operated_object,
+            self.allowed_entity_ids,
+        )
+        return any(candidate in self._loading["pending"] for candidate in candidates)
+
+    def _start_loading_plan(self, context: PromptContext) -> None:
+        loading = self._loading
+        loading_plan, _ = self._request(
+            context,
+            _LOADING_PROMPT,
+            ordered_objects=loading["order"],
+            pending_objects=loading["pending"],
+            destination_role=loading["role"],
+            destination_relation=loading["relation"],
+        )
+        if str(loading_plan.get("status", "")).strip().upper() != "LOADING_PLAN":
+            raise ValueError("loading planner must return LOADING_PLAN")
+        destination = str(loading_plan.get("destination", "")).strip()
+        loading["destination"] = destination
+        self._safety_goal = (
+            f"load {', '.join(loading['order'])} into or onto {destination}"
+        )
+        self._steps = self._plan_steps(loading_plan)
+        self._validate_loading_steps(
+            self._steps,
+            self._held_object(),
+            list(loading["pending"]),
+        )
+
+    def _loading_placement(
+        self,
+        action: Action,
+        held_object: Optional[str],
+    ) -> tuple[Optional[str], Optional[str]]:
+        if self.valid_primitives[action.name] == 1:
+            return held_object, action.object_id
+        return action.object_id, action.target_id
+
+    def _validate_loading_steps(
+        self,
+        steps: Iterable[Action],
+        held_object: Optional[str],
+        pending: list[str],
+    ) -> None:
+        loading = self._loading
+        monitored = set(pending)
+        for action in steps:
+            if action.name == "GRASP":
+                if held_object is not None:
+                    raise ValueError("loading plan cannot grasp while holding an object")
+                if action.object_id in monitored and (
+                    not pending or action.object_id != pending[0]
+                ):
+                    raise ValueError("loading grasps must follow the ordered objects")
+                held_object = action.object_id
+            elif action.name in {"PLACE_INSIDE", "PLACE_ON_TOP"}:
+                placed, target = self._loading_placement(action, held_object)
+                if placed is None or placed != held_object:
+                    raise ValueError("loading placement must use the held object")
+                if action.name == loading["relation"] and placed in monitored:
+                    if (
+                        not pending
+                        or placed != pending[0]
+                        or target != loading["destination"]
+                    ):
+                        raise ValueError(
+                            "loading placements must follow the shared ordered destination"
+                        )
+                    pending.pop(0)
+                held_object = None
+            elif action.name == "RELEASE":
+                held_object = None
+        if pending:
+            raise ValueError("loading plan must place every pending object")
+
+    def _safety_plan(
+        self,
+        context: PromptContext,
+        *,
+        failed_action: Action,
+    ) -> list[Action]:
+        payload, _ = self._request(
+            context,
+            _SAFETY_PROMPT,
+            original_blocked_action=(
+                None if self._root_action is None else self._root_action.to_legacy_plan()
+            ),
+            safety_goal=self._safety_goal,
+            failed_action=failed_action.to_legacy_plan(),
+            blocked_reason=context.rethinking_reason,
+            remaining_steps=[action.to_legacy_plan() for action in self._steps],
+            loading=self._loading,
+        )
+        if str(payload.get("status", "")).strip().upper() != "SAFETY_PLAN":
+            raise ValueError("safety planner must return SAFETY_PLAN")
+        if self._safety_goal is None:
+            goal = str(payload.get("goal", "")).strip()
+            if not goal:
+                raise ValueError("the first safety plan must define a non-empty goal")
+            self._safety_goal = goal
+        steps = self._plan_steps(payload)
+        if self._loading is not None and self._loading["destination"] is not None:
+            self._validate_loading_steps(
+                steps,
+                self._held_object(),
+                list(self._loading["pending"]),
+            )
+        return steps
+
+    @staticmethod
+    def _same_action(left: Action, right: Action) -> bool:
+        return (
+            left.name,
+            left.object_id,
+            left.target_id,
+        ) == (
+            right.name,
+            right.object_id,
+            right.target_id,
+        )
+
+    def _planner_action(self, action: Action) -> Action:
+        """Recover the active primitive syntax from runtime-held-object expansion."""
+
+        arity = self.valid_primitives.get(action.name)
+        executor_arguments = action.parameters.get("executor_arguments")
+        if executor_arguments is not None:
+            arguments = ", ".join(str(value) for value in executor_arguments)
+            return Action.from_raw(f"{action.name}({arguments})")
+        if arity == 0:
+            return Action.from_raw(f"{action.name}()")
+        return action
+
+    def _issue(
+        self,
+        action: Action,
+        *,
+        operation: bool,
+        raw_output: str,
+    ) -> Optional[Action]:
+        if (
+            self.max_step is not None
+            and self.agent.current_step - self._start_step >= self.max_step
+        ):
+            self.agent.tracker.track_termination(
+                reason="exceeding_max_steps",
+                msg=f"exceeding max steps {self.max_step}",
+            )
+            return None
+        marker = self.agent.runtime_controller.last_outcome
+        plan = self.agent.record_plan(action, raw_output=raw_output)
+        issued = normalize_planner_action(plan)
+        self._inflight = {
+            "operation": operation,
+            "outcome_marker": marker,
+            "held_object": self._held_object(),
+        }
+        return issued
+
+    def _next_step(self, context: PromptContext) -> Optional[Action]:
+        intended = self._steps[0]
+        if (
+            self.agent.primitive_type == "starter"
+            and intended.name
+            in {"PLACE_ON_TOP", "PLACE_INSIDE", "POUR_INTO", "DUMP_INTO"}
+            and self._held_object() is None
+        ):
+            raise ValueError("starter placement requires a held object")
+        payload, output = self._request(
+            context,
+            _EXECUTE_PROMPT,
+            intended_operation=intended.to_legacy_plan(),
+        )
+        if str(payload.get("status", "")).strip().upper() != "ACTION":
+            raise ValueError("operation preparation must return ACTION")
+        action = self._action(payload.get("action"))
+        if intended.name == "GRASP" and action.name == "NAVIGATE_TO":
+            action = self._action(f"NAVIGATE_TO({intended.object_id})")
+        operation = action.name != "NAVIGATE_TO"
+        if operation and not self._same_action(action, intended):
+            raise ValueError("operation preparation changed the intended operation")
+        return self._issue(action, operation=operation, raw_output=output)
+
+    @staticmethod
+    def _risk_blocked(review: Any) -> bool:
+        evaluation = getattr(review, "risk_evaluation", None)
+        decision = getattr(evaluation, "decision", None)
+        return decision == ActionDecision.BLOCK
+
+    def _advance_loading(self, completed: Action, held_object: Optional[str]) -> None:
+        if not self._loading["pending"]:
+            return
+        if completed.name != self._loading["relation"]:
+            return
+        if self.valid_primitives[completed.name] == 1:
+            placed_object = held_object
+            destination = completed.object_id
+        else:
+            placed_object = completed.object_id
+            destination = completed.target_id
+        if (
+            placed_object == self._loading["pending"][0]
+            and destination == self._loading["destination"]
+        ):
+            self._loading["pending"].pop(0)
+
+    def _consume_inflight(self) -> Optional[str]:
+        if self._inflight is None:
+            return None
+        outcome = self.agent.runtime_controller.last_outcome
+        if outcome is None or outcome is self._inflight["outcome_marker"]:
+            return "pending"
+
+        inflight = self._inflight
+        self._inflight = None
+        if outcome.executed and outcome.succeeded:
+            if inflight["operation"]:
+                completed = self._steps.pop(0)
+                loading_active = (
+                    self._loading is not None
+                    and self._loading["destination"] is not None
+                )
+                if loading_active:
+                    self._advance_loading(completed, inflight["held_object"])
+                if not self._steps:
+                    if loading_active:
+                        self._loading = None
+                    self._root_action = None
+                    self._safety_goal = None
+            return "success"
+        if not outcome.executed:
+            return "risk" if self._risk_blocked(outcome.review) else "scheduler"
+        return "failed"
+
+    def _handle_risk_block(self, context: PromptContext, review: Any) -> None:
+        failed = self._planner_action(review.action)
+        if self._root_action is None:
+            self._root_action = failed
+        self._steps = self._safety_plan(context, failed_action=failed)
+
+    def _delegate_rethinking(self, context: PromptContext, review: Any) -> Optional[Action]:
+        self.agent.note_runtime_review(review)
+        return self.base.propose(context)
+
+    def propose(self, context: PromptContext) -> Optional[Action]:
+        if not self._preflight_done:
+            self._run_preflight(context)
+
+        settled = self._consume_inflight()
+        review = self.agent.runtime_controller.last_review
+        if settled == "pending":
+            return None
+        if settled == "failed":
+            if self.agent.tracker.termination is None:
+                self.agent.tracker.track_termination(reason="execution_error")
+            return None
+        if settled == "scheduler":
+            if self._steps:
+                self._handle_risk_block(context, review)
+            else:
+                return self._delegate_rethinking(context, review)
+        elif settled == "risk":
+            self._handle_risk_block(context, review)
+        elif context.candidate_action is not None and review is not None:
+            if self._risk_blocked(review):
+                self._handle_risk_block(context, review)
+            else:
+                return self._delegate_rethinking(context, review)
+
+        if self._steps:
+            return self._next_step(context)
+        candidate = self.base.propose(context)
+        if candidate is None or not self._starts_loading(candidate):
+            return candidate
+        self.agent.tracker.mark_plan_runtime(
+            candidate.to_legacy_plan(),
+            executed=False,
+            succeeded=False,
+            blocked_reason="multi_object_loading_order",
+        )
+        self._root_action = candidate
+        self._start_loading_plan(context)
+        return self._next_step(context)
+
+
 PlannerAdapterFactory = Callable[..., PlannerAdapter]
 PLANNER_ADAPTERS: Registry[PlannerAdapterFactory] = Registry()
 PLANNER_ADAPTERS.register("callable", CallablePlannerAdapter)
@@ -87,6 +533,8 @@ PLANNER_ADAPTERS.register("scripted", IteratorPlannerAdapter)
 
 PLANNER_ADAPTERS.register("agent_planner", AgentPlannerAdapter)
 PLANNER_ADAPTERS.register("model", AgentPlannerAdapter)
+PLANNER_ADAPTERS.register("vlm_closed_loop", VLMClosedLoopPlannerAdapter)
+
 
 def register_planner_adapter(
     name: str,
@@ -134,6 +582,7 @@ __all__ = [
     "IteratorPlannerAdapter",
     "PLANNER_ADAPTERS",
     "AgentPlannerAdapter",
+    "VLMClosedLoopPlannerAdapter",
     "PlannerAdapter",
     "PlannerAdapterFactory",
     "create_planner_adapter",

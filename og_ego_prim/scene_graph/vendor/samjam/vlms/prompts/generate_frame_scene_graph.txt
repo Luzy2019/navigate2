@@ -5,11 +5,12 @@ Include surfaces like kitchen counters as objects when necessary.
 When the image includes both hands, separate them into 2 separate objects.
 
 Prefer stable canonical object names when applicable. Use names such as
-apple, banana, tissue_box, cabinet, drawer, counter, kitchen_counter, table,
-stove, sink, refrigerator, door, box, shelf, trash_can, bin, bottle, and
+apple, banana, tissue_box, cabinet, drawer, countertop, table,
+stove, sink, electric_refrigerator, door, box, shelf, trash_can, bin, bottle, and
 robot_gripper. Normalize obvious aliases before responding, for example:
-tissue_box_box -> tissue_box, half_banana -> banana, black_slove or
-black_stove -> stove, and countertop -> kitchen_counter.
+tissue_box_box -> tissue_box, black_slove or black_stove -> stove,
+kitchen_counter or counter -> countertop, and refrigerator ->
+electric_refrigerator. Preserve specific subtypes such as half_banana.
 
 Express each bounding box as [y_min, x_min, y_max, x_max], with every coordinate
 normalized to an integer from 0 to 1000.

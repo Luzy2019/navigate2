@@ -14,11 +14,14 @@ OmniGibson environment，三个子任务之间不调用 `reset` 或重新加载 
 
 ## Memory Ablation
 
-- `with_memory`：T2/T3 prompt 保留先前任务指令和从 T1 开始的语义动作历史。
-- `without_memory`：每次切换任务时截断模型可见的历史，只提供当前观察、当前指令和当前
-  `G_task`。
-- 两种模式都保留完全相同的物理环境状态。`without_memory` 不是 scene reset，也不是删除危险
-  状态。
+- `with_memory`：构建并持续更新 `samjam_unigoal` scene graph，并为每个候选动作调用依赖该图的
+  VLM risk predictor。
+- `without_memory`：scene graph backend 为 `disabled`，不构图，也不调用依赖 scene graph 的
+  VLM risk predictor。
+- 两种模式的 planner 输入相同：当前 RGB、当前指令和 `G_task`、timer、held object 及风险反馈；
+  planner 不接收 scene graph 或旧 `TaskMemory`。
+- 两种模式都保留完全相同的物理环境、ObjectRegistry、scheduler timer 和执行 tracker 状态。
+  `without_memory` 不是 scene reset，也不会删除已经形成的危险状态。
 
 默认使用 `data/scenes/<scene>/json/<scene>_task_<task>_0_0_template.json`，从而固定成对运行的
 对象实例和初始状态。

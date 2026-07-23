@@ -47,8 +47,7 @@ def _identity_keys(value: Any) -> Tuple[str, ...]:
 
 def _node_id(node: Mapping[str, Any]) -> Optional[str]:
     value = (
-        node.get("task_object_id")
-        or node.get("entity_id")
+        node.get("entity_id")
         or node.get("id")
         or node.get("object_id")
         or node.get("label")
@@ -67,9 +66,6 @@ def _node_identity_values(
     *,
     include_semantic: bool = True,
 ) -> Tuple[Any, ...]:
-    aliases = node.get("aliases") or ()
-    if isinstance(aliases, str):
-        aliases = (aliases,)
     uid = node.get("uid")
     uid_id = None
     if uid is not None:
@@ -79,14 +75,11 @@ def _node_identity_values(
             uid_id = None
     stable = (
         canonical,
-        node.get("task_object_id"),
         node.get("entity_id"),
         node.get("id"),
         node.get("object_id"),
-        node.get("simulator_name"),
         uid,
         uid_id,
-        *aliases,
     )
     if not include_semantic:
         return stable
@@ -175,8 +168,7 @@ def _edge_endpoint(edge: Mapping[str, Any], role: str) -> Optional[Any]:
         value = edge.get(f"{role}_uid")
     if isinstance(value, Mapping):
         value = (
-            value.get("task_object_id")
-            or value.get("entity_id")
+            value.get("entity_id")
             or value.get("id")
             or value.get("object_id")
             or value.get("uid")

@@ -11,7 +11,6 @@ class RuntimeComponents:
     perception: Any
     objects: Any
     scheduler: Any
-    memory: Any
     planner: Any = None
     prompt_builder: Any = None
     executor: Any = None
