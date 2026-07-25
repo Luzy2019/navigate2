@@ -6,7 +6,7 @@
 **不在本报告的验证范围内**：在线 task planner、risk predictor、replan / rethink、动作执行成功率。  
 **证据运行**：`results/perception_gpt4o_shared_hot_water`（13 帧连续观测）。
 
-> 证据目录位于本机 `results/`，且被 Git 忽略；本文中的图片相对链接在保留该目录的工作区中可直接打开，但不会随本 Markdown 一并提交。
+> 本文使用的关键证据图已从被 Git 忽略的 `results/` 导出到 `share/images/samjam_unigoal_hot_water_v3/`，可随报告一并查看。
 
 ---
 
@@ -323,13 +323,13 @@ frame_<n>_matched_objs_rels.jpg
 
 | 证据 | 文件 | 说明 |
 |---|---|---|
-| 原始双瓶观测 | [000002.jpg](../results/perception_gpt4o_shared_hot_water/native_video_frames/000002.jpg) | 图中可见桌上两只瓶子 |
-| VLM 双瓶 bbox | [frame_2_vlm_bbox.jpg](../results/perception_gpt4o_shared_hot_water/vis_output/frame_2_vlm_bbox.jpg) | VLM 确实输出两个 `water_bottle` |
-| bbox-mask overlay | [frame_2_bbox_mask_matches.jpg](../results/perception_gpt4o_shared_hot_water/vis_output/frame_2_bbox_mask_matches.jpg) | 两个 bbox 对应的 mask 明显不可信 |
-| 最终 accepted masks | [frame_2_matched_masks.jpg](../results/perception_gpt4o_shared_hot_water/vis_output/frame_2_matched_masks.jpg) | 已进入 native graph 的 mask |
-| 碎裂开始 | [frame_3_bbox_mask_matches.jpg](../results/perception_gpt4o_shared_hot_water/vis_output/frame_3_bbox_mask_matches.jpg) | 新 native object 出现 |
-| 类别漂移 | [frame_5_bbox_mask_matches.jpg](../results/perception_gpt4o_shared_hot_water/vis_output/frame_5_bbox_mask_matches.jpg) | `water_bottle` 漂移为 `bottle` |
-| 局部 merge | [frame_6_bbox_mask_matches.jpg](../results/perception_gpt4o_shared_hot_water/vis_output/frame_6_bbox_mask_matches.jpg) | 一部分对象能重新 merge，另一部分继续新建 |
+| 原始双瓶观测 | [frame_2_native_rgb.jpg](images/samjam_unigoal_hot_water_v3/frame_2_native_rgb.jpg) | 图中可见桌上两只瓶子 |
+| VLM 双瓶 bbox | [frame_2_vlm_bbox.jpg](images/samjam_unigoal_hot_water_v3/frame_2_vlm_bbox.jpg) | VLM 确实输出两个 `water_bottle` |
+| bbox-mask overlay | [frame_2_bbox_mask_matches.jpg](images/samjam_unigoal_hot_water_v3/frame_2_bbox_mask_matches.jpg) | 两个 bbox 对应的 mask 明显不可信 |
+| 最终 accepted masks | [frame_2_matched_masks.jpg](images/samjam_unigoal_hot_water_v3/frame_2_matched_masks.jpg) | 已进入 native graph 的 mask |
+| 碎裂开始 | [frame_3_bbox_mask_matches.jpg](images/samjam_unigoal_hot_water_v3/frame_3_bbox_mask_matches.jpg) | 新 native object 出现 |
+| 类别漂移 | [frame_5_bbox_mask_matches.jpg](images/samjam_unigoal_hot_water_v3/frame_5_bbox_mask_matches.jpg) | `water_bottle` 漂移为 `bottle` |
+| 局部 merge | [frame_6_bbox_mask_matches.jpg](images/samjam_unigoal_hot_water_v3/frame_6_bbox_mask_matches.jpg) | 一部分对象能重新 merge，另一部分继续新建 |
 
 这些 overlay 是直接用实际 VLM bbox 和实际 SAM2 mask 绘制，不能解释为“绘图函数把正确框画偏了”。
 
@@ -338,6 +338,16 @@ frame_<n>_matched_objs_rels.jpg
 ## 6. 帧级证据：双瓶如何从首帧失真到 native / persistent map 增生
 
 ### 6.1 `frame 2`：原始图和 VLM 都有双瓶，但 SAM2 mask 不正确
+
+原始 RGB、VLM bbox、bbox-mask overlay 与最终接受的 mask 如下。四张图使用同一帧的实际输出；overlay 中的偏移来自匹配到的 SAM2 mask，而不是绘制过程。
+
+![frame 2 原始 RGB](images/samjam_unigoal_hot_water_v3/frame_2_native_rgb.jpg)
+
+![frame 2 VLM bbox](images/samjam_unigoal_hot_water_v3/frame_2_vlm_bbox.jpg)
+
+![frame 2 bbox-mask overlay](images/samjam_unigoal_hot_water_v3/frame_2_bbox_mask_matches.jpg)
+
+![frame 2 最终接受的 masks](images/samjam_unigoal_hot_water_v3/frame_2_matched_masks.jpg)
 
 该帧的 VLM 输出为一个 `table` 与两个 `water_bottle`：
 
@@ -378,6 +388,8 @@ samjam_object:227 -> unigoal_object:9  (new_object)
 
 ### 6.2 `frame 3`：native ID 切换，UniGoal 创建新的 map object
 
+![frame 3 bbox-mask overlay：碎裂开始](images/samjam_unigoal_hot_water_v3/frame_3_bbox_mask_matches.jpg)
+
 在后一帧中：
 
 ```text
@@ -393,6 +405,10 @@ samjam_object:227 -> unigoal_object:9  (new_object)
 `243`、`298` 都通过了该帧 filter，并被日志直接记录为 `new_object`；后续 mapping history 中保留了 `unigoal_object:8`、`:9`、`:10`、`:11` 四条 `water bottle` 记录。这里证明的是新 native source ID 进入 mapping、旧 source 未更新、persistent map history 均发生增生；由于日志没有候选来源，不能进一步断言 `243` / `298` 一定来自 propagation 失败或重新采样替代。也不将 `scene_graph_output/*.json` 的 native 数量误写成 persistent map object 数量。
 
 ### 6.3 `frame 5` / `frame 6`：类别漂移进一步削弱合并
+
+![frame 5 bbox-mask overlay：类别漂移](images/samjam_unigoal_hot_water_v3/frame_5_bbox_mask_matches.jpg)
+
+![frame 6 bbox-mask overlay：局部 merge](images/samjam_unigoal_hot_water_v3/frame_6_bbox_mask_matches.jpg)
 
 ```text
 frame 5
