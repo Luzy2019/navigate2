@@ -5,7 +5,8 @@ includes:
 # itself has no Heated state. Keep cooling pending until its configured deadline.
 scheduler:
   handler_options:
-    wait_action_steps: 6000
+    wait_action_steps: 1
+    semantic_wait_completes_matching_timer: true
   process_definitions:
     - process_type: cooling
       duration_steps: 7200

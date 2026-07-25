@@ -265,6 +265,30 @@ class AgentRuntimeController:
         self._pending_scheduler_state_changes.clear()
         return changes
 
+    def _complete_semantic_wait_timers(self, action: Action) -> None:
+        """Clear matching cooling timers for the opt-in test-only WAIT shortcut."""
+        executor = self.components.executor
+        if (
+            action.name != "WAIT"
+            or not bool(getattr(executor, "semantic_wait_completes_matching_timer", False))
+        ):
+            return
+        for process in self.components.scheduler.pending_for(
+            action.entity_ids,
+            process_type="cooling",
+        ):
+            update = self.components.scheduler.cancel(
+                process.process_id,
+                reason="semantic_wait_completed",
+            )
+            if update is None:
+                continue
+            self._emit(
+                "temporal_process_updated",
+                entity_ids=update.entity_ids,
+                details={"update": update.to_dict()},
+            )
+
     def _visible_timers(self) -> Tuple[Any, ...]:
         pending = tuple(self.components.scheduler.pending_for())
         if not self._timer_visibility_restricted:
@@ -671,6 +695,7 @@ class AgentRuntimeController:
                         ),
                     },
                 )
+            self._complete_semantic_wait_timers(review.action)
             # The action may itself have advanced enough simulator frames to
             # complete a timer (notably WAIT / WAIT_FOR_*). Poll before the
             # evaluator observes the post-action state.

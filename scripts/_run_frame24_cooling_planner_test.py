@@ -13,7 +13,7 @@ from og_ego_prim.cli.headless_manual_physical_session import PersistentPhysicalS
 from og_ego_prim.scheduler import ProcessStatus, ScheduledProcess
 
 
-SESSION_DIR = Path("outputs/hwct9")
+SESSION_DIR = Path("outputs/hwct10")
 CHECKPOINT = Path("outputs/hwct3/frame_000024_cooling_backfill.pt")
 ANNOTATION = Path("outputs/hwct3/frame_000024_no_change.json")
 

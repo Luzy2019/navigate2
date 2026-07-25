@@ -140,6 +140,12 @@ class Executor:
         )
         if self.temporal_wait_steps <= 0:
             raise ValueError("scheduler.handler_options.wait_action_steps must be positive")
+        self.semantic_wait_completes_matching_timer = bool(
+            self.runtime_config.scheduler.handler_options.get(
+                "semantic_wait_completes_matching_timer",
+                False,
+            )
+        )
         self._active_cooked_particle_expectations: Dict[
             Tuple[int, str], Dict[str, Any]
         ] = {}
@@ -693,7 +699,12 @@ class Executor:
             else {}
         )
         try:
-            for _ in range(self.temporal_wait_steps):
+            wait_steps = (
+                1
+                if primitive_name == "WAIT" and self.semantic_wait_completes_matching_timer
+                else self.temporal_wait_steps
+            )
+            for _ in range(wait_steps):
                 yield self.get_hold_action()
             if primitive_name == "WAIT_FOR_COOKED":
                 readiness = self._cooked_or_heated_readiness(object_refs[0])
