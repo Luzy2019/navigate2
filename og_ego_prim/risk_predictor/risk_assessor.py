@@ -32,7 +32,8 @@ def _base_entity_alias(value: Any) -> str:
 
 def _node_name(node: Mapping[str, Any]) -> str:
     return str(
-        node.get("label")
+        node.get("entity_id")
+        or node.get("label")
         or node.get("name")
         or node.get("caption")
         or node.get("id")
@@ -41,6 +42,8 @@ def _node_name(node: Mapping[str, Any]) -> str:
 
 def _node_aliases(node: Mapping[str, Any]) -> Tuple[str, ...]:
     values = (
+        node.get("entity_id"),
+        node.get("source_object_id"),
         node.get("id"),
         node.get("label"),
         node.get("name"),
@@ -432,6 +435,8 @@ class RiskAssessor:
             raise TypeError("held_object_getter must be callable")
         self.client = client
         self.held_object_getter = held_object_getter
+        self.last_prompt: Optional[str] = None
+        self.last_raw_response: Optional[str] = None
 
     def __call__(self, context: RiskContext) -> Tuple[HazardDraft, ...]:
         if not isinstance(context, RiskContext):
@@ -470,7 +475,10 @@ class RiskAssessor:
                 adjacency,
             ),
         )
-        response = parse_model_json_object(self.client.model(prompt))
+        self.last_prompt = prompt
+        raw_response = self.client.model(prompt)
+        self.last_raw_response = str(raw_response)
+        response = parse_model_json_object(raw_response)
         if not isinstance(response, Mapping):
             raise RuntimeError("risk predictor response must be a JSON object")
         return _drafts_from_response(response, context)

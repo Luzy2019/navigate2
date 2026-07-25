@@ -88,6 +88,8 @@ class SceneGraphNode:
     room_id: Optional[Any] = None
     group: Optional[str] = None
     role: Optional[str] = None
+    entity_id: Optional[str] = None
+    source_object_id: Optional[str] = None
 
     # Legacy input aliases.  They are accepted so older updaters can keep
     # constructing nodes, but they are intentionally not emitted in v2 output.
@@ -133,6 +135,8 @@ class SceneGraphNode:
                 "room_id": self.room_id,
                 "group": self.group,
                 "role": self.role,
+                "entity_id": self.entity_id,
+                "source_object_id": self.source_object_id,
             }
         )
 
@@ -269,7 +273,12 @@ class SceneGraphSnapshot:
                     for key, value in sorted((node.get("states") or {}).items())
                 )
                 visible_text = "visible" if node.get("is_vis") else "not_visible"
-                label = node.get("label") or node.get("name") or node.get("id")
+                label = (
+                    node.get("entity_id")
+                    or node.get("label")
+                    or node.get("name")
+                    or node.get("id")
+                )
                 if state_text:
                     lines.append(f"- {label}: {visible_text}, {state_text}")
                 else:

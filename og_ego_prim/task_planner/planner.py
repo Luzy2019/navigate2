@@ -520,9 +520,20 @@ class AgentPlanner:
             and last_record.get("succeeded") is True
         ):
             return False
-        last_action = last_record["plan"]["action"].strip().lower()
-        expected_action = f"navigate_to({target.strip().lower()})"
-        return last_action == expected_action
+        try:
+            last_action = Action.from_raw(last_record["plan"]["action"])
+        except (TypeError, ValueError):
+            return False
+        if last_action.name != "NAVIGATE_TO" or last_action.object_id is None:
+            return False
+
+        previous_candidates = set(
+            planner_entity_candidates(last_action.object_id, self.allowed_entity_ids)
+        )
+        target_candidates = set(
+            planner_entity_candidates(target, self.allowed_entity_ids)
+        )
+        return len(previous_candidates & target_candidates) == 1
 
     def generate_caption(self, use_obs=True) -> str:
         _, obs = self._get_last_execution_info(use_obs)

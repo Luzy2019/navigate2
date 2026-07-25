@@ -145,6 +145,9 @@ class OnlineBenchmark(Benchmark):
         self.scene_graph_updater = PerceptionSceneGraphUpdater(
             scene_graph_config=self.runtime_config.scene_graph,
         )
+        self.scene_graph_updater.set_task_entities(
+            (config.get("planning_context") or {}).get("object_list") or ()
+        )
         self.scene_graph_updater.set_task_categories(
             planner_prompt_entity_ids(
                 (config.get("planning_context") or {}).get("object_list") or ()

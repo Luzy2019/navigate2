@@ -1,5 +1,5 @@
 import re
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from og_ego_prim.primitives.executor import LowLevelStepContext
@@ -129,12 +129,15 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
         self.update_every = int(update_every or self.scene_graph_config.update_every)
         if self.update_every <= 0:
             raise ValueError("scene_graph.update_every must be greater than zero")
+        if self.backend_name.lower() == "manual_corrected" and self.update_every != 1:
+            raise ValueError("manual_corrected requires scene_graph.update_every=1")
         self.sensor_name = sensor_name or self.scene_graph_config.sensor_name
         
         self.env = None
         self.global_step_index = 0
         self.latest_result: Optional[PerceptionResult] = None
         self.task_instruction: Optional[str] = None
+        self.task_entity_ids: Tuple[str, ...] = ()
         self.snapshot = SceneGraphSnapshot(
             step_index=-1, primitive_name=None, raw_plan=None
         )
@@ -253,6 +256,15 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
     def set_task_categories(self, categories) -> None:
         if self.backend is not None and hasattr(self.backend, "set_task_categories"):
             self.backend.set_task_categories(categories)
+
+    def set_task_entities(self, entity_ids) -> None:
+        """Provide exact task instance IDs to backends that need stable bindings."""
+
+        self.task_entity_ids = tuple(
+            dict.fromkeys(str(value).strip() for value in entity_ids if str(value).strip())
+        )
+        if self.backend is not None and hasattr(self.backend, "set_task_entities"):
+            self.backend.set_task_entities(self.task_entity_ids)
 
     def state_changes(
         self,
@@ -755,7 +767,9 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
             room=room_name,
             room_id=room_id,
             group=group_name,
-            role=attrs.get("role"),
+            role=attrs.get("role") or attrs.get("entity_id"),
+            entity_id=attrs.get("entity_id"),
+            source_object_id=str(obj.object_id),
         )
 
     def _assign_stable_labels(self, nodes: List[SceneGraphNode]) -> None:

@@ -173,8 +173,9 @@ class ObjectRegistry:
         step = int(payload.get("step_index") or summary.get("global_step_index") or 0)
         updated: List[ObjectRecord] = []
         for room_id, node in _scene_nodes(payload):
+            explicit_entity_id = str(node.get("entity_id") or "").strip()
             entity_id = (
-                node.get("entity_id")
+                explicit_entity_id
                 or node.get("id")
                 or node.get("object_id")
                 or node.get("label")
@@ -194,13 +195,14 @@ class ObjectRegistry:
                     if value is not None and str(value).strip()
                 )
             )
-            resolved = None
-            for alias in aliases:
-                candidate = self.resolver.resolve(alias, strict=False)
-                if candidate is not None:
-                    resolved = candidate
-                    break
-            entity_id = resolved or str(entity_id)
+            if not explicit_entity_id:
+                resolved = None
+                for alias in aliases:
+                    candidate = self.resolver.resolve(alias, strict=False)
+                    if candidate is not None:
+                        resolved = candidate
+                        break
+                entity_id = resolved or str(entity_id)
             last_seen = node.get("last_seen_step")
             if last_seen is None and node.get("is_vis", node.get("visible", True)):
                 last_seen = step

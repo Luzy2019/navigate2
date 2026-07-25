@@ -184,6 +184,7 @@ class AgentRuntimeController:
             if not bool(node.get("is_vis", node.get("visible", True))):
                 continue
             identities = (
+                node.get("entity_id"),
                 node.get("id"),
                 node.get("object_id"),
                 node.get("label"),

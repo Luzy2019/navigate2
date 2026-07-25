@@ -72,9 +72,9 @@ parser.add_argument(
 )
 parser.add_argument(
     '--scene_graph_backend',
-    choices=('disabled', 'none', 'omnigibson_truth', 'unigoal_grounded_sam', 'samjam_sam2', 'samjam_unigoal'),
+    choices=('disabled', 'none', 'omnigibson_truth', 'manual_corrected', 'unigoal_grounded_sam', 'samjam_sam2', 'samjam_unigoal'),
     default=None,
-    help='Scene graph source. GroundedSAM and SAM2 require their optional perception dependencies.',
+    help='Scene graph source. manual_corrected consumes approved native-frame annotations; GroundedSAM and SAM2 require optional perception dependencies.',
 )
 parser.add_argument('--use_initial_setup', action='store_true', default=None)
 parser.add_argument('--use_self_caption', action='store_true', default=None)
