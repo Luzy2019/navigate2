@@ -96,7 +96,10 @@ class GlobalSceneGraphAccumulator:
         summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
         frame_index = int(summary.get("frame_index", payload.get("step_index", 0)) or 0)
         annotation_mode = _annotation_mode(snapshot)
-        frame_is_empty_update = annotation_mode == "no_new_nodes"
+        frame_is_empty_update = annotation_mode in {
+            "no_new_nodes",
+            "no_current_frame_updates",
+        }
         if not frame_is_empty_update:
             for node in self._nodes.values():
                 node["is_vis"] = False
@@ -182,6 +185,7 @@ class GlobalSceneGraphAccumulator:
             elif action_name == "GRASP":
                 states["held_by_robot"] = True
                 self._remove_move_relations(object_id)
+                self._remove_move_relation_state_keys(object_id)
             elif action_name in {"RELEASE", "PLACE_ON_TOP", "PLACE_INSIDE"}:
                 states["held_by_robot"] = False
 
@@ -191,6 +195,7 @@ class GlobalSceneGraphAccumulator:
         }.get(action_name)
         if relation and object_id is not None and target_id is not None:
             self._remove_move_relations(object_id)
+            self._remove_move_relation_state_keys(object_id)
             self._edges[_edge_key(object_id, relation, target_id)] = {
                 "source": object_id,
                 "target": target_id,
@@ -201,6 +206,41 @@ class GlobalSceneGraphAccumulator:
 
         self._last_action = action_text
         self._action_history.append(action_text)
+        return self.snapshot()
+
+    def apply_state_changes(self, changes: Iterable[Any]) -> SceneGraphSnapshot:
+        """Apply explicit derived state changes without overwriting action effects."""
+
+        for change in changes:
+            entity_id = str(getattr(change, "entity_id", "") or "").strip()
+            key = str(getattr(change, "key", "") or "").strip()
+            if not entity_id or not key or key.startswith("relation:"):
+                continue
+            node_id = self._resolve_action_entity(entity_id)
+            if node_id is None:
+                continue
+            self._nodes[node_id].setdefault("states", {})[key] = deepcopy(
+                getattr(change, "new", None)
+            )
+        return self.snapshot()
+
+    def apply_missing_object_registry_states(self, registry: Any) -> SceneGraphSnapshot:
+        """Backfill only states absent from a legacy checkpoint's global graph."""
+
+        records = registry.snapshot() if callable(getattr(registry, "snapshot", None)) else ()
+        for record in records:
+            entity_id = str(getattr(record, "entity_id", "") or "").strip()
+            node_id = self._resolve_action_entity(entity_id)
+            if node_id is None:
+                continue
+            states = getattr(record, "states", None)
+            if isinstance(states, Mapping):
+                target_states = self._nodes[node_id].setdefault("states", {})
+                for key, value in states.items():
+                    state_key = str(key)
+                    if state_key.startswith("relation:"):
+                        continue
+                    target_states.setdefault(state_key, deepcopy(value))
         return self.snapshot()
 
     def snapshot(self) -> SceneGraphSnapshot:
@@ -249,6 +289,40 @@ class GlobalSceneGraphAccumulator:
             },
         )
 
+    def to_state(self) -> Dict[str, Any]:
+        """Return the complete remembered graph for checkpoint persistence."""
+
+        return {
+            "schema_version": "isbench.global_scene_graph_accumulator.v1",
+            "nodes": deepcopy(self._nodes),
+            "edges": deepcopy(self._edges),
+            "global_id_by_identity": dict(self._global_id_by_identity),
+            "room_id_by_name": dict(self._room_id_by_name),
+            "next_uid": self._next_uid,
+            "frame_index": self._frame_index,
+            "action_history": list(self._action_history),
+            "last_action": self._last_action,
+        }
+
+    def load_state(self, state: Mapping[str, Any]) -> None:
+        """Restore a state emitted by :meth:`to_state`."""
+
+        if state.get("schema_version") != "isbench.global_scene_graph_accumulator.v1":
+            raise ValueError("unsupported global scene graph checkpoint")
+        self._nodes = deepcopy(dict(state.get("nodes") or {}))
+        self._edges = {
+            _edge_key(*key) if isinstance(key, tuple) else tuple(key): deepcopy(value)
+            for key, value in dict(state.get("edges") or {}).items()
+        }
+        self._global_id_by_identity = dict(state.get("global_id_by_identity") or {})
+        self._room_id_by_name = dict(state.get("room_id_by_name") or {})
+        self._next_uid = int(state.get("next_uid") or 1)
+        self._frame_index = int(state.get("frame_index") or -1)
+        self._action_history = list(state.get("action_history") or [])
+        last_action = state.get("last_action")
+        self._last_action = None if last_action is None else str(last_action)
+        self._remove_stale_relation_state_keys()
+
     def _resolve_action_entity(self, value: Any) -> Optional[str]:
         raw = str(value or "").strip()
         if not raw:
@@ -269,6 +343,27 @@ class GlobalSceneGraphAccumulator:
                 continue
             if str(edge["type"]).strip().lower() in _RELATIONS_REPLACED_BY_MOVE:
                 self._edges.pop(key)
+
+    def _remove_move_relation_state_keys(self, source: str) -> None:
+        states = self._nodes[source].get("states") or {}
+        for key in tuple(states):
+            parts = str(key).split(":", 2)
+            if len(parts) != 3 or parts[0] != "relation":
+                continue
+            if parts[1].strip().lower() in _RELATIONS_REPLACED_BY_MOVE:
+                states.pop(key)
+
+    def _remove_stale_relation_state_keys(self) -> None:
+        for source, node in self._nodes.items():
+            states = node.get("states") or {}
+            for key in tuple(states):
+                parts = str(key).split(":", 2)
+                if len(parts) != 3 or parts[0] != "relation":
+                    continue
+                relation = parts[1].strip().lower()
+                target = self._resolve_action_entity(parts[2])
+                if target is None or _edge_key(source, relation, target) not in self._edges:
+                    states.pop(key)
 
 
 __all__ = ["GlobalSceneGraphAccumulator"]

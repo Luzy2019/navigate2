@@ -1,0 +1,14 @@
+includes:
+  - eval_safe_memory_hot_water_manual.yaml
+
+# Test-only: water_bottle.n.01_1 holds heated water particles, while the bottle
+# itself has no Heated state. Keep cooling pending until its configured deadline.
+scheduler:
+  handler_options:
+    wait_action_steps: 6000
+  process_definitions:
+    - process_type: cooling
+      duration_steps: 7200
+      readiness_predicate: cooling_timer_elapsed
+      completion_effects: {}
+      blocking_actions: []

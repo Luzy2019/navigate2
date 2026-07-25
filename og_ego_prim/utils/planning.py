@@ -98,12 +98,12 @@ def planner_prompt_entity_ids(
     entity_ids: Iterable[str],
     task_instruction: Any = "",
 ) -> Tuple[str, ...]:
-    """Return category-level entity names for planner-visible prompts."""
+    """Return exact task entity identifiers for planner-visible prompts."""
 
     del task_instruction
     visible = []
     for value in entity_ids:
-        name = str(redact_bddl_instance_ids(value)).strip()
+        name = str(value).strip()
         if name and name not in visible:
             visible.append(name)
     return tuple(visible)
@@ -198,14 +198,15 @@ def validate_planner_action(
     )
     entity_arguments = tuple(action.arguments)
     if allowed:
-        unknown = [
+        ambiguous = [
             entity_id
             for entity_id in entity_arguments
-            if not planner_entity_candidates(entity_id, allowed)
+            if len(planner_entity_candidates(entity_id, allowed)) != 1
         ]
-        if unknown:
+        if ambiguous:
             raise ValueError(
-                "action contains entities outside the allowed set: " + ", ".join(unknown)
+                "action must use one exact allowed entity per argument: "
+                + ", ".join(ambiguous)
             )
     parameters = dict(action.parameters)
     parameters["arguments"] = list(entity_arguments)

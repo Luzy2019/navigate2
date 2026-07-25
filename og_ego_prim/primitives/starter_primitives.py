@@ -517,6 +517,108 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                 continue
         return changed
 
+    def synchronize_after_state_restore(self):
+        """Align controller hold targets with a restored physical checkpoint."""
+        try:
+            joint_positions = self.robot.get_joint_positions().clone()
+        except Exception:
+            return False
+
+        if self._fixed_navigation_joint_indices is not None:
+            self._fixed_navigation_joint_positions = joint_positions[
+                self._fixed_navigation_joint_indices
+            ].clone()
+        self._pin_current_arm_targets_for_navigation()
+        return True
+
+    def restore_symbolic_carry_after_state_restore(self, obj=None, carry_checkpoint=None):
+        """Recreate the controller-only state required by symbolic carrying.
+
+        OmniGibson serializes the robot's assisted-grasp bookkeeping, but not
+        this primitive's Python ``_symbolic_carry_state``.  Without rebuilding
+        it, later hold/navigation frames leave a symbolically grasped object
+        subject to gravity even though the robot still reports it in hand.
+        """
+        arm = str((carry_checkpoint or {}).get("arm") or self.arm)
+        if obj is None:
+            try:
+                obj = self.robot._ag_obj_in_hand[arm]
+            except Exception:
+                return False
+        if obj is None:
+            return False
+
+        # Rebuild all assisted-grasp and collision bookkeeping instead of
+        # merely restoring the Python pose cache.  A serialized checkpoint can
+        # retain ``_ag_obj_in_hand`` while omitting its constraint parameters;
+        # that otherwise causes the first navigation step to auto-release it.
+        eef_pos = self.robot.eef_links[arm].get_position_orientation()[0]
+        particle_states = self._restore_symbolic_carried_particle_states(
+            obj,
+            carry_checkpoint,
+        )
+        self._force_symbolic_grasp_constraint(
+            obj,
+            eef_pos,
+            particle_states=particle_states,
+        )
+        if carry_checkpoint is not None:
+            carry_state = self._symbolic_carry_state
+            for key in ("eef_to_obj_pos", "eef_to_obj_orn"):
+                value = carry_checkpoint.get(key)
+                if value is not None:
+                    carry_state[key] = torch.as_tensor(value, dtype=torch.float32).clone()
+            self._sync_symbolic_carried_object_to_eef()
+        return self._symbolic_carry_active()
+
+    def synchronize_symbolic_carry(self):
+        """Pin a held symbolic object to the current end-effector pose."""
+        self._sync_symbolic_carried_object_to_eef()
+        return self._symbolic_carry_active()
+
+    def symbolic_carry_diagnostics(self):
+        """Return the live carried-object pose error for checkpoint auditing."""
+        if not self._symbolic_carry_active():
+            return None
+        carry_state = self._symbolic_carry_state
+        obj = carry_state["obj"]
+        arm = carry_state["arm"]
+        eef_pos, eef_orn = self.robot.eef_links[arm].get_position_orientation()
+        expected_pos, expected_orn = T.pose_transform(
+            eef_pos, eef_orn, carry_state["eef_to_obj_pos"], carry_state["eef_to_obj_orn"]
+        )
+        actual_pos, actual_orn = obj.get_position_orientation()
+        return {
+            "object_name": obj.name,
+            "eef_position": eef_pos.detach().cpu().tolist(),
+            "expected_position": expected_pos.detach().cpu().tolist(),
+            "actual_position": actual_pos.detach().cpu().tolist(),
+            "position_error": float(torch.linalg.norm(actual_pos - expected_pos).item()),
+            "orientation_error": float(min(
+                torch.linalg.norm(actual_orn - expected_orn).item(),
+                torch.linalg.norm(actual_orn + expected_orn).item(),
+            )),
+        }
+
+    def symbolic_carry_checkpoint(self):
+        """Serialize only the stable, simulator-independent carry transform."""
+        if not self._symbolic_carry_active():
+            return None
+        carry_state = self._symbolic_carry_state
+        return {
+            "arm": carry_state["arm"],
+            "object_name": carry_state["obj"].name,
+            "eef_to_obj_pos": carry_state["eef_to_obj_pos"].detach().cpu().clone(),
+            "eef_to_obj_orn": carry_state["eef_to_obj_orn"].detach().cpu().clone(),
+            "particle_states": self._symbolic_carried_particle_checkpoint(
+                carry_state.get("particle_states", [])
+            ),
+        }
+
+    def has_symbolic_carry_state(self):
+        """Report whether controller-only symbolic carry state is still retained."""
+        return self._symbolic_carry_state is not None
+
     def _apply_grasp_without_default_reset(self, obj):
         if self.symbolic_grasp:
             grasp_pose, preferred_goal_direction = yield from (
@@ -2772,6 +2874,67 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             sys.stdout.flush()
         return particle_states
 
+    @staticmethod
+    def _symbolic_carried_particle_checkpoint(particle_states):
+        return [
+            {
+                "system_name": state["system"].name,
+                "local_positions": state["local_positions"].detach().cpu().clone(),
+                "velocities": state["velocities"].detach().cpu().clone(),
+                "orientations": state["orientations"].detach().cpu().clone(),
+                "scales": state["scales"].detach().cpu().clone(),
+                "prototype_indices": state["prototype_indices"].detach().cpu().clone(),
+                "instancer_idn": int(state["instancer_idn"]),
+                "particle_group": int(state["particle_group"]),
+                "suspended": bool(state.get("suspended", False)),
+            }
+            for state in particle_states
+        ]
+
+    def _restore_symbolic_carried_particle_states(self, obj, carry_checkpoint):
+        if not carry_checkpoint:
+            return []
+        restored = []
+        for checkpoint in carry_checkpoint.get("particle_states", []):
+            system_name = str(checkpoint.get("system_name") or "").strip()
+            if not system_name:
+                raise ValueError("symbolic carry particle checkpoint has no system name")
+            system = obj.scene.get_system(system_name, force_init=True)
+            instancer_idn = int(checkpoint.get("instancer_idn", 0))
+            instancer_name = system.particle_instancer_idn_to_name(
+                idn=instancer_idn
+            )
+            local_positions = torch.as_tensor(
+                checkpoint["local_positions"], dtype=torch.float32
+            ).clone()
+            restored.append(
+                {
+                    "system": system,
+                    "instancer": getattr(system, "particle_instancers", {}).get(
+                        instancer_name
+                    ),
+                    "instancer_particle_count": int(system.n_particles),
+                    "instancer_idn": instancer_idn,
+                    "indices": torch.empty(0, dtype=torch.long),
+                    "local_positions": local_positions,
+                    "velocities": torch.as_tensor(
+                        checkpoint["velocities"], dtype=torch.float32
+                    ).clone(),
+                    "orientations": torch.as_tensor(
+                        checkpoint["orientations"], dtype=torch.float32
+                    ).clone(),
+                    "scales": torch.as_tensor(
+                        checkpoint["scales"], dtype=torch.float32
+                    ).clone(),
+                    "prototype_indices": torch.as_tensor(
+                        checkpoint["prototype_indices"], dtype=torch.long
+                    ).clone(),
+                    "particle_group": int(checkpoint.get("particle_group", 0)),
+                    "suspended": bool(checkpoint.get("suspended", False)),
+                }
+            )
+        return restored
+
     def _suspend_symbolic_carried_particles(self, particle_states):
         """Remove carried rows from PhysX while retaining a complete payload."""
         if not particle_states:
@@ -2808,12 +2971,17 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                 "particle_count": int(instancer.n_particles),
             }
             try:
-                system.remove_particles(idxs=indices)
+                system.remove_particles(
+                    idxs=indices,
+                    instancer_idn=particle_state["instancer_idn"],
+                )
                 if int(system.n_particles) != expected_count:
                     raise RuntimeError(
                         "particle suspension removed an incomplete payload: "
                         f"expected {expected_count}, got {int(system.n_particles)}"
                     )
+                if expected_count == 0:
+                    system.remove_particle_instancer(name=instancer.name)
             except Exception as exc:
                 rollback_error = None
                 if int(system.n_particles) != instancer_snapshot["particle_count"]:
@@ -2871,6 +3039,10 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                     },
                 ) from exc
             particle_state["suspended"] = True
+            if expected_count == 0:
+                particle_state["instancer"] = None
+                particle_state["instancer_particle_count"] = 0
+                particle_state["indices"] = torch.empty(0, dtype=torch.long)
             print(
                 "[starter][grasp][particle_suspension] "
                 f"system={system.name} count={int(indices.numel())} "

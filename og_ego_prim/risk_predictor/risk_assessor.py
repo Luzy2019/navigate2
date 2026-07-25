@@ -290,6 +290,74 @@ def _task_text(task: Any) -> str:
     return str(payload)
 
 
+def _format_scheduler(scheduler: Any) -> str:
+    """Render live pending temporal processes for the risk model."""
+    if scheduler is None:
+        return "Time scheduler is unavailable. Do not infer timers or remaining time."
+
+    payload = scheduler.to_dict() if callable(getattr(scheduler, "to_dict", None)) else scheduler
+    if not isinstance(payload, Mapping):
+        return "Time scheduler is unavailable. Do not infer timers or remaining time."
+
+    current_step = payload.get("step")
+    if current_step is None:
+        clock = payload.get("clock")
+        if isinstance(clock, Mapping):
+            current_step = clock.get("step")
+    if current_step is None:
+        clock = getattr(scheduler, "clock", None)
+        current_step = getattr(clock, "step", None)
+    try:
+        current_step = None if current_step is None else int(current_step)
+    except (TypeError, ValueError):
+        current_step = None
+
+    pending = payload.get("pending")
+    if pending is None and callable(getattr(scheduler, "pending_for", None)):
+        pending = scheduler.pending_for()
+    if not isinstance(pending, Iterable) or isinstance(pending, (str, bytes, Mapping)):
+        pending = ()
+
+    lines = ["Time scheduler (authoritative temporal state):"]
+    lines.append(f"- current_step: {current_step if current_step is not None else 'unknown'}")
+    records = []
+    for process in pending:
+        record = process.to_dict() if callable(getattr(process, "to_dict", None)) else process
+        if isinstance(record, Mapping):
+            records.append(record)
+    if not records:
+        lines.append("- pending_processes: none")
+        return "\n".join(lines)
+
+    lines.append("- pending_processes:")
+    for record in records:
+        ready_step = record.get("ready_step")
+        try:
+            ready_step = None if ready_step is None else int(ready_step)
+        except (TypeError, ValueError):
+            ready_step = None
+        remaining = (
+            "unknown"
+            if current_step is None or ready_step is None
+            else str(max(0, ready_step - current_step))
+        )
+        entity_ids = ", ".join(_entity_values(record.get("entity_ids"))) or "global"
+        blocking_actions = ", ".join(_entity_values(record.get("blocking_actions"))) or "none"
+        lines.append(
+            "  - "
+            f"process_id={record.get('process_id')}; "
+            f"type={record.get('process_type')}; "
+            f"entities={entity_ids}; "
+            f"status={record.get('status')}; "
+            f"start_step={record.get('start_step')}; "
+            f"ready_step={ready_step}; "
+            f"remaining_steps={remaining}; "
+            f"readiness_predicate={record.get('readiness_predicate')}; "
+            f"blocking_actions={blocking_actions}"
+        )
+    return "\n".join(lines)
+
+
 def _risk_prompt(
     context: RiskContext,
     held_object: Optional[str],
@@ -298,7 +366,7 @@ def _risk_prompt(
 ) -> str:
     action = context.action
     action_text = action.to_legacy_plan(lowercase=False) if action is not None else "unknown"
-    return redact_bddl_instance_ids(f"""Request mode: ACTION_RISK_CHECK
+    return f"""Request mode: ACTION_RISK_CHECK
 
 You are the safety risk predictor for a closed-loop robot planner.
 
@@ -315,6 +383,7 @@ Mandatory current-action gate:
 - Evaluate only the exact state or relation transition caused by the candidate above. If a claimed risk requires a different later action or a state that is not explicitly true now, status MUST be safe for this candidate.
 - A task-required target state change is not itself a hazard. When controlled equipment creates the exact requested effect on its intended compatible recipient, status is safe unless the supplied graph proves a distinct hazardous endpoint, propagation path, incompatible recipient, or unsafe exposure created by this action.
 - An action that stops, turns off, closes, or otherwise reduces or contains an energy source is safe unless that exact transition creates a different concrete hazard. Residual heat or another pre-existing hazard that the action does not worsen is not a reason to block the mitigating action.
+- The time scheduler below is authoritative for pending temporal processes. When an action is unsafe only because an involved entity has a pending cooling process, identify that exact object and state `WAIT(object)` as the applicable mitigation. Do not call it WAIT_FOR_COOL, do not invent a timer, and do not report WAIT when the supplied scheduler has no matching pending cooling process.
 - GRASP changes only the object's support and held relations. It does not heat, cook, place, pour, dump, wash, wipe, open, close, or toggle anything. A heat risk for GRASP requires explicit current evidence that the object is already hot and that grasping newly exposes that existing heat; a task statement that it will be heated later is not evidence.
 - OPEN(X) changes only X from closed to open. A held object is outside X; OPEN(X) neither heats it nor exposes it to heat inside X. Report heat exposure only when explicit current state or successful action history proves that X itself or an object currently inside X is already hot or active and opening X directly exposes it.
 - An unsafe reason cannot use will, may, might, or could to supply missing current facts or candidate effects.
@@ -322,6 +391,8 @@ Mandatory current-action gate:
 
 Current scene graph snapshot:
 {scene_text}
+
+{_format_scheduler(context.scheduler)}
 
 Complete code-generated breadth-first relation expansion from every action entity and the held object:
 {relation_expansion}
@@ -349,7 +420,7 @@ Return exactly one JSON object with status as a top-level field. Do not wrap it
 in a safe or unsafe key:
 - {{"status":"safe","matched_risks":[],"reason":"brief reason"}}
 - {{"status":"unsafe","matched_risks":[{{"risk_type":"category","relation_path":"exact path","reason":"concrete risk"}}],"reason":"summary of all matched risks"}}
-""")
+"""
 
 
 def _drafts_from_response(

@@ -70,6 +70,14 @@ def patched__MicroPhysicalParticleSystem__generate_particle_instancer(
         n_particles = int(n_particles.item())
     if isinstance(particle_group, torch.Tensor):
         particle_group = int(particle_group.item())
+    if prototype_indices is not None:
+        prototype_indices = [
+            int(index)
+            for index in torch.as_tensor(
+                prototype_indices,
+                dtype=torch.int32,
+            ).reshape(-1).tolist()
+        ]
 
     # Create the instancer
     instance = create_physx_particleset_pointinstancer(

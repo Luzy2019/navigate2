@@ -19,6 +19,7 @@ from omnigibson.action_primitives.symbolic_semantic_action_primitives import (
 from omnigibson.envs import Environment
 from omnigibson.macros import gm
 from omnigibson.systems import BaseSystem
+import omnigibson.utils.transform_utils as T
 import torch
 
 from og_ego_prim.config.runtime_config import RuntimeConfig
@@ -142,6 +143,7 @@ class Executor:
         self._active_cooked_particle_expectations: Dict[
             Tuple[int, str], Dict[str, Any]
         ] = {}
+        self._cooked_particle_payloads: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
         self.primitive_set = PRIMITIVE_SET[primitive_type]
 
@@ -310,6 +312,7 @@ class Executor:
                     primitive_name=parsed_action_seqs.primitive_name,
                     step_index=step_index,
                 )
+            self._synchronize_cooked_particle_payloads()
         except Exception as exc:
             error = exc
             raise
@@ -711,6 +714,9 @@ class Executor:
                         "WAIT_FOR_COOKED elapsed without a complete verified "
                         "cooked or heated state"
                     )
+                self._capture_cooked_particle_payloads(
+                    self._active_cooked_particle_expectations
+                )
         finally:
             self._active_cooked_particle_expectations = previous_expectations
 
@@ -801,6 +807,244 @@ class Executor:
             )
             sys.stdout.flush()
         return complete
+
+    def _task_entity_id_for_object(self, obj: Any) -> Optional[str]:
+        for entity_id, reference in (
+            getattr(getattr(self.env, "task", None), "object_scope", {}) or {}
+        ).items():
+            if getattr(reference, "wrapped_obj", None) is obj:
+                return str(entity_id)
+        return None
+
+    @staticmethod
+    def _world_points_to_local_frame(world_points, frame_pos, frame_orn):
+        points = torch.as_tensor(world_points)
+        rotation = T.quat2mat(torch.as_tensor(frame_orn, dtype=points.dtype))
+        position = torch.as_tensor(frame_pos, dtype=points.dtype, device=points.device)
+        return ((points - position) @ rotation).clone()
+
+    @staticmethod
+    def _local_points_to_world_frame(local_points, frame_pos, frame_orn):
+        points = torch.as_tensor(local_points)
+        rotation = T.quat2mat(torch.as_tensor(frame_orn, dtype=points.dtype))
+        position = torch.as_tensor(frame_pos, dtype=points.dtype, device=points.device)
+        return points @ rotation.T + position
+
+    def _capture_cooked_particle_payloads(
+        self,
+        expectations: Mapping[Tuple[int, str], Mapping[str, Any]],
+    ) -> None:
+        for expectation in expectations.values():
+            container = expectation["container"]
+            entity_id = self._task_entity_id_for_object(container)
+            if entity_id is None:
+                raise BadExecutionPlanError(
+                    "cooked particle payload container is not a task entity"
+                )
+            system = expectation["cooked_system"]
+            contained_state = container.states[object_states.ContainedParticles]
+            contained_state.clear_cache()
+            contained = contained_state.get_value(system)
+            indices = torch.nonzero(contained.in_volume, as_tuple=False).flatten()
+            expected_count = int(expectation["raw_count"]) + int(
+                expectation["initial_cooked_count"]
+            )
+            if int(indices.numel()) != expected_count:
+                raise BadExecutionPlanError(
+                    "cooked particle payload was incomplete after native conversion: "
+                    f"container={container.name} system={system.name} "
+                    f"expected={expected_count} actual={int(indices.numel())}"
+                )
+            instancer = getattr(system, "default_particle_instancer", None)
+            if instancer is None:
+                raise BadExecutionPlanError(
+                    f"cooked particle system {system.name} has no particle instancer"
+                )
+            container_pos, container_orn = container.get_position_orientation()
+            self._cooked_particle_payloads[(entity_id, system.name)] = {
+                "entity_id": entity_id,
+                "system_name": system.name,
+                "local_positions": self._world_points_to_local_frame(
+                    contained.positions[indices], container_pos, container_orn
+                ),
+                "velocities": instancer.particle_velocities[indices].clone(),
+                "orientations": instancer.particle_orientations[indices].clone(),
+                "scales": instancer.particle_scales[indices].clone(),
+                "prototype_indices": instancer.particle_prototype_ids[indices].clone(),
+                "instancer_idn": int(getattr(instancer, "idn", 0)),
+                "particle_group": int(getattr(instancer, "particle_group", 0)),
+            }
+            print(
+                "[executor][temporal][particle_payload] "
+                f"captured container={container.name} system={system.name} "
+                f"count={expected_count}"
+            )
+            sys.stdout.flush()
+
+    def cooked_particle_payload_checkpoint(self) -> list[Dict[str, Any]]:
+        return [
+            {
+                **{
+                    key: value.detach().cpu().clone()
+                    if isinstance(value, torch.Tensor)
+                    else value
+                    for key, value in payload.items()
+                }
+            }
+            for _, payload in sorted(self._cooked_particle_payloads.items())
+        ]
+
+    def restore_cooked_particle_payloads(self, payloads: Sequence[Mapping[str, Any]]) -> None:
+        restored = {}
+        scope = getattr(getattr(self.env, "task", None), "object_scope", {}) or {}
+        for payload in payloads:
+            entity_id = str(payload.get("entity_id") or "").strip()
+            system_name = str(payload.get("system_name") or "").strip()
+            if not entity_id or not system_name:
+                raise ValueError("cooked particle payload checkpoint is missing identity")
+            if entity_id not in scope:
+                raise ValueError(
+                    f"cooked particle payload entity is absent from task scope: {entity_id}"
+                )
+            restored[(entity_id, system_name)] = {
+                "entity_id": entity_id,
+                "system_name": system_name,
+                "local_positions": torch.as_tensor(
+                    payload["local_positions"], dtype=torch.float32
+                ).clone(),
+                "velocities": torch.as_tensor(payload["velocities"], dtype=torch.float32).clone(),
+                "orientations": torch.as_tensor(
+                    payload["orientations"], dtype=torch.float32
+                ).clone(),
+                "scales": torch.as_tensor(payload["scales"], dtype=torch.float32).clone(),
+                "prototype_indices": torch.as_tensor(
+                    payload["prototype_indices"], dtype=torch.long
+                ).clone(),
+                "instancer_idn": int(payload.get("instancer_idn", 0)),
+                "particle_group": int(payload.get("particle_group", 0)),
+            }
+        self._cooked_particle_payloads = restored
+
+    def recover_cooked_particle_payloads_from_live_state(self) -> list[Dict[str, Any]]:
+        expectations = {}
+        for entity_id, reference in (
+            getattr(getattr(self.env, "task", None), "object_scope", {}) or {}
+        ).items():
+            container = getattr(reference, "wrapped_obj", None)
+            contained_state = getattr(container, "states", {}).get(
+                object_states.ContainedParticles
+            )
+            if contained_state is None:
+                continue
+            for system in getattr(container.scene.system_registry, "objects", ()):
+                if not str(system.name).startswith("cooked__"):
+                    continue
+                contained_state.clear_cache()
+                cooked_count = int(contained_state.get_value(system).n_in_volume)
+                if cooked_count <= 0:
+                    continue
+                expectations[(id(container), system.name)] = {
+                    "container": container,
+                    "system": system,
+                    "cooked_system": system,
+                    "raw_count": cooked_count,
+                    "initial_cooked_count": 0,
+                }
+        self._capture_cooked_particle_payloads(expectations)
+        return self.cooked_particle_payload_checkpoint()
+
+    def _payload_is_suspended_by_symbolic_carry(self, container: Any, system_name: str) -> bool:
+        getter = getattr(self.controller, "_symbolic_carried_particle_states", None)
+        if not callable(getter):
+            return False
+        return any(
+            str(state["system"].name) == system_name and bool(state.get("suspended"))
+            for state in getter(container)
+        )
+
+    def _synchronize_cooked_particle_payloads(self) -> None:
+        if not self._cooked_particle_payloads:
+            return
+        scope = getattr(getattr(self.env, "task", None), "object_scope", {}) or {}
+        payloads_by_system = {}
+        for payload in self._cooked_particle_payloads.values():
+            payloads_by_system.setdefault(payload["system_name"], []).append(payload)
+        changed = False
+        for payload in self._cooked_particle_payloads.values():
+            container = getattr(scope.get(payload["entity_id"]), "wrapped_obj", None)
+            if container is None:
+                raise RuntimeError(
+                    f"cooked particle payload lost task entity {payload['entity_id']}"
+                )
+            if self._payload_is_suspended_by_symbolic_carry(
+                container, payload["system_name"]
+            ):
+                continue
+            system = container.scene.get_system(payload["system_name"], force_init=True)
+            contained_state = container.states[object_states.ContainedParticles]
+            contained_state.clear_cache()
+            contained = contained_state.get_value(system)
+            actual_count = int(contained.n_in_volume)
+            expected_count = int(payload["local_positions"].shape[0])
+            if actual_count == expected_count and int(system.n_particles) == expected_count:
+                continue
+            if len(payloads_by_system[payload["system_name"]]) == 1:
+                remove_indices = torch.arange(int(system.n_particles), dtype=torch.long)
+            else:
+                remove_indices = torch.nonzero(
+                    contained.in_volume, as_tuple=False
+                ).flatten()
+            if remove_indices.numel():
+                system.remove_particles(idxs=remove_indices)
+            container_pos, container_orn = container.get_position_orientation()
+            positions = self._local_points_to_world_frame(
+                payload["local_positions"], container_pos, container_orn
+            )
+            system.generate_particles(
+                positions=positions,
+                instancer_idn=payload["instancer_idn"],
+                velocities=torch.zeros_like(positions),
+                orientations=payload["orientations"],
+                scales=payload["scales"],
+                prototype_indices=payload["prototype_indices"].tolist(),
+                particle_group=payload["particle_group"],
+            )
+            changed = True
+            print(
+                "[executor][temporal][particle_payload] "
+                f"restored container={container.name} system={system.name} "
+                f"expected={expected_count} previous={actual_count}"
+            )
+            sys.stdout.flush()
+        if changed:
+            og.sim.update_handles()
+
+    def cooked_particle_payload_diagnostics(self) -> list[Dict[str, Any]]:
+        self._synchronize_cooked_particle_payloads()
+        scope = getattr(getattr(self.env, "task", None), "object_scope", {}) or {}
+        diagnostics = []
+        for payload in self._cooked_particle_payloads.values():
+            container = getattr(scope.get(payload["entity_id"]), "wrapped_obj", None)
+            system = container.scene.get_system(payload["system_name"], force_init=True)
+            suspended = self._payload_is_suspended_by_symbolic_carry(
+                container, payload["system_name"]
+            )
+            contained_state = container.states[object_states.ContainedParticles]
+            contained_state.clear_cache()
+            contained_count = int(contained_state.get_value(system).n_in_volume)
+            diagnostics.append(
+                {
+                    "entity_id": payload["entity_id"],
+                    "system_name": payload["system_name"],
+                    "expected_count": int(payload["local_positions"].shape[0]),
+                    "contained_count": contained_count,
+                    "system_count": int(system.n_particles),
+                    "suspended_by_symbolic_carry": suspended,
+                    "contained": suspended or contained_count
+                    == int(payload["local_positions"].shape[0]),
+                }
+            )
+        return diagnostics
 
     def _validate_temporal_wait(
         self,

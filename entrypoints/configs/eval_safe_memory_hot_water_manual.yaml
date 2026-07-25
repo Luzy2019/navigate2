@@ -1,0 +1,21 @@
+includes:
+  - eval_safe_memory_starter_physical.yaml
+
+# The manual session resumes from the open-microwave stance. Keep Fetch's arm
+# inside its base footprint before it turns away from the appliance, and retain
+# the A* corner points around the kitchen furniture.
+navigation:
+  clearance_aware_simplify: false
+  # An already reached appliance should not trigger a collision-prone in-place
+  # turn before a symbolic OPEN / CLOSE state transition.
+  rotate_when_already_in_navigation_region: false
+
+starter_primitives:
+  fixed_navigation_arm_pose_name: tucked_high
+  native_stance_sample_attempts: 8
+
+scheduler:
+  process_definitions:
+    - process_type: cooling
+      duration_steps: 7200
+      blocking_actions: []

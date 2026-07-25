@@ -254,7 +254,7 @@ def _configure_agent(benchmark, args: argparse.Namespace, subtask_index: int):
         "vlm_closed_loop",
         agent,
         use_obs=False,
-        max_step=1,
+        max_step=None,
         held_object_getter=benchmark._current_grasped_object_id,
     )
     benchmark.bind_planner_adapter(adapter, source=type(agent).__name__, emit_proposals=True)
@@ -274,6 +274,14 @@ def _risk_model_trace(benchmark) -> Dict[str, Optional[str]]:
     return {"prompt": None, "raw_response": None}
 
 
+def _safety_replan_trace(benchmark) -> Dict[str, Optional[Any]]:
+    planner = benchmark.runtime_controller.components.planner
+    return {
+        "raw_output": getattr(planner, "last_safety_plan_raw_output", None),
+        "payload": getattr(planner, "last_safety_plan_payload", None),
+    }
+
+
 def _write_llm_log(
     session_dir: Path,
     *,
@@ -283,13 +291,15 @@ def _write_llm_log(
     outcome,
     global_snapshot,
     benchmark,
+    output_path: Optional[Path] = None,
     overwrite: bool = True,
 ) -> None:
-    path = session_dir / f"llm_{frame_index:06d}.txt"
+    path = output_path or session_dir / f"llm_{frame_index:06d}.txt"
     if not overwrite and path.exists():
         return
     scheduler = benchmark.runtime_controller.components.scheduler
     risk_trace = _risk_model_trace(benchmark)
+    safety_replan_trace = _safety_replan_trace(benchmark)
     payload = {
         "frame_index": frame_index,
         "planner": {
@@ -314,6 +324,7 @@ def _write_llm_log(
             ),
             "latency_seconds": benchmark.runtime_controller.last_risk_latency,
         },
+        "safety_replan": safety_replan_trace,
         "execution": {
             "decision": review.decision.value,
             "reason": review.reason,
@@ -361,6 +372,9 @@ def _replay(
         if review is None or outcome is None or not outcome.succeeded:
             raise RuntimeError(f"replay action {frame_index} did not succeed")
         global_snapshot = accumulator.apply_successful_action(review.action)
+        global_snapshot = accumulator.apply_state_changes(
+            benchmark.runtime_controller.drain_scheduler_state_changes()
+        )
         updater.snapshot = global_snapshot
         _write_scene_graph_artifacts(
             scene_graph_dir,
@@ -496,6 +510,9 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             return response
 
         global_snapshot = accumulator.apply_successful_action(review.action)
+        global_snapshot = accumulator.apply_state_changes(
+            benchmark.runtime_controller.drain_scheduler_state_changes()
+        )
         updater.snapshot = global_snapshot
         _write_scene_graph_artifacts(
             scene_graph_dir,

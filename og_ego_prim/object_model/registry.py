@@ -388,6 +388,16 @@ class ObjectRegistry:
             }
         )
 
+    def load_dict(self, payload: Mapping[str, Any]) -> None:
+        """Replace records from a checkpoint produced by :meth:`to_dict`."""
+
+        if str(payload.get("schema_version") or "") != self.schema_version:
+            raise ValueError("unsupported object registry checkpoint")
+        self.clear()
+        self.extensions = deepcopy(dict(payload.get("extensions") or {}))
+        for raw_record in payload.get("objects") or ():
+            self.register(ObjectRecord(**dict(raw_record)))
+
     def __len__(self) -> int:
         return len(self._records)
 

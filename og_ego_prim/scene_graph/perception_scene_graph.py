@@ -385,7 +385,7 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
         force: bool = False,
     ) -> SceneGraphSnapshot:
         primitive_name = None if context is None else context.primitive_name
-        raw_plan = None if context is None else redact_bddl_instance_ids(context.raw_plan)
+        raw_plan = None if context is None else context.raw_plan
         step_index = (
             self.global_step_index
             if context is None
@@ -443,7 +443,7 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
             "ready": True,
             "perception_forced": force,
             "action_history": [
-                redact_bddl_instance_ids(event["raw_plan"])
+                event["raw_plan"]
                 for event in result.metadata.get("manipulation_event_history", ())
                 if event.get("source") == "AgentRuntimeController.action_executed"
                 and event.get("raw_plan")

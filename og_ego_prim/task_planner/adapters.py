@@ -65,7 +65,16 @@ If operating another entity risks exposing the held object, place the held
 object on a safe task-relevant surface before the final operation. When held_object
 is null, do not start with PLACE_ON_TOP, PLACE_INSIDE,
 POUR_INTO, DUMP_INTO, or RELEASE; first GRASP a safe object if the plan needs one
-held. Use a WAIT_* action only for a matching active process in pending_timers.
+held. When blocked_reason says a previously heated object must cool and
+pending_timers contains that object's cooling process, WAIT(the exact heated
+object) is the required first mitigation step. In that case, the safety plan
+must begin with exactly WAIT(the exact heated object), must not PLACE_ON_TOP,
+PLACE_INSIDE, RELEASE, NAVIGATE_TO, or substitute a same-role alternative before
+that WAIT, and must retry failed_action as its final step after WAIT. The pending
+timer is evidence that the object has not cooled yet; placing it aside does not
+remove the heat risk and is not an alternative mitigation. Use no WAIT_* action
+unless a matching active process appears in pending_timers; WAIT_FOR_COOL is not
+an available action.
 The goal field must briefly name the blocked risk being removed, not copy the task
 or goal_description. Return
 {"status":"SAFETY_PLAN","goal":"goal","steps":["atomic action"]}."""
@@ -141,6 +150,7 @@ class AgentPlannerAdapter:
         try:
             return normalize_planner_action(next(self._iterator))
         except StopIteration:
+            self._iterator = None
             return None
 
 
@@ -172,6 +182,8 @@ class VLMClosedLoopPlannerAdapter:
         self._safety_goal: Optional[str] = None
         self._steps: list[Action] = []
         self._inflight: Optional[Dict[str, Any]] = None
+        self.last_safety_plan_raw_output: Optional[str] = None
+        self.last_safety_plan_payload: Optional[Dict[str, Any]] = None
 
     def _held_object(self) -> Optional[str]:
         value = self.held_object_getter()
@@ -197,12 +209,10 @@ class VLMClosedLoopPlannerAdapter:
             "pending_timers": context.pending_timers,
             **extra,
         }
-        payload = redact_bddl_instance_ids(payload)
         prompt = (
             f"{instruction.strip()}\n\n"
-            "Use only the supplied action vocabulary. Prefer exact entity identifiers; "
-            "when same-category instances cannot be distinguished, their shared generic "
-            "category is also valid and will be grounded by the runtime. "
+            "Use only the supplied action vocabulary and exact entity identifiers. "
+            "A category name is invalid when it represents multiple task entities. "
             "Each available_actions value is the exact required argument count. "
             "When a placement, pour, or dump action has arity 1, its only argument is "
             "the destination and the source object is current held_object. "
@@ -351,7 +361,7 @@ class VLMClosedLoopPlannerAdapter:
         *,
         failed_action: Action,
     ) -> list[Action]:
-        payload, _ = self._request(
+        payload, raw_output = self._request(
             context,
             _SAFETY_PROMPT,
             original_blocked_action=(
@@ -363,6 +373,8 @@ class VLMClosedLoopPlannerAdapter:
             remaining_steps=[action.to_legacy_plan() for action in self._steps],
             loading=self._loading,
         )
+        self.last_safety_plan_raw_output = raw_output
+        self.last_safety_plan_payload = dict(payload)
         if str(payload.get("status", "")).strip().upper() != "SAFETY_PLAN":
             raise ValueError("safety planner must return SAFETY_PLAN")
         if self._safety_goal is None:

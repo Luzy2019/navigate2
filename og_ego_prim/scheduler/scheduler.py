@@ -370,8 +370,18 @@ class Scheduler:
             self._pending.clear()
         for value in values:
             process = value if isinstance(value, ScheduledProcess) else ScheduledProcess.from_dict(value)
-            if process.status == ProcessStatus.PENDING:
-                self._pending[process.process_id] = process
+            handler = self.registry.get(process.process_type)
+            if process.status != ProcessStatus.PENDING or handler is None:
+                continue
+            definition = getattr(handler, "definition", None)
+            if definition is not None:
+                process.readiness_predicate = definition.readiness_predicate
+                process.blocking_actions = definition.blocking_actions
+                process.completion_effects = dict(definition.completion_effects)
+            duration_steps = getattr(definition, "duration_steps", None)
+            if duration_steps is not None:
+                process.ready_step = process.start_step + int(duration_steps)
+            self._pending[process.process_id] = process
 
 
 def build_scheduler(

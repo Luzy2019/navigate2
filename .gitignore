@@ -24,3 +24,5 @@ tests**
 !tests/test_planning_memory_risk_latency.py
 talk/
 lifelong_graph/
+docs/
+!docs/share

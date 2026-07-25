@@ -250,18 +250,16 @@ class AgentPlanner:
                 assert self.tracker.awareness is not None and 'content' in self.tracker.awareness
                 awareness = self.tracker.awareness['content']
 
-            return redact_bddl_instance_ids(
-                build_starter_step_prompt(
-                    objects_str=self.objects_str,
-                    task_instruction=self.task_instruction,
-                    object_abilities_str=self.object_abilities_str,
-                    task_goal=self.goal_description,
-                    wash_rules_str=self.wash_rules_str,
-                    history_actions=history_plans,
-                    prompt_setting=self.prompt_setting,
-                    scene_description=scene_description,
-                    awareness=awareness,
-                )
+            return build_starter_step_prompt(
+                objects_str=self.objects_str,
+                task_instruction=self.task_instruction,
+                object_abilities_str=self.object_abilities_str,
+                task_goal=self.goal_description,
+                wash_rules_str=self.wash_rules_str,
+                history_actions=history_plans,
+                prompt_setting=self.prompt_setting,
+                scene_description=scene_description,
+                awareness=awareness,
             )
 
         if not self.use_initial_setup and not self.use_self_caption:
@@ -361,7 +359,7 @@ class AgentPlanner:
             else:
                 raise Exception('Wrong prompt setting.')
 
-        return redact_bddl_instance_ids(prompt)
+        return prompt
 
     def begin_lifelong_subtask(
         self,
@@ -635,6 +633,10 @@ class AgentPlanner:
 
             output = self.client.model(prompt, image_file=obs)
             next_plan = parse_json_code_block(output)
+            self.tracker.track_raw_output(
+                step=self.current_step + 1,
+                content=output,
+            )
             if self.verbose:
                 print(f"[agent] raw output:\n{output}")
                 print(f"[agent] next plan:\n{next_plan}")
@@ -668,7 +670,6 @@ class AgentPlanner:
                 next_plan: StepwisePlan = self.record_plan(
                     f'{operator}({params})',
                     caution=caution,
-                    raw_output=output,
                 )
                 yield next_plan
                 if operator == 'done':

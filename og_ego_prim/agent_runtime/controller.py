@@ -93,6 +93,7 @@ class AgentRuntimeController:
 
         self._emit_planner_proposals = False
         self._scheduler_tick_in_progress = False
+        self._pending_scheduler_state_changes: list[StateChange] = []
         # 最近一次动作的风险审查结果
         self.last_review: Optional[ActionReview] = None
         # 最近一次动作的执行结果
@@ -217,6 +218,7 @@ class AgentRuntimeController:
             )
         finally:
             self._scheduler_tick_in_progress = False
+        derived_changes = []
         for update in updates:
             state_effects = dict(getattr(update, "state_effects", {}) or {})
             for entity_id in getattr(update, "entity_ids", ()):
@@ -234,6 +236,7 @@ class AgentRuntimeController:
                         source="scheduler_derived",
                     )
                     self.components.objects.apply_state_change(change)
+                    derived_changes.append(change)
                 note_state_update = getattr(
                     self.components.perception,
                     "note_manipulation_event",
@@ -254,7 +257,13 @@ class AgentRuntimeController:
                 entity_ids=getattr(update, "entity_ids", ()),
                 details={"update": update.to_dict()},
             )
+        self._pending_scheduler_state_changes.extend(derived_changes)
         return updates
+
+    def drain_scheduler_state_changes(self) -> Tuple[StateChange, ...]:
+        changes = tuple(self._pending_scheduler_state_changes)
+        self._pending_scheduler_state_changes.clear()
+        return changes
 
     def _visible_timers(self) -> Tuple[Any, ...]:
         pending = tuple(self.components.scheduler.pending_for())
@@ -412,14 +421,11 @@ class AgentRuntimeController:
                 resolved.append(argument)
             elif len(candidates) == 1:
                 resolved.append(candidates[0])
-            elif (
-                action.name != "NAVIGATE_TO"
-                and last_navigation is not None
-                and last_navigation in candidates
-            ):
-                resolved.append(last_navigation)
             else:
-                resolved.append(random.SystemRandom().choice(candidates))
+                raise ValueError(
+                    "ambiguous planner entity requires an exact task identifier: "
+                    f"{argument}"
+                )
 
         if tuple(resolved) == arguments:
             return action
