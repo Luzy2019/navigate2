@@ -346,6 +346,7 @@ def main() -> int:
 
     add_monkey_patch()
     import omnigibson as og
+    from omnigibson import object_states
     from omnigibson.macros import gm
     gm.USE_GPU_DYNAMICS = True
 
@@ -404,7 +405,10 @@ def main() -> int:
         if all_bounds is None:
             raise RuntimeError("could not derive whole-scene bounds from object AABBs")
 
-        from og_ego_prim.utils.topdown_capture import capture_topdown_scene
+        from og_ego_prim.utils.topdown_capture import (
+            capture_topdown_scene,
+            save_topdown_occupancy_map,
+        )
 
         views: dict[str, Any] = {}
         views["global"] = capture_topdown_scene(
@@ -417,11 +421,27 @@ def main() -> int:
             show_robot=False,
             metadata_path=output_dir / "global_topdown.json",
         )
+        occupancy = save_topdown_occupancy_map(
+            benchmark.env,
+            output_dir / "global_occupancy.png",
+            world_bounds=all_bounds,
+            output_size=(1280, 720),
+            metadata_path=output_dir / "global_occupancy.json",
+        )
         _write_overlay(output_dir / "global_topdown.png", output_dir / "object_overlay.png", records_after, all_bounds)
 
-        room_names = list(config.get("task", {}).get("rooms") or [])
-        if not room_names:
-            room_names = list(task_json.get("scene_info", {}).get("rooms") or [])
+        task_rooms = list(config.get("task", {}).get("rooms") or [])
+        if not task_rooms:
+            task_rooms = list(task_json.get("scene_info", {}).get("rooms") or [])
+        loaded_rooms = sorted(
+            {
+                str(room)
+                for record in records_after
+                for room in (record.get("in_rooms") or [])
+                if room
+            }
+        )
+        room_names = list(dict.fromkeys([*task_rooms, *loaded_rooms]))
         for room in room_names:
             bounds = _room_bounds(records_after, room, args.margin) or all_bounds
             room_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", room)
@@ -439,16 +459,20 @@ def main() -> int:
             upper = np.asarray(bounds[2:], dtype=float)
             center_xy = (lower + upper) * 0.5
             span = np.maximum(upper - lower, 2.0)
-            target = [float(center_xy[0]), float(center_xy[1]), 0.65]
             oblique_specs = [
-                ("southwest", [-0.85, -0.85]),
-                ("northeast", [0.85, 0.85]),
+                ("southwest", [-1.0, -1.0]),
+                ("northeast", [1.0, 1.0]),
             ]
             for suffix, direction in oblique_specs:
                 position = [
-                    float(center_xy[0] + direction[0] * span[0]),
-                    float(center_xy[1] + direction[1] * span[1]),
-                    float(max(2.2, max(span) * 0.65)),
+                    float(center_xy[0] + direction[0] * span[0] * 0.08),
+                    float(center_xy[1] + direction[1] * span[1] * 0.08),
+                    float(max(3.4, max(span) * 0.65)),
+                ]
+                target = [
+                    float(center_xy[0] - direction[0] * span[0] * 0.08),
+                    float(center_xy[1] - direction[1] * span[1] * 0.08),
+                    0.65,
                 ]
                 views[f"oblique:{room}:{suffix}"] = _capture_oblique(
                     benchmark,
@@ -465,6 +489,86 @@ def main() -> int:
         if not bddl_path.is_absolute():
             bddl_path = (REPO_ROOT / bddl_path).resolve()
         expected = _parse_expected_relations(bddl_path)
+        actual_init_relations: dict[str, list[dict[str, Any]]] = {
+            "ontop": [],
+            "inside": [],
+            "inroom": [],
+            "states": [],
+        }
+        for predicate_name, state_type in (
+            ("ontop", object_states.OnTop),
+            ("inside", object_states.Inside),
+        ):
+            for subject_name, target_name in expected[predicate_name]:
+                subject = task_objects.get(subject_name)
+                target = task_objects.get(target_name)
+                value = None
+                error = None
+                try:
+                    value = bool(subject.states[state_type].get_value(target))
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+                actual_init_relations[predicate_name].append(
+                    {
+                        "subject": subject_name,
+                        "target": target_name,
+                        "value": value,
+                        "error": error,
+                    }
+                )
+        for subject_name, room_name in expected["inroom"]:
+            subject = task_objects.get(subject_name)
+            actual_init_relations["inroom"].append(
+                {
+                    "subject": subject_name,
+                    "target": room_name,
+                    "value": room_name in (getattr(subject, "in_rooms", []) or []),
+                    "error": None if subject is not None else "object not resolved",
+                }
+            )
+        unary_state_types = {
+            "open": object_states.Open,
+            "toggled_on": object_states.ToggledOn,
+        }
+        for expected_state in expected["states"]:
+            subject_name = expected_state["object"]
+            subject = task_objects.get(subject_name)
+            state_type = unary_state_types.get(expected_state["predicate"])
+            value = None
+            error = None
+            try:
+                value = bool(subject.states[state_type].get_value())
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+            actual_init_relations["states"].append(
+                {
+                    **expected_state,
+                    "actual_value": value,
+                    "error": error,
+                }
+            )
+
+        pose_override_contacts: dict[str, Any] = {}
+        for bddl_name in task_json.get("scene_info", {}).get("object_initial_poses", {}):
+            obj = task_objects.get(bddl_name)
+            if obj is None:
+                pose_override_contacts[bddl_name] = {"error": "object not resolved", "pairs": []}
+                continue
+            pairs = []
+            seen = set()
+            try:
+                for contact in obj.contact_list():
+                    pair = (str(contact.body0), str(contact.body1))
+                    if pair in seen:
+                        continue
+                    seen.add(pair)
+                    pairs.append({"body0": pair[0], "body1": pair[1]})
+                pose_override_contacts[bddl_name] = {"error": None, "pairs": pairs}
+            except Exception as exc:
+                pose_override_contacts[bddl_name] = {
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "pairs": [],
+                }
         sampled_scene_path = (
             output_dir
             / f"{args.scene}_task_{task_json_path.stem}_0_0_template.json"
@@ -510,8 +614,11 @@ def main() -> int:
                 "bounds_source": "all_loaded_object_aabbs_plus_margin" if args.world_bounds is None else "explicit_world_bounds",
                 "rooms": room_names,
                 "views": views,
+                "occupancy": occupancy,
             },
             "expected_bddl_init": expected,
+            "actual_bddl_init": actual_init_relations,
+            "pose_override_contacts_after_idle": pose_override_contacts,
             "removed_scene_objects_absent": removed,
             "finite_pose_failures": finite_failures,
             "robot_after_idle": {
@@ -529,6 +636,10 @@ def main() -> int:
             "objects_before_idle": records_before,
             "objects_after_idle": records_after,
             "sampled_scene_json": str(sampled_scene_path),
+            "capture_success": all(Path(view["image"]).is_file() for view in views.values())
+            and Path(occupancy["image"]).is_file()
+            and (output_dir / "object_overlay.png").is_file(),
+            "coverage_pass": False,
             "human_visual_review_pass": False,
             "runtime_pass": False,
             "status": "pending_human_visual_review",

@@ -958,6 +958,8 @@ class PromptingConfig:
     builder: str = "semantic"
     sections: Tuple[str, ...] = (
         "task",
+        "scene",
+        "objects",
         "timers",
         "action",
     )

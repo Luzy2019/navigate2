@@ -147,6 +147,8 @@ CAPTION_ALIAS = {
     "tissue box box": "tissue box",
     "tissue_box": "tissue box",
     "trash bin": "bin",
+    "water bottle": "bottle",
+    "water_bottle": "bottle",
     "unknown object": UNKNOWN_OBJECT_NAME,
     "unknown_object": UNKNOWN_OBJECT_NAME,
     "tv monitor": "tv",
@@ -194,7 +196,7 @@ ALLOWED_LIFELONG_RELATIONS = (
 
 def _caption_text(value: Any) -> str:
     text = str(value or "").strip().lower()
-    text = re.sub(r"\.n\.\d+", "", text)
+    text = re.sub(r"\.n\.\d+(?:_\d+)?", "", text)
     text = re.sub(r"[_\-]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
@@ -222,7 +224,7 @@ def _canonical_or_unknown_caption(caption: Any) -> str:
     normalized = _caption_text(caption)
     if normalized in {"", "object", "unknown object", UNKNOWN_OBJECT_NAME}:
         return UNKNOWN_OBJECT_NAME
-    return normalized
+    return CAPTION_ALIAS.get(normalized, normalized)
 
 
 def _is_unknown_caption(caption: Any) -> bool:
@@ -721,6 +723,9 @@ class SAMJAMUniGoalGraphAdapter:
         # SAMJAM already filters masks and VLM matches before this adapter.
         graph.cfg.mask_conf_threshold = _env_float(
             "ISBENCH_SAMJAM_UNIGOAL_MASK_CONFIDENCE", 0.0
+        )
+        graph.cfg.max_bbox_area_ratio = _env_float(
+            "ISBENCH_SAMJAM_UNIGOAL_MAX_BBOX_AREA_RATIO", 0.90
         )
         graph.cfg.obj_min_detections = _env_int(
             "ISBENCH_SAMJAM_UNIGOAL_MIN_DETECTIONS", 1
@@ -1472,24 +1477,13 @@ class SAMJAMUniGoalGraphAdapter:
             "center_distance": distance,
             "moving": moving,
         }
-        if moving:
-            report["reason"] = "moving_track"
-            return True, report
-        if distance is None:
-            report["reason"] = "missing_center_distance"
-            return False, report
-        max_distance = _env_float("ISBENCH_SAMJAM_UNIGOAL_SAME_TRACK_MAX_DISTANCE_M", 0.75)
-        if distance > max_distance:
-            report["reason"] = "track_distance_too_large"
-            report["max_distance"] = max_distance
-            return False, report
         if previous_names & current_names:
-            report["reason"] = "same_track_same_name"
+            report["reason"] = "same_samjam_track_same_name"
             return True, report
         if UNKNOWN_OBJECT_NAME in previous_names or UNKNOWN_OBJECT_NAME in current_names:
-            report["reason"] = "same_track_unknown_alias"
+            report["reason"] = "same_samjam_track_unknown_alias"
             return True, report
-        report["reason"] = "same_track_incompatible_names"
+        report["reason"] = "same_samjam_track_incompatible_known_names"
         return False, report
 
     def _reassociate_moving_tracks(
@@ -1514,15 +1508,14 @@ class SAMJAMUniGoalGraphAdapter:
                 previous_object = None
 
             moving = source_id in moving_source_ids
-            allowed, reassociation_report = (
-                self._same_track_reassociation_allowed(
+            allowed = False
+            reassociation_report: Dict[str, Any] = {}
+            if previous_object is not None and previous_object is not current_object:
+                allowed, reassociation_report = self._same_track_reassociation_allowed(
                     previous_object,
                     current_object,
                     moving=moving,
                 )
-                if previous_object is not None and previous_object is not current_object
-                else (False, {})
-            )
             if previous_object is not None and previous_object is not current_object and allowed:
                 self._merge_map_object(graph, target_object=previous_object, source_object=current_object)
                 self.track_to_map_object[track_key] = previous_object
@@ -2203,7 +2196,13 @@ class SAMJAMUniGoalGraphAdapter:
         for event in events:
             node, resolution = self._resolve_manipulation_event(event, source_to_node)
             if node is not None:
-                node.role = str(event.get("moved_object") or "").strip() or None
+                node.role = _canonical_or_unknown_caption(event.get("moved_object"))
+                state_updates = dict(event.get("state_updates") or {})
+                if state_updates:
+                    node.states = {
+                        **dict(getattr(node, "states", {}) or {}),
+                        **state_updates,
+                    }
                 self.mark_manipulated_nodes([self._node_uid(node)])
             self.manipulation_resolutions.append(resolution)
         del self.manipulation_resolutions[:-100]
@@ -2227,6 +2226,10 @@ class SAMJAMUniGoalGraphAdapter:
         task_obj = self._resolve_env_object(str(moved_object))
         task_position = self._object_position(task_obj)
         normalized_name = _canonical_or_unknown_caption(moved_object)
+        navigation_event = (
+            str(event.get("primitive") or "").upper() == "NAVIGATE_TO"
+            and task_position is not None
+        )
         current_visible_nodes = set(source_to_node.values())
         candidates = []
         for node in self.graph.nodes:
@@ -2249,6 +2252,19 @@ class SAMJAMUniGoalGraphAdapter:
             elif normalized_name and (normalized_name in label or label in normalized_name):
                 score += 2.0
                 reasons.append("partial_label")
+                semantic_match = True
+            elif navigation_event and any(
+                any(
+                    _normalize_caption(voted_name) == _normalize_caption(moved_object)
+                    and vote_score > 0.0
+                    for voted_name, vote_score in self.name_vote_scores.get(
+                        track_key, {}
+                    ).items()
+                )
+                for track_key in self._map_object_track_keys(node.object)
+            ):
+                score += 5.0
+                reasons.append("navigation_target_track")
                 semantic_match = True
             if not semantic_match:
                 continue
@@ -2458,7 +2474,10 @@ class SAMJAMUniGoalGraphAdapter:
             samjam_object_id = source_id or (source_history[-1] if source_history else None)
             frame_attributes = frame_object.attributes if frame_object is not None else {}
             if "states" in frame_attributes:
-                node.states = dict(frame_attributes.get("states") or {})
+                node.states = {
+                    **dict(getattr(node, "states", {}) or {}),
+                    **dict(frame_attributes.get("states") or {}),
+                }
             if "hazard" in frame_attributes:
                 node.hazard = dict(frame_attributes.get("hazard") or {})
             states = dict(getattr(node, "states", {}) or {})
@@ -2706,6 +2725,12 @@ class SAMJAMUniGoalBackend:
     def set_object_goal(self, target: str) -> None:
         self.samjam_backend.set_object_goal(target)
 
+    def set_task_instruction(self, instruction: Optional[str]) -> None:
+        self.samjam_backend.set_task_instruction(instruction)
+
+    def set_task_categories(self, categories) -> None:
+        self.samjam_backend.set_task_categories(categories)
+
     def mark_manipulated_nodes(self, node_uids: List[int]) -> None:
         self.unigoal_adapter.mark_manipulated_nodes(node_uids)
 
@@ -2774,6 +2799,12 @@ class SAMJAMUniGoalBackend:
             samjam_relations=samjam_relations,
         )
         self.last_result = result
+        self.samjam_backend.mask_generator = None
+        self.samjam_backend.video_predictor = None
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         return result
 
     def _prepare_samjam_mapping_inputs(
@@ -2783,12 +2814,7 @@ class SAMJAMUniGoalBackend:
         samjam_relations: List[PerceivedRelation],
         metadata: Dict[str, Any],
     ) -> SAMJAMFilterResult:
-        coarse_min_match_iou = _env_float("ISBENCH_SAMJAM_UNIGOAL_COARSE_MIN_MATCH_IOU", 0.25)
-        fine_min_match_iou = _env_float("ISBENCH_SAMJAM_UNIGOAL_FINE_MIN_MATCH_IOU", 0.05)
         thresholds = {
-            "coarse_min_match_iou": coarse_min_match_iou,
-            "fine_min_match_iou": fine_min_match_iou,
-            "min_match_iou": coarse_min_match_iou,
             "require_match_metadata": _env_bool(
                 "ISBENCH_SAMJAM_UNIGOAL_REQUIRE_MATCH_METADATA", True
             ),
@@ -2937,23 +2963,16 @@ class SAMJAMUniGoalBackend:
             or (match_detail or {}).get("vlm_name")
             or obj.name
         )
-        min_match_iou = (
-            thresholds["coarse_min_match_iou"]
-            if _is_coarse_caption(normalized_name)
-            else thresholds["fine_min_match_iou"]
-        )
         metrics["canonical_name"] = normalized_name
-        metrics["match_iou_threshold"] = min_match_iou
         if match_detail is None and thresholds["require_match_metadata"]:
             return "missing_match_metadata", metrics
         if match_detail is not None:
             match_iou = _safe_float(match_detail.get("best_iou"), 0.0)
-            match_score = self._match_detail_effective_score(match_detail)
             metrics["match_iou"] = match_iou
-            metrics["match_score"] = match_score
+            metrics["match_score"] = self._match_detail_effective_score(match_detail)
             metrics["match_accept_reason"] = match_detail.get("accept_reason")
-            if match_score < min_match_iou:
-                return "low_match_iou", metrics
+            if match_detail.get("accepted") is not True:
+                return "unaccepted_match", metrics
 
         mask_area_ratio = metrics.get("mask_area_ratio")
         if (

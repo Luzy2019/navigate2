@@ -57,6 +57,7 @@ from og_ego_prim.scheduler import (
     build_scheduler,
 )
 from og_ego_prim.utils.constants import CAMERAS, SCENES
+from og_ego_prim.utils.planning import planner_prompt_entity_ids
 from og_ego_prim.utils.types import PoseCoord, StepwisePlan
 
 
@@ -144,6 +145,18 @@ class OnlineBenchmark(Benchmark):
         self.scene_graph_updater = PerceptionSceneGraphUpdater(
             scene_graph_config=self.runtime_config.scene_graph,
         )
+        self.scene_graph_updater.set_task_categories(
+            planner_prompt_entity_ids(
+                (config.get("planning_context") or {}).get("object_list") or ()
+            )
+        )
+        first_subtask = next(iter(config.get("subtasks") or ()), {})
+        initial_instruction = str(
+            first_subtask.get("L")
+            or config.get("planning_context", {}).get("task_instruction")
+            or ""
+        )
+        self.scene_graph_updater.set_task_instruction(initial_instruction)
         graph_started_at = time.perf_counter()
         initial_scene_graph = self.scene_graph_updater.reset(self.env)
         self.tracker.track_scene_graph(initial_scene_graph, force=True)

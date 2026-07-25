@@ -195,7 +195,7 @@
     {
       "subtask_index": 1,
       "task_name": "bath_disinfectant_vinegar_rag__t1",
-      "L": "Pick up rag.n.01_2 near the bathroom sink, clean sink.n.01_1 with it, then carry rag.n.01_2 to utility_room_0 and place it on clothes_dryer.n.01_1.",
+      "L": "Pick up the rag near the bathroom sink, clean sink.n.01_1 with it, then carry that same disinfectant rag to utility_room_0 and place it on clothes_dryer.n.01_1.",
       "G_task": "(:goal (and (not (covered sink.n.01_1 stain.n.01_1)) (ontop rag.n.01_2 clothes_dryer.n.01_1)))",
       "G_safe": [],
       "H_limit": 60,

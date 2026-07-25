@@ -16,6 +16,10 @@ _JSON_CODE_BLOCK = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 _BDDL_ENTITY_INSTANCE = re.compile(r"^(.+)\.n\.\d+_\d+$", re.IGNORECASE)
+_BDDL_ENTITY_TOKEN = re.compile(
+    r"(?<![a-z0-9_])([a-z0-9_-]+)\.n\.\d+_\d+(?![a-z0-9_])",
+    re.IGNORECASE,
+)
 
 
 def parse_json_code_block(output: str) -> Optional[Dict[str, Any]]:
@@ -88,6 +92,38 @@ def planner_entity_candidates(
             and match.group(1).casefold() == raw.casefold()
         )
     )
+
+
+def planner_prompt_entity_ids(
+    entity_ids: Iterable[str],
+    task_instruction: Any = "",
+) -> Tuple[str, ...]:
+    """Return category-level entity names for planner-visible prompts."""
+
+    del task_instruction
+    visible = []
+    for value in entity_ids:
+        name = str(redact_bddl_instance_ids(value)).strip()
+        if name and name not in visible:
+            visible.append(name)
+    return tuple(visible)
+
+
+def redact_bddl_instance_ids(value: Any) -> Any:
+    """Remove BDDL instance suffixes from values sent to a model."""
+
+    if isinstance(value, str):
+        return _BDDL_ENTITY_TOKEN.sub(r"\1", value)
+    if isinstance(value, Mapping):
+        return {
+            redact_bddl_instance_ids(key): redact_bddl_instance_ids(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_bddl_instance_ids(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_bddl_instance_ids(item) for item in value)
+    return value
 
 
 def normalize_planner_action(value: Any) -> Optional[Action]:
@@ -193,5 +229,7 @@ __all__ = [
     "parse_json_code_block",
     "parse_model_json_object",
     "planner_entity_candidates",
+    "planner_prompt_entity_ids",
+    "redact_bddl_instance_ids",
     "validate_planner_action",
 ]

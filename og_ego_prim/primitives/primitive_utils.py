@@ -2,6 +2,55 @@ from typing import Optional
 
 from omnigibson.envs import Environment
 from omnigibson.objects import BaseObject
+import omnigibson.utils.transform_utils as T
+import torch
+
+
+def compute_cloth_drop_pose(
+    target_center,
+    target_extent,
+    cloth_orientation,
+    cloth_extent,
+    cloth_center_in_base,
+    drop_height,
+):
+    """
+    Description:
+        根据容器与布料的 base-aligned bbox，计算保持布料当前朝向的投放位姿。
+
+    Example:
+        compute_cloth_drop_pose(
+            target_center,
+            target_extent,
+            cloth_orientation,
+            cloth_extent,
+            cloth_center_in_base,
+            -0.12,
+        )
+
+    Output:
+        ``(cloth_position, cloth_orientation)``，其中布料 bbox 中心位于容器
+        上沿加配置投放偏移的位置。
+    """
+    desired_cloth_center = torch.as_tensor(
+        target_center,
+        dtype=torch.float32,
+    ).clone()
+    desired_cloth_center[2] = (
+        target_center[2]
+        + target_extent[2] / 2.0
+        + drop_height
+        + cloth_extent[2] / 2.0
+    )
+    cloth_pose = T.pose2mat((desired_cloth_center, cloth_orientation)) @ T.pose_inv(
+        T.pose2mat(
+            (
+                cloth_center_in_base,
+                cloth_center_in_base.new_tensor([0.0, 0.0, 0.0, 1.0]),
+            )
+        )
+    )
+    return T.mat2pose(cloth_pose)
 
 
 def find_task_related_object(

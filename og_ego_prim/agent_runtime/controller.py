@@ -134,6 +134,9 @@ class AgentRuntimeController:
             self.current_task_view = subtask_lookup(int(self.active_subtask_id)) or self.task_view
         else:
             self.current_task_view = self.task_view
+        set_task_instruction = getattr(self.components.perception, "set_task_instruction", None)
+        if callable(set_task_instruction):
+            set_task_instruction(getattr(self.current_task_view, "instruction", ""))
         self.rethinking_attempts = 0
         self.last_review = None
         self.last_outcome = None
@@ -214,9 +217,10 @@ class AgentRuntimeController:
         finally:
             self._scheduler_tick_in_progress = False
         for update in updates:
+            state_effects = dict(getattr(update, "state_effects", {}) or {})
             for entity_id in getattr(update, "entity_ids", ()):
                 obj = self.components.objects.get(entity_id)
-                for key, value in dict(getattr(update, "state_effects", {}) or {}).items():
+                for key, value in state_effects.items():
                     old = None if obj is None else obj.states.get(key)
                     change = StateChange(
                         step=self.step,
@@ -229,6 +233,21 @@ class AgentRuntimeController:
                         source="scheduler_derived",
                     )
                     self.components.objects.apply_state_change(change)
+                note_state_update = getattr(
+                    self.components.perception,
+                    "note_manipulation_event",
+                    None,
+                )
+                if state_effects and callable(note_state_update):
+                    note_state_update(
+                        {
+                            "primitive": "STATE_UPDATE",
+                            "moved_object": entity_id,
+                            "state_updates": state_effects,
+                            "global_step_index": self.step,
+                            "source": "AgentRuntimeController.scheduler_derived",
+                        }
+                    )
             self._emit(
                 "temporal_process_updated",
                 entity_ids=getattr(update, "entity_ids", ()),
@@ -257,6 +276,23 @@ class AgentRuntimeController:
         candidate_action: Optional[Action] = None,
         rethinking_reason: Optional[str] = None,
     ) -> PromptContext:
+        scene_payload = (
+            self.latest_scene.to_dict()
+            if callable(getattr(self.latest_scene, "to_dict", None))
+            else self.latest_scene
+        )
+        scene_enabled = isinstance(scene_payload, Mapping) and bool(
+            scene_payload.get("rooms")
+        )
+        object_views = (
+            tuple(
+                record.to_dict()
+                for record in self.components.objects.actionable()
+                if record.last_seen_step is not None or record.manipulations
+            )
+            if scene_enabled
+            else ()
+        )
         instruction = (
             getattr(self.current_task_view, "instruction", "")
             if self.current_task_view is not None
@@ -266,12 +302,14 @@ class AgentRuntimeController:
         # Evaluator G_task/G_safe BDDL never lives on an AgentTaskView.
         task_goal = getattr(self.current_task_view, "goal_description", None)
         if task_goal is None:
-            task_goal = getattr(self.task_view, "goal_description", "")
+            task_goal = instruction
         allowed_actions = tuple(
             sorted((getattr(self.components.executor, "valid_primitives", {}) or {}).keys())
         )
         return PromptContext(
             task_instruction=instruction,
+            current_scene=scene_payload if scene_enabled else None,
+            object_views=object_views,
             pending_timers=tuple(
                 item.to_dict() if hasattr(item, "to_dict") else item
                 for item in self._visible_timers()
@@ -594,9 +632,7 @@ class AgentRuntimeController:
                 "note_manipulation_event",
                 None,
             )
-            if note_manipulation is not None and (
-                record_manipulation or review.action.name == "NAVIGATE_TO"
-            ):
+            if note_manipulation is not None and record_manipulation:
                 note_manipulation(
                     {
                         "raw_plan": review.action.to_legacy_plan(),

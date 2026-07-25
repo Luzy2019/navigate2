@@ -14,7 +14,7 @@ class SemanticPromptBuilder:
     def __init__(
         self,
         *,
-        sections: Sequence[str] = ("task", "timers", "action"),
+        sections: Sequence[str] = ("task", "scene", "objects", "timers", "action"),
         registry: Optional[Registry[PromptSectionProvider]] = None,
         max_scene_items: int = 20,
     ) -> None:

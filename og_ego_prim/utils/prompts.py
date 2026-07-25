@@ -1,3 +1,89 @@
+def build_task_specific_sequence_prompt(task_instruction):
+    instruction = task_instruction.lower()
+    temporal_process = any(
+        word in instruction for word in ("heat", "cook", "freeze", "cool")
+    ) or (
+        "wash" in instruction
+        and any(word in instruction for word in ("appliance", "machine", "cycle"))
+    )
+    if temporal_process:
+        workflow = """Selected workflow: temporal appliance process.
+Anonymous phase order:
+1. While the gripper is empty, prepare appliance access and confirm it is open.
+2. Acquire the process input and place it in the appliance.
+3. Close and start the appliance.
+4. Wait for the matching process transition, then stop the appliance.
+5. Retrieve the input when requested and establish its final placement.
+6. Establish the appliance's requested final open, closed, on, or off state.
+7. DONE.
+Completion rule: if successful history already contains placement into the
+appliance, start, matching WAIT_*, stop, later retrieval, and the requested final
+placement, do not acquire or place the input again. Use the latest successful
+OPEN/CLOSE and TOGGLE_ON/TOGGLE_OFF as the appliance state, then return DONE.
+A successful matching WAIT_* is authoritative evidence that the temporal
+transition completed. A stale visual attribute that claims the input is not
+heated, cooked, frozen, washed, or cooled must not restart the process. If the
+history then shows successful retrieval, requested final placement, and requested
+appliance power and access states, the next action must be DONE. Do not go back
+to add a canonical intermediate action that is absent from successful history;
+completed postconditions take precedence over reconstructing the ideal sequence."""
+    elif any(word in instruction for word in ("wipe", "clean", "disinfect")):
+        workflow = """Selected workflow: surface treatment.
+Anonymous phase order:
+1. While the gripper is empty, prepare any required source or destination access.
+2. Acquire the required tool when the instruction requires one.
+3. Reach the treatment target and prepare any required fluid source.
+4. Perform the treatment once.
+5. Establish the requested final tool and target state.
+6. DONE.
+Completion rule: do not repeat tool acquisition, navigation, or treatment after
+the successful history establishes the requested treated state."""
+    else:
+        workflow = """Selected workflow: object transfer or state change.
+Anonymous phase order:
+1. While the gripper is empty, prepare source or destination access when required.
+2. Acquire the source object with GRASP.
+3. Place the held object or transfer its contents to the destination.
+4. Establish the requested final source and destination states.
+5. DONE.
+Completion rule: do not repeat a successful GRASP and PLACE/POUR cycle whose
+final relation or transfer has not been reversed."""
+
+    return f"""Task-specific sequence guide:
+Derive this guide from only the active Task instruction. Roles below are
+anonymous and do not reveal hidden instance identities or evaluator-only facts.
+{workflow}
+First apply the selected workflow's completion rule to only the active Task
+instruction. If it is satisfied, return DONE even when the broader Task goals
+mention later lifelong stages. Otherwise choose the first incomplete phase from
+successful history, Current held object, and active processes, then propose
+exactly its next applicable semantic action.
+Do not skip an incomplete phase and do not repeat a completed phase. If an
+openable source, destination, or appliance must be open for a later acquire or
+placement phase, complete NAVIGATE_TO and OPEN while the gripper is empty before
+GRASP. Never attempt OPEN or CLOSE while holding the source or tool.
+
+After the selected workflow's required empty-gripper access preparation is
+complete, propose GRASP(object) directly before any action involving its
+destination. Never navigate to the destination while the required object is
+still unheld.
+
+The runtime inserts navigation before GRASP and held-object placement or transfer.
+For those operations, propose GRASP, PLACE, POUR, or DUMP directly; NAVIGATE_TO is
+not a separate workflow phase. Use explicit NAVIGATE_TO only to reach a target for
+OPEN, CLOSE, TOGGLE, or WIPE. After one such navigation succeeds, propose that
+semantic operation next instead of navigating to the same target again.
+
+When a proposal is rejected or execution fails, the failed action changed nothing.
+Complete the missing earlier precondition named by the feedback; do not retry the
+same action or substitute another NAVIGATE_TO. A successful semantic action
+establishes its named effect until a later successful action reverses it. Prefer
+ordered successful history when visual state is unknown or conflicts with it.
+Never use RELEASE to imitate a required placement. Task goals may mention later
+lifelong stages; start them only after the runner supplies their own Task
+instruction."""
+
+
 def build_starter_step_prompt(
     *,
     objects_str,
@@ -33,6 +119,8 @@ def build_starter_step_prompt(
     if scene_description:
         scene_section = f"\nScene description:\n{scene_description}\n"
 
+    task_specific_sequence_prompt = build_task_specific_sequence_prompt(task_instruction)
+
     return f"""
 You are controlling a mobile manipulator through OmniGibson physical semantic action primitives.
 Return exactly one next action as JSON with keys "action" and "caution".
@@ -65,21 +153,26 @@ Available actions:
 - RELEASE(): release the currently grasped object.
 - TOGGLE_ON(object): physically toggle an object on.
 - TOGGLE_OFF(object): physically toggle an object off.
+- WAIT(object): wait for an active temporal process on the object to complete.
+- WAIT_FOR_COOKED(object): wait for the object's active cooking process to complete.
+- WAIT_FOR_WASHED(object): wait for the appliance's active washing process to complete.
+- WAIT_FOR_FROZEN(object, refrigerator): wait for the object's freezing process to complete.
 - WIPE(target): wipe the target object and remove particles covering it. If holding a cleaning tool, the tool is used implicitly.
 - DONE(): finish the task.
 
 Physical-action rules:
-- Before each GRASP, first call NAVIGATE_TO on the same target object.
-- After NAVIGATE_TO succeeds, call GRASP on the target object.
+- The executed-action history contains only actions that succeeded. Never assume an action happened unless it appears there or is confirmed by the current state.
+- After required empty-gripper access preparation is complete, propose GRASP directly. The runtime expands it into NAVIGATE_TO(target) followed by GRASP(target), and preserves GRASP as the intended operation after navigation succeeds.
+- GRASP only changes the held object; it does not place that object inside or on top of anything. While holding an object, continue with NAVIGATE_TO, PLACE, POUR, DUMP, or RELEASE before OPEN or CLOSE.
 - Before PLACE_ON_TOP or PLACE_INSIDE, the object to move must already be grasped.
 - PLACE_ON_TOP and PLACE_INSIDE take only the destination as their single argument.
 - POUR_INTO takes only the fill destination as its single argument; the currently grasped container is the source.
 - DUMP_INTO takes only the destination as its single argument; the currently grasped container is the source.
-- Before any manipulation action whose target is not currently near and reachable, call NAVIGATE_TO on that target first.
-- If the current observation does not show the target object for the next manipulation action, call NAVIGATE_TO on that target first.
-- After GRASP, if the manipulation destination is not currently near and reachable, call NAVIGATE_TO(destination) before PLACE_ON_TOP, PLACE_INSIDE, POUR_INTO, or DUMP_INTO.
+- Propose PLACE_ON_TOP, PLACE_INSIDE, POUR_INTO, or DUMP_INTO directly. The runtime inserts NAVIGATE_TO(destination) when needed and then executes the preserved operation.
+- Use NAVIGATE_TO explicitly before OPEN, CLOSE, TOGGLE_ON, TOGGLE_OFF, or WIPE when its target is not currently near and reachable or is absent from the current observation.
 - Open an openable DUMP_INTO destination before grasping the source container. After DUMP_INTO, place or release the still-grasped empty source container.
 - OPEN and CLOSE cannot be executed while holding an object.
+- Close an openable appliance before toggling it on, start the process, and only then use the matching WAIT action. Use WAIT_* only when the runtime context lists the matching active process.
 - Open a closed source container before GRASPing an object inside it.
 - Open an openable destination before GRASPing the object that will be placed inside it.
 - After placement the gripper is empty.
@@ -95,13 +188,31 @@ Physical-action rules:
 Previous actions:
 {history_actions}
 
-Example output:
-```json
-{{
-  "action": "GRASP(apple.n.01_1)",
-  "caution": null
-}}
-```
+{task_specific_sequence_prompt}
+
+Final applicability check:
+- Treat the latest successful history and Current held object as the current
+  state. A failed action changed nothing; do not repeat it until its stated
+  precondition has been corrected.
+- An openable destination is ready only when the current state explicitly says
+  it is open, or a successful OPEN(destination) appears after its latest CLOSE.
+  Unknown is not open. If an object must be placed inside a destination that is
+  not confirmed open, use NAVIGATE_TO(destination) or OPEN(destination) before
+  GRASPing the object.
+- To process an object inside an openable appliance, use this order: OPEN the
+  appliance with an empty gripper, GRASP the object, PLACE_INSIDE the appliance,
+  CLOSE it, TOGGLE_ON it, WAIT_FOR_COOKED(object), TOGGLE_OFF it, then OPEN it
+  before retrieving the object. Never pass the appliance itself to
+  WAIT_FOR_COOKED.
+- Never CLOSE or start an appliance before its intended object was successfully
+  placed inside. WAIT_* is applicable only when the matching active process is
+  listed in the runtime context.
+- If OPEN or CLOSE is needed while holding an object that must be used again,
+  PLACE_ON_TOP a separate stable task-relevant support first, operate the
+  openable object, and then GRASP the staged object again. Do not stage on the
+  openable object being operated, and do not use RELEASE as staging.
+
+Return exactly {{"action":"ACTION(arguments)","caution":null}}.
 """.strip()
 
 

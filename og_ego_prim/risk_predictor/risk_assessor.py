@@ -8,7 +8,7 @@ import re
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Tuple
 
 from og_ego_prim.object_model.resolver import normalize_entity_alias
-from og_ego_prim.utils.planning import parse_model_json_object
+from og_ego_prim.utils.planning import parse_model_json_object, redact_bddl_instance_ids
 
 from .models import Caution, HazardDraft, HazardLevel, RiskContext
 
@@ -180,6 +180,10 @@ def _format_scene(
     payload: Mapping[str, Any],
 ) -> str:
     lines = []
+    action_history = (payload.get("summary") or {}).get("action_history") or ()
+    if action_history:
+        lines.append("Persistent successful action history:")
+        lines.extend(f"- {action}" for action in action_history)
     for room in payload.get("rooms") or ():
         room_name = room.get("room_name") or room.get("room_id") or "unknown_room"
         lines.append(f"Room: {room_name}")
@@ -218,7 +222,10 @@ def _format_relation_expansion(
         )
     )
     if not root_ids:
-        return "Resolved roots: none\nReachable physical relations: none"
+        return (
+            "Resolved roots (identity mappings only, not physical relations): none\n"
+            "Reachable physical relations: none"
+        )
 
     queue = deque((node_id, 0) for node_id in root_ids)
     visited_nodes = set(root_ids)
@@ -236,13 +243,13 @@ def _format_relation_expansion(
                 visited_nodes.add(other_id)
                 queue.append((other_id, depth + 1))
 
-    lines = ["Resolved roots:"]
+    lines = ["Resolved roots (identity mappings only, not physical relations):"]
     for entity, candidate_ids in resolved_roots:
         candidates = ", ".join(
             f"{_node_name(nodes_by_id[node_id])} [id={node_id}]"
             for node_id in candidate_ids
         )
-        lines.append(f"- {entity} -> {candidates}")
+        lines.append(f"- task_entity={entity}; scene_node={candidates}")
     lines.append("Reachable physical relations:")
     for depth, _, expanded_from, edge in sorted(records):
         lines.append(
@@ -288,7 +295,7 @@ def _risk_prompt(
 ) -> str:
     action = context.action
     action_text = action.to_legacy_plan(lowercase=False) if action is not None else "unknown"
-    return f"""Request mode: ACTION_RISK_CHECK
+    return redact_bddl_instance_ids(f"""Request mode: ACTION_RISK_CHECK
 
 You are the safety risk predictor for a closed-loop robot planner.
 
@@ -301,6 +308,15 @@ Current robot state:
 Candidate action:
 - action: {action_text}
 
+Mandatory current-action gate:
+- Evaluate only the exact state or relation transition caused by the candidate above. If a claimed risk requires a different later action or a state that is not explicitly true now, status MUST be safe for this candidate.
+- A task-required target state change is not itself a hazard. When controlled equipment creates the exact requested effect on its intended compatible recipient, status is safe unless the supplied graph proves a distinct hazardous endpoint, propagation path, incompatible recipient, or unsafe exposure created by this action.
+- An action that stops, turns off, closes, or otherwise reduces or contains an energy source is safe unless that exact transition creates a different concrete hazard. Residual heat or another pre-existing hazard that the action does not worsen is not a reason to block the mitigating action.
+- GRASP changes only the object's support and held relations. It does not heat, cook, place, pour, dump, wash, wipe, open, close, or toggle anything. A heat risk for GRASP requires explicit current evidence that the object is already hot and that grasping newly exposes that existing heat; a task statement that it will be heated later is not evidence.
+- OPEN(X) changes only X from closed to open. A held object is outside X; OPEN(X) neither heats it nor exposes it to heat inside X. Report heat exposure only when explicit current state or successful action history proves that X itself or an object currently inside X is already hot or active and opening X directly exposes it.
+- An unsafe reason cannot use will, may, might, or could to supply missing current facts or candidate effects.
+- Before returning unsafe, quote an explicit current hazard or state and an exact supplied relation_path caused or activated by this action. A hypothetical condition, "heated previously" without matching successful history, or a relation absent from the supplied graph requires status safe.
+
 Current scene graph snapshot:
 {scene_text}
 
@@ -309,7 +325,10 @@ Complete code-generated breadth-first relation expansion from every action entit
 
 Decision rules:
 - Use the scene graph as the source of truth for remembered objects and relations. A node with visible=false is remembered but currently unseen; it is not missing, removed, consumed, or empty.
+- The task and desired goal describe future intent, not current state. Resolved-root identity mappings only name scene nodes; they are not physical relations or valid relation_path evidence.
+- Successful action history embedded in the persistent scene graph is valid evidence for action-derived facts such as which exact object was heated, washed, or moved. Infer only facts entailed by that successful sequence.
 - Judge only the candidate action's immediate physical effect. A pre-existing hazard matters only when this action creates, worsens, activates, sustains, or meaningfully exposes it. Viewpoint-only navigation is safe unless moving there itself worsens a concrete hazard.
+- Every unsafe verdict must identify a concrete current fact and an immediate physical effect caused by the candidate action.
 - Start from every action argument and held_object. Inspect every supplied reachable relation, preserve its original direction, and do not treat reversed traversal, graph connectivity, or a shared room, group, broad support, container, or parent as physical propagation by itself. Spatial relations are not transitive.
 - For proximity or contact risk, require a direct near/contact relation or a complete physically valid propagation path. Check every compatible endpoint; finding one safe endpoint does not end the audit.
 - Before declaring a placement safe, inspect the destination's complete explicit support and containment structure. For PLACE_ON_TOP(X,D), inspect every object directly on D and every lower explicit on-chain. For PLACE_INSIDE(X,D), inspect every support directly in D, every object on those supports, and every lower on-chain.
@@ -323,20 +342,33 @@ Decision rules:
 - Treat supplied node states and hazard mappings as primary facts. Canonical identity may supply only high-confidence ordinary qualitative properties such as food, cleaning chemical, combustible material, fragility, or rigidity. Do not invent objects, relations, wetness, residue, leakage, materials, or state values.
 - Continue all applicable categories; one safe check cannot cancel another concrete risk. matched_risks must contain every risk found. When a risk depends on graph relations, relation_path should copy the exact hazardous relation or complete propagation path.
 
-Return strict JSON only:
-- safe: {{"status":"safe","matched_risks":[],"reason":"brief reason"}}
-- unsafe: {{"status":"unsafe","matched_risks":[{{"risk_type":"category","relation_path":"exact path","reason":"concrete risk"}}],"reason":"summary of all matched risks"}}
-"""
+Return exactly one JSON object with status as a top-level field. Do not wrap it
+in a safe or unsafe key:
+- {{"status":"safe","matched_risks":[],"reason":"brief reason"}}
+- {{"status":"unsafe","matched_risks":[{{"risk_type":"category","relation_path":"exact path","reason":"concrete risk"}}],"reason":"summary of all matched risks"}}
+""")
 
 
 def _drafts_from_response(
     payload: Mapping[str, Any],
     context: RiskContext,
 ) -> Tuple[HazardDraft, ...]:
+    wrapped_status = None
+    if not payload.get("status"):
+        wrappers = tuple(
+            (key, payload.get(key))
+            for key in ("safe", "unsafe")
+            if isinstance(payload.get(key), Mapping)
+        )
+        if len(wrappers) == 1:
+            wrapped_status, nested = wrappers[0]
+            payload = nested
     status = str(payload.get("status") or "").strip().lower()
     reason = str(payload.get("reason") or "").strip()
     if status not in {"safe", "unsafe"}:
         raise RuntimeError("risk predictor status must be safe or unsafe")
+    if wrapped_status is not None and status != wrapped_status:
+        raise RuntimeError("risk predictor wrapper conflicts with status")
     if not reason:
         raise RuntimeError("risk predictor response requires a non-empty reason")
     if status == "safe":

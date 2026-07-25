@@ -5,6 +5,9 @@ import numpy as np
 from .perception import FrameObservation
 
 
+_OPTICAL_TO_USD_CAMERA = np.diag((1.0, -1.0, -1.0)).astype(np.float32)
+
+
 def _to_numpy(value):
     if value is None:
         return None
@@ -170,30 +173,38 @@ class ISBenchObservationAdapter:
     def _get_camera_pose(self, sensor, sensor_obs):
         '''
         获取相机在场景中的 4x4 位姿矩阵。
-        优先从 sensor_obs["camera_params"]["cameraViewTransform"] 求逆得到相机位姿；
-        如果没有 camera_params，则退化为只记录传感器位置的位姿矩阵。
+        优先使用视觉传感器的 world position 和 orientation；如果传感器位姿不可用，
+        再从 sensor_obs["camera_params"]["cameraViewTransform"] 求逆得到相机位姿。
         使用位置：由 ISBenchObservationAdapter.observe() 调用，结果写入 FrameObservation.camera_pose，
         供 scene graph 后端记录相机位置并辅助估计空间关系。
         '''
+        if sensor is not None:
+            try:
+                import omnigibson.utils.transform_utils as T
+
+                position, orientation = sensor.get_position_orientation()
+                pose = np.eye(4, dtype=np.float32)
+                pose[:3, :3] = (
+                    _to_numpy(T.quat2mat(orientation)).astype(np.float32)
+                    @ _OPTICAL_TO_USD_CAMERA
+                )
+                pose[:3, 3] = _to_numpy(position)[:3]
+                return pose
+            except Exception:
+                pass
+
         camera_params = sensor_obs.get("camera_params") if isinstance(sensor_obs, dict) else None
         if isinstance(camera_params, dict) and "cameraViewTransform" in camera_params:
             view_transform = _to_numpy(camera_params["cameraViewTransform"])
             if view_transform is not None and view_transform.shape == (4, 4):
                 try:
-                    return np.linalg.inv(view_transform).astype(np.float32)
+                    pose = np.linalg.inv(view_transform).astype(np.float32)
+                    pose[:3, :3] = pose[:3, :3] @ _OPTICAL_TO_USD_CAMERA
+                    return pose
                 except np.linalg.LinAlgError:
                     pass
 
-        if sensor is None:
-            return None
-        try:
-            position, _ = sensor.get_position_orientation()
-        except Exception:
-            return None
-
-        pose = np.eye(4, dtype=np.float32)
-        pose[:3, 3] = _to_numpy(position)[:3]
-        return pose
+        return None
 
     def _get_robot_position(self, robot):
         '''

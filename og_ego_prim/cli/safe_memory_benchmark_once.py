@@ -650,6 +650,11 @@ def _run(
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     (work_dir / "benchmark").mkdir(parents=True, exist_ok=True)
+    if args.memory_mode == "with_memory":
+        runtime_config.scene_graph.output_dir = str(output_dir / "samjam_outputs")
+        runtime_config.scene_graph.debug_log_path = str(
+            output_dir / "samjam_outputs" / "scene_graph_debug.log"
+        )
     log_path = install_run_log(work_dir)
     print(f"run directory: {work_dir.resolve()}", flush=True)
     print(f"console log: {log_path.resolve()}", flush=True)
@@ -726,7 +731,7 @@ def _run(
             task_name=args.task,
             scene_name=scene,
             model_name=args.model,
-            work_dir=args.work_dir,
+            work_dir=str(work_dir),
             local_llm_serve=args.local_llm_serve,
             local_serve_ip=args.local_serve_ip,
             local_serve_key=args.local_serve_key,
@@ -855,12 +860,14 @@ def _run(
         execution_failed = False
         blocked_reason = None
         for plan in plans:
-            if not replay_session.execute_plan(
+            execution_succeeded = replay_session.execute_plan(
                 benchmark,
                 plan,
                 subtask_id=str(index),
                 emit_executor_events=False,
-            ):
+            )
+            retry_after_execution_failure = False
+            if not execution_succeeded:
                 review = benchmark.runtime_controller.last_review
                 outcome = benchmark.runtime_controller.last_outcome
                 if (
@@ -871,11 +878,19 @@ def _run(
                     and review.should_rethink
                 ):
                     continue
-                if outcome is not None and not outcome.executed:
-                    blocked_reason = outcome.reason or "blocked_by_scheduler"
-                    benchmark.tracker.track_termination(reason=blocked_reason)
-                execution_failed = True
-                break
+                if (
+                    agent is not None
+                    and outcome is not None
+                    and outcome.executed
+                    and not outcome.succeeded
+                ):
+                    retry_after_execution_failure = True
+                else:
+                    if outcome is not None and not outcome.executed:
+                        blocked_reason = outcome.reason or "blocked_by_scheduler"
+                        benchmark.tracker.track_termination(reason=blocked_reason)
+                    execution_failed = True
+                    break
             step = benchmark.tracker.plans[-1]["step"]
             if not args.no_capture_observations:
                 action_text = plan.to_legacy_plan()
@@ -890,6 +905,8 @@ def _run(
                         video_output_size=args.video_output_size,
                     )
                 )
+            if retry_after_execution_failure:
+                continue
 
         action_end = len(benchmark.tracker.plans)
         executed_action_count = sum(

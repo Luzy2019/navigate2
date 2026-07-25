@@ -365,6 +365,8 @@ class SAM2AutomaticMaskGenerator:
                 keep_mask = data["stability_score"] >= self.stability_score_thresh
                 data.filter(keep_mask)
 
+        del data["low_res_masks"]
+
         # Threshold masks and calculate boxes
         data["masks"] = data["masks"] > self.mask_threshold
         data["boxes"] = batched_mask_to_box(data["masks"])

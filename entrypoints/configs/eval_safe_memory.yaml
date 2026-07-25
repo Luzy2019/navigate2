@@ -10,7 +10,7 @@ scene_graph:
   step_interval: 0
 
 prompting:
-  sections: [task, timers, action]
+  sections: [task, scene, objects, timers, action]
 
 navigation:
   already_reachable_max_goal_radius: 1.30

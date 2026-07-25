@@ -71,13 +71,17 @@ def _action_from_context(context: RiskContext) -> Tuple[Optional[str], Tuple[str
     if action is None:
         return None, ()
     name = str(getattr(action, "name", "")).upper() or None
-    args = tuple(str(item).strip().lower() for item in getattr(action, "arguments", ()) or ())
-    if not args:
-        args = tuple(
+    args = tuple(
+        dict.fromkeys(
             str(item).strip().lower()
-            for item in (getattr(action, "object_id", None), getattr(action, "target_id", None))
+            for item in (
+                getattr(action, "object_id", None),
+                getattr(action, "target_id", None),
+                *(getattr(action, "arguments", ()) or ()),
+            )
             if item
         )
+    )
     return name, args
 
 

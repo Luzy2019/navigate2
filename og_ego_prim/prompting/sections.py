@@ -266,10 +266,14 @@ class SceneSection(BaseSection):
             room_values = room_values.values()
         rooms = tuple(room for room in room_values if isinstance(room, Mapping))
         if rooms:
-            return {
+            content = {
                 "step_index": scene.get("step_index"),
                 "rooms": self._room_view(rooms, relevant),
             }
+            summary = scene.get("summary")
+            if isinstance(summary, Mapping) and summary.get("action_history"):
+                content["action_history"] = list(summary["action_history"])
+            return content
         nodes = list(_mapping_values(scene.get("nodes") or scene.get("entities")))
         if nodes:
             selected = []

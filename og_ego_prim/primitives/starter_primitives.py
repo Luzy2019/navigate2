@@ -25,6 +25,7 @@ import omnigibson.utils.transform_utils as T
 from og_ego_prim.config.runtime_config import NavigationConfig, StarterPrimitivesConfig
 from og_ego_prim.navigation import NavigationBackend, OmniGibsonNavigationBackend
 from og_ego_prim.primitives.object_states_utils import get_placement_objects
+from og_ego_prim.primitives.primitive_utils import compute_cloth_drop_pose
 
 
 def _interpolate_open_close_waypoints(start_pose, end_pose, num_waypoints="default"):
@@ -1556,6 +1557,9 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                 particle_states=particle_states,
                 rigid_descendant_states=rigid_descendant_states,
             )
+            # Particle-count and filtered-pair edits invalidate PhysX tensor
+            # views until OmniGibson refreshes its runtime handles.
+            og.sim.update_handles()
         except Exception:
             if (
                 self._symbolic_carry_state is not None
@@ -2518,11 +2522,16 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         for state in detached_states:
             pos, orn = state["obj"].get_position_orientation()
             dump_snapshot.append((state, pos.clone(), orn.clone()))
+        dump_cloth_shapes = {
+            id(state): state.get("cloth_shape") for state in detached_states
+        }
+        cloth_drop_states = []
 
         def rollback_to_source():
             if symbolic_payload:
                 carry_state["rigid_descendant_states"] = descendant_states
             for state, pos, orn in dump_snapshot:
+                state["cloth_shape"] = dump_cloth_shapes[id(state)]
                 state["obj"].set_position_orientation(
                     position=pos,
                     orientation=orn,
@@ -2533,17 +2542,32 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             return self._rigid_descendant_postcondition_failures(detached_states)
 
         def place_inside_target(state):
+            obj = state["obj"]
+            source_pos, source_orn = obj.get_position_orientation()
             try:
-                return state["obj"].states[object_states.Inside].set_value(
+                placed = obj.states[object_states.Inside].set_value(
                     target_obj,
                     True,
                     reset_before_sampling=False,
                 )
             except TypeError:
-                return state["obj"].states[object_states.Inside].set_value(
+                placed = obj.states[object_states.Inside].set_value(
                     target_obj,
                     True,
                 )
+            if placed is not False or not self._should_use_symbolic_dump_cloth_drop(
+                state,
+                target_obj,
+            ):
+                return placed
+            state["cloth_shape"] = self._prepare_symbolic_dump_cloth_drop(
+                state,
+                target_obj,
+                source_pos,
+                source_orn,
+            )
+            cloth_drop_states.append(state)
+            return True
 
         try:
             for state in direct_states:
@@ -2604,7 +2628,11 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         self._restore_symbolic_carried_rigid_descendant_collisions(
             detached_states
         )
-        yield from self._yield_symbolic_refresh_step()
+        settle_steps = (
+            self.symbolic_cloth_inside_settle_steps if cloth_drop_states else 1
+        )
+        for _ in range(settle_steps):
+            yield from self._yield_symbolic_refresh_step()
 
         failures = []
         for state in direct_states:
@@ -2650,6 +2678,19 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                     ],
                 },
             )
+
+        for state in cloth_drop_states:
+            obj = state["obj"]
+            cloth_center, _, cloth_extent, _ = obj.get_base_aligned_bbox()
+            print(
+                "[starter][dump][cloth_drop] succeeded "
+                f"object={obj.name} target={target_obj.name} "
+                f"cloth_center={self._to_float_list(cloth_center)} "
+                f"cloth_extent={self._to_float_list(cloth_extent)} "
+                f"settle_steps={settle_steps}"
+            )
+        if cloth_drop_states:
+            sys.stdout.flush()
 
         return [state["obj"] for state in direct_states]
 
@@ -2993,6 +3034,8 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                 state["instancer_particle_count"] = plan["post_count"]
                 state["indices"] = torch.arange(start, stop, dtype=torch.long)
                 state["suspended"] = False
+            if generated_plans:
+                og.sim.update_handles()
         except Exception:
             rollback_errors = self._remove_generated_particle_plans(
                 generated_plans
@@ -4403,6 +4446,75 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             in self.symbolic_cloth_inside_drop_container_categories
         )
 
+    def _should_use_symbolic_dump_cloth_drop(self, state, container) -> bool:
+        obj = state["obj"]
+        return (
+            self.symbolic_cloth_inside_drop
+            and state.get("cloth_shape") is not None
+            and getattr(obj, "prim_type", None) == PrimType.CLOTH
+            and getattr(container, "category", "")
+            in self.symbolic_cloth_inside_drop_container_categories
+        )
+
+    def _prepare_symbolic_dump_cloth_drop(
+        self,
+        state,
+        container,
+        source_pos,
+        source_orn,
+    ):
+        obj = state["obj"]
+        cloth_shape = state["cloth_shape"]
+        target_center, _, target_extent, _ = container.get_base_aligned_bbox()
+        if self.symbolic_cloth_inside_fit_shape:
+            cloth_shape = self._fit_symbolic_cloth_shape_to_extent(
+                cloth_shape,
+                source_orn,
+                torch.as_tensor(target_extent, dtype=torch.float32)
+                * self.symbolic_cloth_inside_fit_container_scale,
+            )
+
+        obj.set_position_orientation(position=source_pos, orientation=source_orn)
+        obj.keep_still()
+        self._restore_symbolic_carried_cloth_shape(
+            obj,
+            source_pos,
+            source_orn,
+            cloth_shape,
+        )
+        _, cloth_orientation, cloth_extent, cloth_center_in_base = (
+            obj.get_base_aligned_bbox()
+        )
+        cloth_position, cloth_orientation = compute_cloth_drop_pose(
+            target_center,
+            target_extent,
+            cloth_orientation,
+            cloth_extent,
+            cloth_center_in_base,
+            self.symbolic_cloth_inside_drop_height,
+        )
+        obj.set_position_orientation(
+            position=cloth_position,
+            orientation=cloth_orientation,
+        )
+        obj.keep_still()
+        self._restore_symbolic_carried_cloth_shape(
+            obj,
+            cloth_position,
+            cloth_orientation,
+            cloth_shape,
+        )
+        print(
+            "[starter][dump][cloth_drop] "
+            f"object={obj.name} target={container.name} "
+            f"position={self._to_float_list(cloth_position)} "
+            f"target_center={self._to_float_list(target_center)} "
+            f"target_extent={self._to_float_list(target_extent)} "
+            f"cloth_extent={self._to_float_list(cloth_extent)}"
+        )
+        sys.stdout.flush()
+        return cloth_shape
+
     def _symbolic_drop_cloth_inside(self, obj_in_hand, container):
         """Drop a cloth above a container and require native Inside after settling."""
         particle_states = self._symbolic_carried_particle_states(obj_in_hand)
@@ -4451,26 +4563,14 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         _, cloth_orientation, cloth_extent, cloth_center_in_base = (
             obj_in_hand.get_base_aligned_bbox()
         )
-        desired_cloth_center = torch.as_tensor(
-            target_center, dtype=torch.float32
-        ).clone()
-        desired_cloth_center[2] = (
-            target_center[2]
-            + target_extent[2] / 2.0
-            + self.symbolic_cloth_inside_drop_height
-            + cloth_extent[2] / 2.0
+        cloth_position, cloth_orientation = compute_cloth_drop_pose(
+            target_center,
+            target_extent,
+            cloth_orientation,
+            cloth_extent,
+            cloth_center_in_base,
+            self.symbolic_cloth_inside_drop_height,
         )
-        cloth_pose = T.pose2mat(
-            (desired_cloth_center, cloth_orientation)
-        ) @ T.pose_inv(
-            T.pose2mat(
-                (
-                    cloth_center_in_base,
-                    cloth_center_in_base.new_tensor([0.0, 0.0, 0.0, 1.0]),
-                )
-            )
-        )
-        cloth_position, cloth_orientation = T.mat2pose(cloth_pose)
         print(
             "[starter][place_inside][cloth_drop] "
             f"object={obj_in_hand.name} container={container.name} "

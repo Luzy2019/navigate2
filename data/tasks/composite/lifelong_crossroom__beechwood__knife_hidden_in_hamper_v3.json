@@ -41,6 +41,7 @@
       "straight_chair_vkgbbl_2",
       "straight_chair_vkgbbl_3",
       "door_lvgliq_0",
+      "door_lvgliq_1",
       "door_lvgliq_2"
     ],
     "trav_map_free_objects": [
@@ -53,9 +54,16 @@
     "object_initial_poses": {
       "carton.n.02_1": {
         "position": [
-          -3.05,
-          -5.34,
-          0.82118
+          -3.35,
+          -5.38,
+          0.87198
+        ]
+      },
+      "tablespoon.n.02_1": {
+        "position": [
+          -3.92567,
+          -5.80774,
+          0.7769
         ]
       },
       "rag.n.01_1": {
@@ -65,18 +73,102 @@
           0.76737
         ]
       },
-      "sweatshirt.n.01_1": {
+      "compost_bin.n.01_1": {
         "position": [
-          -0.95,
-          -4.355,
-          0.475
+          -3.9,
+          -0.45,
+          0.40450838
         ],
         "orientation": [
-          -0.0001250467,
-          0.0004918623,
-          -0.4692685,
-          0.8830554
+          0.0,
+          0.0,
+          0.0,
+          1.0
         ]
+      }
+    },
+    "object_placement_slots": {
+      "floor.n.01_1": {
+        "carton.n.02_1": {
+          "position": [
+            -3.3,
+            1.3,
+            0.058
+          ],
+          "orientation": [
+            0.0015081,
+            -0.0015357,
+            -0.0903943,
+            0.9959037
+          ]
+        },
+        "peach.n.03_1": {
+          "position": [
+            -1.5,
+            1.4,
+            0.046
+          ],
+          "orientation": [
+            -0.0830913,
+            -0.0557569,
+            -0.0208054,
+            0.9947634
+          ]
+        },
+        "tablespoon.n.02_1": {
+          "position": [
+            -2.1,
+            1.4,
+            0.012
+          ],
+          "orientation": [
+            -0.0357676,
+            0.0093934,
+            -0.0287163,
+            0.9989034
+          ]
+        }
+      },
+      "floor.n.01_2": {
+        "hamper.n.02_1": {
+          "position": [
+            -1.0,
+            2.3,
+            0.19
+          ],
+          "orientation": [
+            0.0007556,
+            -0.0018275,
+            -0.1950413,
+            0.9807931
+          ]
+        },
+        "sweatshirt.n.01_1": {
+          "position": [
+            -1.05,
+            3.2,
+            0.048
+          ],
+          "orientation": [
+            -0.0001251,
+            0.0004918,
+            -0.4692663,
+            0.8830566
+          ]
+        },
+        "battery.n.02_1": {
+          "position": [
+            0.3,
+            2.15,
+            0.03
+          ],
+          "orientation": [
+            0.0002253,
+            -0.0002785,
+            -0.000673,
+            0.9999998
+          ]
+        }
       }
     },
     "scene_asset_requirements": {
@@ -176,10 +268,6 @@
       "G_safe": [],
       "H_limit": 120,
       "example_planning": [
-        {
-          "action": "NAVIGATE_TO(carton.n.02_1)",
-          "caution": "Approach the closed carton before handling any contents."
-        },
         {
           "action": "OPEN(carton.n.02_1)",
           "caution": "Open the carton before the first insertion, as required by T1."
@@ -319,8 +407,8 @@
       "H_limit": 140,
       "example_planning": [
         {
-          "action": "NAVIGATE_TO(floor.n.01_1)",
-          "caution": "Anchor at the corridor floor before reaching into the open carton."
+          "action": "NAVIGATE_TO(rag.n.01_1)",
+          "caution": "Approach the visible rag inside the corridor carton before extracting it."
         },
         {
           "action": "GRASP(rag.n.01_1)",
@@ -335,7 +423,7 @@
           "caution": null
         },
         {
-          "action": "NAVIGATE_TO(floor.n.01_1)",
+          "action": "NAVIGATE_TO(peach.n.03_1)",
           "caution": null
         },
         {
@@ -351,8 +439,8 @@
           "caution": "The tablespoon is now exposed inside the carton."
         },
         {
-          "action": "NAVIGATE_TO(floor.n.01_1)",
-          "caution": "Use T1 memory to recover the reusable utensil from the corridor carton."
+          "action": "NAVIGATE_TO(tablespoon.n.02_1)",
+          "caution": "Use T1 memory to approach and recover the reusable utensil from the corridor carton."
         },
         {
           "action": "GRASP(tablespoon.n.02_1)",
@@ -367,15 +455,15 @@
           "caution": "Stage the recovered spoon visibly on the corridor floor, outside compost."
         },
         {
-          "action": "NAVIGATE_TO(floor.n.01_1)",
-          "caution": "The hidden utensil is now secured; anchor at the corridor floor before repacking ordinary waste."
+          "action": "NAVIGATE_TO(rag.n.01_1)",
+          "caution": "The hidden utensil is now secured; return to the staged rag before repacking ordinary waste."
         },
         {
           "action": "GRASP(rag.n.01_1)",
           "caution": null
         },
         {
-          "action": "NAVIGATE_TO(floor.n.01_1)",
+          "action": "NAVIGATE_TO(carton.n.02_1)",
           "caution": null
         },
         {
@@ -383,7 +471,7 @@
           "caution": "Return the dirty rag to the carrier only after the tablespoon is safely outside it."
         },
         {
-          "action": "NAVIGATE_TO(floor.n.01_1)",
+          "action": "NAVIGATE_TO(peach.n.03_1)",
           "caution": null
         },
         {
@@ -391,7 +479,7 @@
           "caution": null
         },
         {
-          "action": "NAVIGATE_TO(floor.n.01_1)",
+          "action": "NAVIGATE_TO(carton.n.02_1)",
           "caution": null
         },
         {
@@ -399,7 +487,7 @@
           "caution": "Only the ordinary rag and peach are now inside the carrier."
         },
         {
-          "action": "NAVIGATE_TO(floor.n.01_1)",
+          "action": "NAVIGATE_TO(carton.n.02_1)",
           "caution": null
         },
         {
@@ -478,8 +566,8 @@
           "caution": null
         },
         {
-          "action": "NAVIGATE_TO(floor.n.01_2)",
-          "caution": "Anchor at the utility floor before removing the visible laundry; its cached living-room room label is stale after transport."
+          "action": "NAVIGATE_TO(sweatshirt.n.01_1)",
+          "caution": "Approach the visible sweatshirt inside the utility-room hamper before extracting it."
         },
         {
           "action": "GRASP(sweatshirt.n.01_1)",
@@ -494,8 +582,8 @@
           "caution": null
         },
         {
-          "action": "NAVIGATE_TO(floor.n.01_2)",
-          "caution": "Use T2 memory to recover the electrical item from the utility hamper."
+          "action": "NAVIGATE_TO(battery.n.02_1)",
+          "caution": "Use T2 memory to approach and recover the electrical item from the utility hamper."
         },
         {
           "action": "GRASP(battery.n.02_1)",
@@ -518,15 +606,15 @@
           "caution": "Open the DUMP_INTO destination before grasping the source hamper."
         },
         {
-          "action": "NAVIGATE_TO(floor.n.01_2)",
-          "caution": "The electrical exception is now secured; anchor at the utility floor before loading the washable item."
+          "action": "NAVIGATE_TO(sweatshirt.n.01_1)",
+          "caution": "The electrical exception is now secured; return to the staged sweatshirt before loading it."
         },
         {
           "action": "GRASP(sweatshirt.n.01_1)",
           "caution": null
         },
         {
-          "action": "NAVIGATE_TO(floor.n.01_2)",
+          "action": "NAVIGATE_TO(hamper.n.02_1)",
           "caution": null
         },
         {
@@ -534,7 +622,7 @@
           "caution": "Return only the washable sweatshirt to the carrier; the battery remains secured on the utility-room floor."
         },
         {
-          "action": "NAVIGATE_TO(floor.n.01_2)",
+          "action": "NAVIGATE_TO(hamper.n.02_1)",
           "caution": null
         },
         {

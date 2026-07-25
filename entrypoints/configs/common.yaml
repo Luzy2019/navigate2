@@ -10,7 +10,7 @@ scene_graph:
   step_interval: 30
   update_every: 1
   history_interval: 30
-  image_size: 512x512
+  image_size: 256x256
   sensor_name: null
   hfov: 90.0
   output_debug_matching: true
@@ -42,7 +42,7 @@ scene_graph:
     samjam_crop_n_layers: 1
     samjam_max_masks: 40
     samjam_match_iou: 0.25
-    samjam_native_match_iou: 0.03
+    samjam_native_match_iou: 0.25
     samjam_overlap_iou_threshold: 0.05
     samjam_enable_overlap_relations: false
     samjam_keep_unmatched_masks: false
@@ -73,8 +73,8 @@ scene_graph:
     scene_graph_task_scene_bev_max_side: 4096
     scene_graph_task_scene_bev_max_scale: 48.0
     scene_graph_bev_video_fps: 2.0
-    scene_graph_llm_model: gpt-4o-mini
-    scene_graph_vlm_model: gpt-4o-mini
+    scene_graph_llm_model: gpt-4o
+    scene_graph_vlm_model: gpt-4o
     unigoal_node_space: null
     unigoal_extra_node_space: null
     unigoal_grounded_sam_device: null
@@ -165,5 +165,5 @@ scheduler:
 
 prompting:
   builder: semantic
-  sections: [task, timers, action]
+  sections: [task, scene, objects, timers, action]
   options: {}

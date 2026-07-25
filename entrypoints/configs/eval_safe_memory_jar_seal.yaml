@@ -1,6 +1,10 @@
 includes:
   - eval_safe_memory_starter_physical.yaml
 
+scene_graph:
+  backend_options:
+    samjam_points_per_batch: 4
+
 navigation:
   # The mug insertion and retrieval runs finish at a stable microwave-facing
   # stance. Re-entering navigation from that accepted region adds a long

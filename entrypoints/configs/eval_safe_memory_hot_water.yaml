@@ -1,0 +1,11 @@
+includes:
+  - eval_safe_memory_starter_physical.yaml
+
+scene_graph:
+  backend_options:
+    samjam_points_per_batch: 16
+
+scheduler:
+  process_definitions:
+    - process_type: cooling
+      blocking_actions: []

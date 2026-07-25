@@ -1,6 +1,10 @@
 includes:
   - eval_safe_memory.yaml
 
+navigation:
+  # Preserve the A* corners through the narrow kitchen / living-room route.
+  clearance_aware_simplify: false
+
 starter_primitives:
   # The kitchen table approach is sensitive to the sampled side after its
   # surrounding chairs are removed. Keep a bounded set of native retries and
@@ -10,10 +14,15 @@ starter_primitives:
   # The validated table-relay stance reaches the battery at about 1.162 m;
   # keep this wider envelope task-local rather than changing the shared default.
   symbolic_grasp_max_goal_radius: 1.2
+  # Moved task objects have no stable room label after cross-room placement.
+  # Use current object positions for their explicit pre-grasp navigation.
+  explicit_grasp_use_object_navigation: true
+  explicit_grasp_navigation_max_goal_radius: 1.2
   # Native Inside sampling treats cloth as a rigid cuboid and rejects this carton.
   symbolic_cloth_inside_drop: true
   symbolic_cloth_inside_drop_container_categories:
     - carton
+    - compost_bin
     - hamper
   # Keep the release near the container opening; the fit repair below controls
   # the captured fold. A finite negative offset is allowed because the native
@@ -26,12 +35,14 @@ starter_primitives:
   # hamper opening before the real dynamic release.
   symbolic_cloth_inside_fit_shape: true
   symbolic_cloth_inside_fit_container_scale: 0.45
-  # Keep the grabbed fold rigid during symbolic carry; release remains dynamic.
+  # Keep the grabbed fold rigid during symbolic carry so the existing
+  # PLACE_INSIDE fit also bounds rag before loaded-container transport.
   symbolic_cloth_carry_preserve_shape: true
   symbolic_cloth_carry_preserve_shape_categories:
+    - rag
     - hoodie
-  # Loaded containers need a separate allowlist: preserving rag shape while
-  # carrying the carton must not alter the already validated direct rag grasp.
+  # Loaded containers use a separate capture path so cloth folds remain
+  # attached during carton and hamper transport.
   symbolic_loaded_cloth_carry_preserve_shape: true
   symbolic_loaded_cloth_carry_preserve_shape_categories:
     - rag

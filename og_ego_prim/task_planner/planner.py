@@ -17,6 +17,8 @@ from og_ego_prim.utils.planning import (
     list_observation_images,
     parse_json_code_block,
     planner_entity_candidates,
+    planner_prompt_entity_ids,
+    redact_bddl_instance_ids,
 )
 from og_ego_prim.utils.prompts import *
 from og_ego_prim.utils.task_registry import get_task_config_path
@@ -208,6 +210,27 @@ class AgentPlanner:
             )
             if runtime_prompt:
                 history_sections.append(f"Modular runtime context:\n{runtime_prompt}")
+            outcome = self.runtime_controller.last_outcome
+            if outcome is not None and outcome.executed and not outcome.succeeded:
+                diagnostics = dict(
+                    getattr(outcome.action_record, "extensions", {}).get(
+                        "diagnostics", {}
+                    )
+                    or {}
+                )
+                reason = (
+                    diagnostics.get("error_message")
+                    or outcome.reason
+                    or "execution failed"
+                )
+                history_sections.append(
+                    "Last execution failed:\n"
+                    f"- Action: {outcome.review.action.to_legacy_plan()}\n"
+                    f"- Reason: {reason}\n"
+                    "The action did not complete. Do not assume its intended "
+                    "postcondition; use the current observation and held-object "
+                    "state before choosing the correction."
+                )
         if callable(self.held_object_getter):
             history_sections.append(
                 f"Current held object: {self._held_object() or 'None'}"
@@ -227,16 +250,18 @@ class AgentPlanner:
                 assert self.tracker.awareness is not None and 'content' in self.tracker.awareness
                 awareness = self.tracker.awareness['content']
 
-            return build_starter_step_prompt(
-                objects_str=self.objects_str,
-                task_instruction=self.task_instruction,
-                object_abilities_str=self.object_abilities_str,
-                task_goal=self.goal_description,
-                wash_rules_str=self.wash_rules_str,
-                history_actions=history_plans,
-                prompt_setting=self.prompt_setting,
-                scene_description=scene_description,
-                awareness=awareness,
+            return redact_bddl_instance_ids(
+                build_starter_step_prompt(
+                    objects_str=self.objects_str,
+                    task_instruction=self.task_instruction,
+                    object_abilities_str=self.object_abilities_str,
+                    task_goal=self.goal_description,
+                    wash_rules_str=self.wash_rules_str,
+                    history_actions=history_plans,
+                    prompt_setting=self.prompt_setting,
+                    scene_description=scene_description,
+                    awareness=awareness,
+                )
             )
 
         if not self.use_initial_setup and not self.use_self_caption:
@@ -336,7 +361,7 @@ class AgentPlanner:
             else:
                 raise Exception('Wrong prompt setting.')
 
-        return prompt
+        return redact_bddl_instance_ids(prompt)
 
     def begin_lifelong_subtask(
         self,
@@ -345,6 +370,15 @@ class AgentPlanner:
     ) -> None:
         """Switch the active instruction without resetting the simulator."""
         self.task_instruction = task_instruction
+        self.goal_description = task_instruction
+        prompt_objects = planner_prompt_entity_ids(
+            self.allowed_entity_ids,
+            task_instruction,
+        )
+        self.objects_str = '\n'.join(
+            f"{index}. {entity_id}"
+            for index, entity_id in enumerate(prompt_objects, start=1)
+        )
         self._pending_rethinking_prompt = None
         self._pending_manipulation = None
         self._subtask_plan_start = len(self.tracker.plans)
@@ -387,6 +421,39 @@ class AgentPlanner:
         else:
             caution = plan['caution']
 
+        if (
+            self.primitive_type == "starter"
+            and operator.upper() in {"OPEN", "CLOSE"}
+            and callable(self.held_object_getter)
+            and self._held_object() is not None
+        ):
+            print(
+                f"[agent][planner_guard] rejecting {operator.upper()} while "
+                "the gripper is occupied"
+            )
+            sys.stdout.flush()
+            return None
+
+        last_outcome = (
+            None
+            if self.runtime_controller is None
+            else self.runtime_controller.last_outcome
+        )
+        if (
+            self.primitive_type == "starter"
+            and last_outcome is not None
+            and last_outcome.executed
+            and not last_outcome.succeeded
+            and last_outcome.review.action.to_legacy_plan().strip().lower()
+            == f"{operator}({params})".lower()
+        ):
+            print(
+                "[agent][planner_guard] rejecting unchanged retry of failed "
+                f"{operator.upper()}({params})"
+            )
+            sys.stdout.flush()
+            return None
+
         placement_actions = {
             "PLACE_ON_TOP", "PLACE_INSIDE", "POUR_INTO", "DUMP_INTO"
         }
@@ -399,6 +466,19 @@ class AgentPlanner:
             print(
                 "[agent][planner_guard] rejecting starter placement while "
                 "the gripper is empty"
+            )
+            sys.stdout.flush()
+            return None
+
+        if (
+            self.primitive_type == "starter"
+            and operator.upper() == "NAVIGATE_TO"
+            and objects
+            and self._last_plan_is_navigation_to(objects[0])
+        ):
+            print(
+                "[agent][planner_guard] rejecting repeated successful "
+                f"NAVIGATE_TO({objects[0]})"
             )
             sys.stdout.flush()
             return None
@@ -508,6 +588,7 @@ class AgentPlanner:
 
     def step(self, use_obs=True, max_step=None) -> Generator[str, None, None]:
         retry = 0
+        retry_feedback = None
         start_step = self.current_step
         while True:
             if self._pending_manipulation is not None:
@@ -530,6 +611,8 @@ class AgentPlanner:
             # get obs after last execution
             last_plan, obs = self._get_last_execution_info(use_obs)
             prompt = self._prepare_prompt()
+            if retry_feedback is not None:
+                prompt += f"\n\nPlanner correction:\n{retry_feedback}"
 
             if self.debug:
                 print(f'[agent] last_step: {last_plan}, Continue (y/Y): ')
@@ -550,6 +633,12 @@ class AgentPlanner:
             results = self._verify_plan(next_plan)
             if results is None:
                 retry += 1
+                retry_feedback = (
+                    "The previous proposal was invalid, repeated a completed "
+                    "action, or repeated a failed action without correcting "
+                    "its precondition. Re-read Current held object and active "
+                    "processes, then choose a different applicable action."
+                )
                 if retry < self.retry:
                     print(f"[agent] retry...")
                     sys.stdout.flush()
@@ -562,6 +651,7 @@ class AgentPlanner:
                     return
             else:
                 retry = 0
+                retry_feedback = None
 
                 operator, params, caution = results
                 next_plan: StepwisePlan = self.record_plan(
@@ -585,7 +675,10 @@ class AgentPlanner:
         context = TaskPlanContext(task_json_data)
         task_instruction = context.task_instruction
         objects_list = context.object_list
-        objects_str = '\n'.join(f"{i+1}. {item.strip()}" for i, item in enumerate(objects_list))
+        prompt_objects = planner_prompt_entity_ids(objects_list, task_instruction)
+        objects_str = '\n'.join(
+            f"{i+1}. {item}" for i, item in enumerate(prompt_objects)
+        )
         intial_setup_list = context.initial_setup
         initial_setup_str = '\n'.join(f"{item.strip()}" for i, item in enumerate(intial_setup_list))
 

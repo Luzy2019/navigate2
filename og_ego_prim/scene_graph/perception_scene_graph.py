@@ -21,6 +21,7 @@ from .schema import (
 )
 from .state_diff import SceneGraphDiffer, SceneGraphStateTracker
 from og_ego_prim.config.runtime_config import SceneGraphConfig
+from og_ego_prim.utils.planning import redact_bddl_instance_ids
 
 
 def _target_from_raw_plan(raw_plan: Optional[str]) -> Optional[str]:
@@ -133,6 +134,7 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
         self.env = None
         self.global_step_index = 0
         self.latest_result: Optional[PerceptionResult] = None
+        self.task_instruction: Optional[str] = None
         self.snapshot = SceneGraphSnapshot(
             step_index=-1, primitive_name=None, raw_plan=None
         )
@@ -192,6 +194,7 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
             return self.snapshot
 
         self.backend.reset(env)
+        self.set_task_instruction(self.task_instruction)
         self.snapshot = self._run_perception(context=None, force=True)
         return self.snapshot
 
@@ -241,6 +244,15 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
         target = _target_from_raw_plan(raw_plan)
         if target and self.backend is not None and hasattr(self.backend, "set_object_goal"):
             self.backend.set_object_goal(target)
+
+    def set_task_instruction(self, instruction: Optional[str]) -> None:
+        self.task_instruction = str(instruction or "").strip() or None
+        if self.backend is not None and hasattr(self.backend, "set_task_instruction"):
+            self.backend.set_task_instruction(self.task_instruction)
+
+    def set_task_categories(self, categories) -> None:
+        if self.backend is not None and hasattr(self.backend, "set_task_categories"):
+            self.backend.set_task_categories(categories)
 
     def state_changes(
         self,
@@ -361,7 +373,7 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
         force: bool = False,
     ) -> SceneGraphSnapshot:
         primitive_name = None if context is None else context.primitive_name
-        raw_plan = None if context is None else context.raw_plan
+        raw_plan = None if context is None else redact_bddl_instance_ids(context.raw_plan)
         step_index = (
             self.global_step_index
             if context is None
@@ -418,6 +430,12 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
             "skipped": skipped,
             "ready": True,
             "perception_forced": force,
+            "action_history": [
+                redact_bddl_instance_ids(event["raw_plan"])
+                for event in result.metadata.get("manipulation_event_history", ())
+                if event.get("source") == "AgentRuntimeController.action_executed"
+                and event.get("raw_plan")
+            ],
         }
         metadata = {
             "source": "perception",
@@ -688,6 +706,7 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
                 group.get("group_name")
                 or group.get("name")
                 or group.get("label")
+                or group.get("caption")
                 or f"group_{index}"
             )
             specs.append(

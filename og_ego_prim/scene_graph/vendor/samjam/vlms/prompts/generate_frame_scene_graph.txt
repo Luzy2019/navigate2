@@ -19,6 +19,10 @@ of that object. Do not include nearby tables, cabinets, background, or adjacent
 objects in the box. For small objects such as bread, tissue_box, bottles, cups,
 fruit, tools, and boxes, inspect the image carefully and make the box precise.
 If an object is partially occluded, box only the visible part.
+When multiple physically distinct instances of the same category are visible,
+output one object per instance with a distinct id and an independent tight box.
+Do not merge nearby instances into one box or omit a visible instance because
+another instance of the same category was already listed.
 Strictly adhere to the following JSON structure:
 
 {

@@ -22,6 +22,8 @@ from og_ego_prim.utils.planning import (
     normalize_planner_action,
     parse_model_json_object,
     planner_entity_candidates,
+    planner_prompt_entity_ids,
+    redact_bddl_instance_ids,
     validate_planner_action,
 )
 from og_ego_prim.utils.serialization import to_debug_builtin
@@ -42,19 +44,40 @@ one allowed destination and use it for every placement. Include required
 operation preparation, but never include NAVIGATE_TO. Return {"status":"LOADING_PLAN",
 "destination":"entity","steps":["atomic action"]}."""
 
-_SAFETY_PROMPT = """Generate one complete operation-only safety plan that
-resolves the risk while preserving the task goal. Prefer a safe same-role
-alternative to the blocked operation when one exists; otherwise generate the
-complete risk-resolution operation sequence. Do not replace an entity explicitly
-required by the task. A same-role alternative must keep the action name and, for
-multiple arguments, the first argument. Use the current held_object, do not include
-NAVIGATE_TO, and do not force the original unsafe operation to be retried. Return
+_SAFETY_PROMPT = """Generate an operation-only safety plan for failed_action
+within the current task_instruction. goal_description may contain later subtasks
+and is not part of this plan. When loading is null, return the minimal plan: every
+step before the final step must directly remove blocked_reason, and the final step
+must be failed_action after that risk has been removed, or a safe same-role
+alternative with the same action name and, for multiple arguments, the same first
+argument. Do not append anything after that final operation. When loading is not
+null, return the complete remaining loading sequence: first remove blocked_reason,
+then execute failed_action or its safe same-role alternative, and then complete
+every remaining pending placement in the supplied loading order. Do not replace a task-required
+entity, skip a required state transition, change held-object contents, or perform
+unrelated later-task operations. PLACE_INSIDE moves the held object itself;
+POUR_INTO transfers its contents. The blocked action was not executed. Use the
+current held_object, do not include NAVIGATE_TO, and make every step executable in
+order. When held_object is not null, do not GRASP until a placement or release has
+made the gripper empty. Do not add an operation that the final step immediately
+undoes. RELEASE is invalid after placement because the gripper is already empty.
+If operating another entity risks exposing the held object, place the held
+object on a safe task-relevant surface before the final operation. When held_object
+is null, do not start with PLACE_ON_TOP, PLACE_INSIDE,
+POUR_INTO, DUMP_INTO, or RELEASE; first GRASP a safe object if the plan needs one
+held. Use a WAIT_* action only for a matching active process in pending_timers.
+The goal field must briefly name the blocked risk being removed, not copy the task
+or goal_description. Return
 {"status":"SAFETY_PLAN","goal":"goal","steps":["atomic action"]}."""
 
 _EXECUTE_PROMPT = """Using only current RGB and held_object, prepare
-the intended operation. Return exactly that operation when executable, or one
-NAVIGATE_TO(allowed_entity) when navigation is needed. Return
-{"status":"ACTION","action":"atomic action"}."""
+the immutable intended_operation. Return exactly the same operation with the same
+arguments when executable. The only allowed deviation is NAVIGATE_TO(one argument
+of intended_operation) when navigation is required. Never substitute another
+operation, argument, or fallback surface. For unary held-object placement, pour,
+or dump operations, the sole argument is the destination. Return one JSON object
+with status ACTION and action set to that exact operation. Never return placeholder
+text such as "atomic action"."""
 
 
 @runtime_checkable
@@ -160,20 +183,29 @@ class VLMClosedLoopPlannerAdapter:
         instruction: str,
         **extra: Any,
     ) -> tuple[Dict[str, Any], str]:
+        task_instruction = context.task_instruction or self.agent.task_instruction
         payload = {
-            "task_instruction": context.task_instruction or self.agent.task_instruction,
+            "task_instruction": task_instruction,
             "goal_description": context.section_data.get("goal_description"),
-            "allowed_entities": list(self.allowed_entity_ids),
+            "allowed_entities": list(
+                planner_prompt_entity_ids(self.allowed_entity_ids, task_instruction)
+            ),
             "available_actions": self.valid_primitives,
             "held_object": self._held_object(),
+            "scene_graph": context.current_scene,
+            "object_views": context.object_views,
             "pending_timers": context.pending_timers,
             **extra,
         }
+        payload = redact_bddl_instance_ids(payload)
         prompt = (
             f"{instruction.strip()}\n\n"
             "Use only the supplied action vocabulary. Prefer exact entity identifiers; "
             "when same-category instances cannot be distinguished, their shared generic "
             "category is also valid and will be grounded by the runtime. "
+            "Each available_actions value is the exact required argument count. "
+            "When a placement, pour, or dump action has arity 1, its only argument is "
+            "the destination and the source object is current held_object. "
             "Every action string must use canonical NAME(arg1, arg2) syntax, "
             "including empty parentheses for zero-argument actions. "
             "Return one strict JSON object without markdown.\n\n"
@@ -416,6 +448,18 @@ class VLMClosedLoopPlannerAdapter:
         action = self._action(payload.get("action"))
         if intended.name == "GRASP" and action.name == "NAVIGATE_TO":
             action = self._action(f"NAVIGATE_TO({intended.object_id})")
+        previous = self.agent.runtime_controller.last_outcome
+        if (
+            action.name == "NAVIGATE_TO"
+            and previous is not None
+            and previous.executed
+            and previous.succeeded
+            and self._same_action(
+                action,
+                self._planner_action(previous.review.action),
+            )
+        ):
+            action = intended
         operation = action.name != "NAVIGATE_TO"
         if operation and not self._same_action(action, intended):
             raise ValueError("operation preparation changed the intended operation")
@@ -491,9 +535,9 @@ class VLMClosedLoopPlannerAdapter:
         if settled == "pending":
             return None
         if settled == "failed":
-            if self.agent.tracker.termination is None:
-                self.agent.tracker.track_termination(reason="execution_error")
-            return None
+            self._steps = []
+            self._root_action = None
+            self._safety_goal = None
         if settled == "scheduler":
             if self._steps:
                 self._handle_risk_block(context, review)

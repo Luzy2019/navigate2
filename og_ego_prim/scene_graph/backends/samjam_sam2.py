@@ -9,7 +9,7 @@ import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -151,25 +151,25 @@ def _bbox_match_decision(metrics: Dict[str, Any], iou_threshold: float) -> Tuple
     mask_coverage = metrics.get("mask_coverage")
     mask_coverage_value = 0.0 if mask_coverage is None else float(mask_coverage)
     area_ratio = float(metrics.get("area_ratio") or float("inf"))
-    center_inside = bool(metrics.get("center_in_sam_mask"))
-    if metrics.get("center_in_sam_mask") is None:
-        center_inside = bool(metrics.get("center_in_sam_bbox"))
+    center_inside = metrics.get("center_in_sam_mask")
+    if center_inside is None:
+        center_inside = metrics.get("center_in_sam_bbox")
 
     coverage_threshold = _env_float("ISBENCH_SAMJAM_MATCH_VLM_COVERAGE", 0.5)
     mask_coverage_threshold = _env_float("ISBENCH_SAMJAM_MATCH_MASK_COVERAGE", 0.35)
-    coverage_max_area_ratio = _env_float("ISBENCH_SAMJAM_MATCH_COVERAGE_MAX_AREA_RATIO", 20.0)
+    max_area_ratio = _env_float("ISBENCH_SAMJAM_MATCH_COVERAGE_MAX_AREA_RATIO", 20.0)
     center_min_coverage = _env_float("ISBENCH_SAMJAM_MATCH_CENTER_MIN_COVERAGE", 0.2)
     center_max_area_ratio = _env_float("ISBENCH_SAMJAM_MATCH_CENTER_MAX_AREA_RATIO", 12.0)
 
-    if iou >= iou_threshold:
+    if center_inside and iou >= iou_threshold:
         return True, "iou", iou
-    if area_ratio <= coverage_max_area_ratio and vlm_coverage >= coverage_threshold:
-        return True, "vlm_coverage", max(iou, vlm_coverage)
-    if area_ratio <= coverage_max_area_ratio and mask_coverage_value >= mask_coverage_threshold:
+    if center_inside and area_ratio <= max_area_ratio and mask_coverage_value >= mask_coverage_threshold:
         return True, "mask_coverage", max(iou, mask_coverage_value)
+    if center_inside and area_ratio <= max_area_ratio and vlm_coverage >= coverage_threshold:
+        return True, "vlm_coverage", max(iou, vlm_coverage)
     if center_inside and area_ratio <= center_max_area_ratio and vlm_coverage >= center_min_coverage:
-        return True, "center", max(iou, vlm_coverage, 0.5)
-    return False, "low_iou", max(iou, min(vlm_coverage, 0.49), min(mask_coverage_value, 0.34))
+        return True, "center", max(iou, vlm_coverage)
+    return False, "low_geometry", max(iou, vlm_coverage, mask_coverage_value)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -277,6 +277,8 @@ def _canonical_object_name(name: Optional[str], is_hand: bool = False) -> str:
     }
     if normalized in aliases:
         return aliases[normalized]
+    if normalized in {"water_bottle", "waterbottle"}:
+        return "bottle"
     if normalized in {"counter", "countertop", "kitchen_countertop"}:
         return "kitchen_counter"
     return normalized
@@ -775,10 +777,8 @@ class SAMJAMVLMAdapter:
     def __init__(
         self,
         scene_graph_config: Optional[SceneGraphConfig] = None,
-        task_categories: Iterable[str] = (),
     ):
         self.scene_graph_config = scene_graph_config or _cfg()
-        self.task_categories = tuple(dict.fromkeys(task_categories))
         self.object_goal: Optional[str] = None
         self.prompt_path = (
             repo_root()
@@ -794,7 +794,11 @@ class SAMJAMVLMAdapter:
         self.prompt: Optional[str] = None
         self.printed_request_config = False
 
-    def generate(self, frame: FrameObservation) -> Dict[str, Any]:
+    def generate(
+        self,
+        frame: FrameObservation,
+        task_instruction: Optional[str] = None,
+    ) -> Dict[str, Any]:
         api_key = OPENAI_BASE_KEY
         base_url = OPENAI_BASE_URL
         if not api_key:
@@ -818,6 +822,16 @@ class SAMJAMVLMAdapter:
         self._print_request_config(base_url, model, api_key)
 
         prompt = self._load_prompt()
+        task_focus = re.sub(r"\.n\.\d+_\d+", "", str(task_instruction or ""))
+        task_focus = re.sub(r"_+", " ", task_focus)
+        task_focus = re.sub(r"\s+", " ", task_focus).strip()
+        if task_focus:
+            prompt += (
+                f"\n\nCurrent subtask focus: {task_focus}\n"
+                "Prioritize visible objects needed for this subtask and their direct "
+                "support surfaces or containers. Do not infer object instance identity "
+                "or emit a category only because the subtask mentions it."
+            )
         if self.object_goal:
             prompt += (
                 f"\n\nCurrent navigation target: {self.object_goal}. "
@@ -826,36 +840,53 @@ class SAMJAMVLMAdapter:
                 "objects, and use this exact category name when it is visible. Do not "
                 "invent it when it is absent."
             )
-        completion = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{self._encode_rgb(frame.rgb)}",
-                                "detail": self.scene_graph_config.option(
-                                    "ISBENCH_SAMJAM_VLM_IMAGE_DETAIL", "high"
-                                ),
+        attempts = 2 if self.object_goal else 1
+        for attempt in range(attempts):
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{self._encode_rgb(frame.rgb)}",
+                                    "detail": self.scene_graph_config.option(
+                                        "ISBENCH_SAMJAM_VLM_IMAGE_DETAIL", "high"
+                                    ),
+                                },
                             },
-                        },
-                    ],
-                }
-            ],
-            response_format={"type": "json_object"},
-            timeout=float(
-                self.scene_graph_config.option("ISBENCH_SAMJAM_VLM_TIMEOUT", 120)
-            ),
-        )
-        content = completion.choices[0].message.content
-        if isinstance(content, list):
-            content = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content)
-        if not content:
-            raise RuntimeError("SAMJAM VLM returned an empty scene graph response")
-        return self._validate_scene_graph(_extract_json_object(content))
+                        ],
+                    }
+                ],
+                response_format={"type": "json_object"},
+                timeout=float(
+                    self.scene_graph_config.option("ISBENCH_SAMJAM_VLM_TIMEOUT", 120)
+                ),
+            )
+            content = completion.choices[0].message.content
+            if isinstance(content, list):
+                content = "".join(
+                    part.get("text", "") if isinstance(part, dict) else str(part)
+                    for part in content
+                )
+            if not content:
+                raise RuntimeError("SAMJAM VLM returned an empty scene graph response")
+            scene_graph = self._validate_scene_graph(_extract_json_object(content))
+            if not self.object_goal or any(
+                _normalize_name(obj.get("name")) == _normalize_name(self.object_goal)
+                for obj in scene_graph["objects"]
+            ):
+                return scene_graph
+            if attempt == 0:
+                prompt += (
+                    f"\n\nThe previous pass omitted the visible navigation target "
+                    f"{self.object_goal}. Reinspect the image and include it with that "
+                    "exact category name and a tight bounding box."
+                )
+        return scene_graph
 
     def _print_request_config(self, base_url: Optional[str], model: str, api_key: str) -> None:
         if self.printed_request_config:
@@ -886,13 +917,6 @@ class SAMJAMVLMAdapter:
                     self.isbench_prompt_path.read_text(encoding="utf-8"),
                 )
             )
-            if self.task_categories:
-                self.prompt += (
-                    "\n\nTask object categories:\n- "
-                    + "\n- ".join(self.task_categories)
-                    + "\nUse an exact category above when the visible object matches it. "
-                    "Do not output an object only because its category is listed."
-                )
 
         return self.prompt
 
@@ -966,6 +990,8 @@ class SAMJAMSAM2Backend:
         self.pending_debug: Optional[Dict[str, Any]] = None
         self.last_result: Optional[PerceptionResult] = None
         self.object_goal: Optional[str] = None
+        self.task_instruction: Optional[str] = None
+        self.task_categories: Tuple[str, ...] = ()
         self._native_video_tmp: Optional[tempfile.TemporaryDirectory] = None
         self._native_video_dir: Optional[Path] = None
         self._reset_native_state()
@@ -983,11 +1009,24 @@ class SAMJAMSAM2Backend:
         self._reset_native_state()
         self.last_result = None
         self.object_goal = None
+        self.task_instruction = None
 
     def set_object_goal(self, target: str) -> None:
         self.object_goal = str(target).strip() or None
         if self.vlm_adapter is not None:
             self.vlm_adapter.object_goal = self.object_goal
+
+    def set_task_instruction(self, instruction: Optional[str]) -> None:
+        self.task_instruction = str(instruction or "").strip() or None
+
+    def set_task_categories(self, categories: Tuple[str, ...]) -> None:
+        self.task_categories = tuple(
+            dict.fromkeys(
+                _canonical_object_name(category)
+                for category in categories
+                if _canonical_object_name(category)
+            )
+        )
 
     def observe(self, env: Any) -> FrameObservation:
         return self.adapter.observe(env)
@@ -996,17 +1035,34 @@ class SAMJAMSAM2Backend:
         with _maybe_suppress_vendor_output():
             generator = self._ensure_mask_generator()
         self._store_native_frame(frame)
-        with _maybe_suppress_vendor_output():
+        import torch
+
+        autocast = (
+            torch.autocast("cuda", dtype=torch.bfloat16)
+            if generator.predictor.device.type == "cuda"
+            else contextlib.nullcontext()
+        )
+        with _maybe_suppress_vendor_output(), autocast:
             masks = generator.generate(frame.rgb)
         vlm_enabled = self._vlm_enabled()
         vlm_scene_graph = {"objects": [], "relationships": []}
         match_summary: Dict[str, Any] = {}
-        candidates = self._mask_candidates(frame, masks)
         if vlm_enabled:
-            vlm_scene_graph = self._ensure_vlm_adapter().generate(frame)
+            vlm_scene_graph = self._ensure_vlm_adapter().generate(
+                frame,
+                task_instruction=self.task_instruction,
+            )
+            vlm_scene_graph = self._filter_vlm_scene_graph(vlm_scene_graph)
+            candidates = self._mask_candidates(frame, masks, vlm_scene_graph)
+            candidates = self._box_prompt_candidates(
+                frame,
+                vlm_scene_graph,
+                candidates,
+            )
             match_summary = self._update_native_samjam(frame, vlm_scene_graph, candidates)
             objects, relations = self._native_objects_and_relations(frame)
         else:
+            candidates = self._mask_candidates(frame, masks)
             objects = self._objects_from_masks(frame, masks)
             relations = self._relations_from_overlaps(objects)
             match_summary = {
@@ -1057,7 +1113,7 @@ class SAMJAMSAM2Backend:
                 "matched_object_count": match_summary.get("matched_object_count", 0),
                 "unmatched_vlm_object_count": match_summary.get("unmatched_vlm_object_count", 0),
                 "unmatched_mask_count": match_summary.get("unmatched_mask_count", 0),
-                "match_iou_threshold": _env_float("ISBENCH_SAMJAM_NATIVE_MATCH_IOU", 0.03),
+                "match_iou_threshold": _env_float("ISBENCH_SAMJAM_NATIVE_MATCH_IOU", 0.25),
                 "rejected_vlm_objects": match_summary.get("rejected_vlm_objects", []),
                 "samjam_match_details": [
                     {
@@ -1217,6 +1273,7 @@ class SAMJAMSAM2Backend:
             current_local_frame_idx=local_frame_idx,
             image_shape=frame.rgb.shape,
         )
+        propagated_native_ids = set(propagated_objs)
         sampled_objs = self._samjam_objects_from_candidates(
             candidates,
             local_frame_idx,
@@ -1228,6 +1285,7 @@ class SAMJAMSAM2Backend:
             next_objs,
             local_frame_idx,
             frame.rgb.shape,
+            propagated_native_ids=propagated_native_ids,
         )
 
         next_cur_objs = {}
@@ -1269,6 +1327,9 @@ class SAMJAMSAM2Backend:
                     continue
             obj = self._new_samjam_object()
             obj.add_frame_seg(local_frame_idx, mask, [float(value) for value in candidate.bbox])
+            if candidate.attributes.get("box_prompt"):
+                obj.box_prompt_vlm_id = candidate.attributes.get("box_prompt_vlm_id")
+                obj.box_prompt_frame_index = local_frame_idx
             native_id = self.samjam_next_id
             objects[native_id] = obj
             self.samjam_next_id += 1
@@ -1286,8 +1347,19 @@ class SAMJAMSAM2Backend:
             return {}, propagated_region
 
         predictor = self._ensure_video_predictor()
-        with _maybe_suppress_vendor_output():
-            inference_state = predictor.init_state(video_path=str(self._native_video_dir))
+        import torch
+
+        autocast = (
+            torch.autocast("cuda", dtype=torch.bfloat16)
+            if predictor.device.type == "cuda"
+            else contextlib.nullcontext()
+        )
+        with _maybe_suppress_vendor_output(), autocast:
+            inference_state = predictor.init_state(
+                video_path=str(self._native_video_dir),
+                offload_video_to_cpu=True,
+                offload_state_to_cpu=True,
+            )
             try:
                 for native_id, obj in self.samjam_cur_objs.items():
                     if previous_local_frame_idx not in obj.frames:
@@ -1328,6 +1400,10 @@ class SAMJAMSAM2Backend:
                         obj.is_hand = total_obj.is_hand
                         obj.is_moving = getattr(total_obj, "is_moving", False)
                         obj.is_moved = getattr(total_obj, "is_moved", False)
+                        obj.box_prompt_vlm_id = getattr(total_obj, "box_prompt_vlm_id", None)
+                        obj.box_prompt_frame_index = getattr(
+                            total_obj, "box_prompt_frame_index", None
+                        )
                         obj.add_frame_seg(out_frame_idx, out_mask, bbox)
                         next_objs[out_obj_id] = obj
                     break
@@ -1344,13 +1420,16 @@ class SAMJAMSAM2Backend:
         samjam_objs: Dict[int, Any],
         local_frame_idx: int,
         image_shape: Tuple[int, ...],
+        propagated_native_ids: Optional[set[int]] = None,
     ) -> Tuple[Dict[int, Any], Dict[str, str], Dict[str, Any]]:
         id_map = {}
         matched_objs = {}
+        used_native_ids = set()
+        propagated_native_ids = propagated_native_ids or set()
         unmatched_vlm_ids = []
         rejected_vlm_objects = []
         match_details = []
-        match_threshold = _env_float("ISBENCH_SAMJAM_NATIVE_MATCH_IOU", 0.03)
+        match_threshold = _env_float("ISBENCH_SAMJAM_NATIVE_MATCH_IOU", 0.25)
 
         for vlm_index, vlm_obj in enumerate(vlm_scene_graph.get("objects", [])):
             vlm_bbox = _vlm_bbox_to_xyxy(vlm_obj.get("bbox"), image_shape)
@@ -1378,9 +1457,17 @@ class SAMJAMSAM2Backend:
             best_metrics: Dict[str, Any] = {}
             best_accept_reason = "low_iou"
             best_accepted = False
+            best_propagated_match = False
             best_obj_id = None
             best_sam_obj = None
             for native_id, sam_obj in samjam_objs.items():
+                if native_id in used_native_ids:
+                    continue
+                if (
+                    getattr(sam_obj, "box_prompt_frame_index", None) == local_frame_idx
+                    and getattr(sam_obj, "box_prompt_vlm_id", None) != str(vlm_id)
+                ):
+                    continue
                 frame_data = sam_obj.frames.get(local_frame_idx)
                 if frame_data is None:
                     continue
@@ -1389,14 +1476,27 @@ class SAMJAMSAM2Backend:
                     frame_data.get("bbox"),
                     frame_data.get("seg"),
                 )
-                accepted, accept_reason, score = _bbox_match_decision(metrics, match_threshold)
+                accepted, accept_reason, score = _bbox_match_decision(
+                    metrics,
+                    match_threshold,
+                )
                 iou = float(metrics.get("iou") or 0.0)
+                propagated_match = accepted and native_id in propagated_native_ids
                 if (
                     best_sam_obj is None
                     or (accepted and not best_accepted)
                     or (
                         accepted == best_accepted
-                        and (score > best_score or (score == best_score and iou >= best_iou))
+                        and (
+                            (propagated_match and not best_propagated_match)
+                            or (
+                                propagated_match == best_propagated_match
+                                and (
+                                    score > best_score
+                                    or (score == best_score and iou >= best_iou)
+                                )
+                            )
+                        )
                     )
                 ):
                     best_iou = iou
@@ -1404,6 +1504,7 @@ class SAMJAMSAM2Backend:
                     best_metrics = metrics
                     best_accept_reason = accept_reason
                     best_accepted = accepted
+                    best_propagated_match = propagated_match
                     best_obj_id = native_id
                     best_sam_obj = sam_obj
             if best_sam_obj is None or not best_accepted:
@@ -1460,6 +1561,7 @@ class SAMJAMSAM2Backend:
                 best_sam_obj.is_moved = True
             id_map[vlm_id_int] = best_obj_id
             matched_objs[best_obj_id] = best_sam_obj
+            used_native_ids.add(best_obj_id)
             best_frame = best_sam_obj.frames.get(local_frame_idx, {})
             match_details.append(
                 {
@@ -1635,27 +1737,28 @@ class SAMJAMSAM2Backend:
         device = self.scene_graph_config.device or (
             "cuda" if torch.cuda.is_available() else "cpu"
         )
-        with _maybe_suppress_vendor_output():
-            self.video_predictor = build_sam2_video_predictor(
+        target_device = torch.device(device)
+        model_image_size = int(self.scene_graph_config.image_size[0])
+        with _maybe_suppress_vendor_output(), torch.device("cpu"):
+            predictor = build_sam2_video_predictor(
                 config,
                 str(checkpoint),
-                device=device,
+                device="cpu",
+                hydra_overrides_extra=[
+                    f"++model.image_size={model_image_size}",
+                    "++model.image_encoder.neck.position_encoding.warmup_cache=false",
+                    "++model.memory_encoder.position_encoding.warmup_cache=false",
+                ],
             )
+        self.video_predictor = predictor.to(
+            device=target_device,
+            dtype=torch.bfloat16 if target_device.type == "cuda" else torch.float32,
+        )
         return self.video_predictor
 
     def _ensure_vlm_adapter(self) -> SAMJAMVLMAdapter:
         if self.vlm_adapter is None:
-            object_scope = getattr(getattr(self.env, "task", None), "object_scope", {}) or {}
-            task_categories = sorted(
-                {
-                    _normalize_name(re.sub(r"\.n\.\d+_\d+$", "", str(object_name)))
-                    for object_name in object_scope
-                }
-            )
-            self.vlm_adapter = SAMJAMVLMAdapter(
-                self.scene_graph_config,
-                task_categories=task_categories,
-            )
+            self.vlm_adapter = SAMJAMVLMAdapter(self.scene_graph_config)
             self.vlm_adapter.object_goal = self.object_goal
         return self.vlm_adapter
 
@@ -1666,15 +1769,9 @@ class SAMJAMSAM2Backend:
         vendor_root = repo_root() / "og_ego_prim" / "scene_graph" / "vendor" / "samjam"
         insert_sys_path([vendor_root])
 
-        checkpoint = model_root(self.scene_graph_config) / "samjam" / "sam2.1_hiera_large.pt"
-        config = "configs/sam2.1/sam2.1_hiera_l.yaml"
-        ensure_path_exists(checkpoint, "SAM2 checkpoint")
-
         try:
-            import torch
             import iopath.common.file_io  # noqa: F401
             from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
-            from sam2.build_sam import build_sam2
         except ImportError as exc:
             raise ImportError(
                 "SAMJAM backend requires vendored sam2 plus hydra-core / omegaconf / "
@@ -1682,10 +1779,7 @@ class SAMJAMSAM2Backend:
                 "SAM2 package."
             ) from exc
 
-        device = self.scene_graph_config.device or (
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
-        model = build_sam2(config, str(checkpoint), device=device)
+        model = self._ensure_video_predictor()
         points_per_side = self.scene_graph_config.option_int(
             "ISBENCH_SAMJAM_POINTS_PER_SIDE", 32
         )
@@ -1710,6 +1804,7 @@ class SAMJAMSAM2Backend:
         self,
         frame: FrameObservation,
         masks: List[Dict[str, Any]],
+        vlm_scene_graph: Optional[Dict[str, Any]] = None,
     ) -> List[MaskCandidate]:
         candidates = []
         max_masks = _env_int("ISBENCH_SAMJAM_MAX_MASKS", 40)
@@ -1717,7 +1812,12 @@ class SAMJAMSAM2Backend:
             masks,
             key=lambda item: item.get("predicted_iou", item.get("stability_score", 0.0)) or 0.0,
             reverse=True,
-        )[:max_masks]
+        )
+        vlm_bboxes = tuple(
+            bbox
+            for obj in (vlm_scene_graph or {}).get("objects", [])
+            if (bbox := _vlm_bbox_to_xyxy(obj.get("bbox"), frame.rgb.shape)) is not None
+        )
         for index, mask_info in enumerate(sorted_masks):
             mask = np.asarray(mask_info.get("segmentation"), dtype=bool)
             bbox = mask_info.get("bbox")
@@ -1727,6 +1827,11 @@ class SAMJAMSAM2Backend:
             else:
                 bbox_xyxy = bbox_from_mask(mask)
             if bbox_xyxy is None:
+                continue
+            if index >= max_masks and not any(
+                _bbox_intersection_area(bbox_xyxy, vlm_bbox) > 0.0
+                for vlm_bbox in vlm_bboxes
+            ):
                 continue
             confidence = float(mask_info.get("predicted_iou", mask_info.get("stability_score", 1.0)) or 1.0)
             candidates.append(
@@ -1746,6 +1851,109 @@ class SAMJAMSAM2Backend:
                 )
             )
         return candidates
+
+    def _box_prompt_candidates(
+        self,
+        frame: FrameObservation,
+        vlm_scene_graph: Dict[str, Any],
+        candidates: List[MaskCandidate],
+    ) -> List[MaskCandidate]:
+        match_threshold = _env_float("ISBENCH_SAMJAM_NATIVE_MATCH_IOU", 0.25)
+        missing_boxes = []
+        for obj in vlm_scene_graph.get("objects", []):
+            bbox = _vlm_bbox_to_xyxy(obj.get("bbox"), frame.rgb.shape)
+            if bbox is None:
+                continue
+            if any(
+                _bbox_match_decision(
+                    _bbox_match_metrics(bbox, candidate.bbox, candidate.mask),
+                    match_threshold,
+                )[0]
+                for candidate in candidates
+            ):
+                continue
+            missing_boxes.append((obj.get("id"), bbox))
+        if not missing_boxes:
+            return candidates
+
+        predictor = self._ensure_mask_generator().predictor
+        import torch
+
+        autocast = (
+            torch.autocast("cuda", dtype=torch.bfloat16)
+            if predictor.device.type == "cuda"
+            else contextlib.nullcontext()
+        )
+        next_index = max((candidate.index for candidate in candidates), default=-1) + 1
+        with _maybe_suppress_vendor_output(), autocast:
+            predictor.set_image(frame.rgb)
+            try:
+                for vlm_id, bbox in missing_boxes:
+                    masks, scores, _ = predictor.predict(
+                        box=np.asarray(bbox, dtype=np.float32),
+                        point_coords=np.asarray([_bbox_center(bbox)], dtype=np.float32),
+                        point_labels=np.asarray([1], dtype=np.int32),
+                        multimask_output=True,
+                    )
+                    best = None
+                    for mask, score in zip(masks, scores):
+                        mask = np.asarray(mask, dtype=bool)
+                        mask_bbox = bbox_from_mask(mask)
+                        if mask_bbox is None:
+                            continue
+                        metrics = _bbox_match_metrics(bbox, mask_bbox, mask)
+                        accepted, _, match_score = _bbox_match_decision(
+                            metrics,
+                            match_threshold,
+                        )
+                        if not accepted:
+                            continue
+                        candidate = (match_score, float(score), mask, mask_bbox)
+                        if best is None or candidate[:2] > best[:2]:
+                            best = candidate
+                    if best is None:
+                        continue
+                    _, score, mask, mask_bbox = best
+                    candidates.append(
+                        MaskCandidate(
+                            index=next_index,
+                            mask=mask,
+                            bbox=mask_bbox,
+                            position=None,
+                            room_id="unknown_room",
+                            confidence=score,
+                            attributes={
+                                "source": f"{self.name}:box_prompt",
+                                "mask_area": int(mask.sum()),
+                                "predicted_iou": score,
+                                "box_prompt": True,
+                                "box_prompt_vlm_id": str(vlm_id),
+                            },
+                        )
+                    )
+                    next_index += 1
+            finally:
+                predictor.reset_predictor()
+        return candidates
+
+    def _filter_vlm_scene_graph(self, scene_graph: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.task_categories:
+            return scene_graph
+        objects = [
+            obj
+            for obj in scene_graph.get("objects", [])
+            if _canonical_object_name(obj.get("name")) in self.task_categories
+            or _canonical_object_name(obj.get("name")) in {"table", "kitchen_counter", "sink", "cabinet", "microwave", "clothes_dryer"}
+        ]
+        object_ids = {obj.get("id") for obj in objects}
+        return {
+            "objects": objects,
+            "relationships": [
+                relation
+                for relation in scene_graph.get("relationships", [])
+                if relation.get("subj_id") in object_ids and relation.get("obj_id") in object_ids
+            ],
+        }
 
     def _objects_from_masks(self, frame: FrameObservation, masks: List[Dict[str, Any]]) -> List[PerceivedObject]:
         objects = []
