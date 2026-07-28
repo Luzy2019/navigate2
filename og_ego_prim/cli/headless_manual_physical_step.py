@@ -53,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-serve-key", default="sk-123456")
     parser.add_argument("--planner-work-dir", default="results")
     parser.add_argument(
+        "--prompt-setting",
+        choices=("v0", "v1", "v2", "v3"),
+        default="v1",
+        help="Planner prompt variant. Defaults to the existing v1 behavior.",
+    )
+    parser.add_argument(
         "command",
         choices=("capture", "advance", "replay_capture", "status"),
         help=(
@@ -235,11 +241,12 @@ def _configure_agent(benchmark, args: argparse.Namespace, subtask_index: int):
         local_llm_serve=args.local_llm_serve,
         local_serve_ip=args.local_serve_ip,
         local_serve_key=args.local_serve_key,
-        prompt_setting="v1",
+        prompt_setting=args.prompt_setting,
         primitive_type="starter",
         use_initial_setup=False,
         use_self_caption=False,
         observation_dir=None,
+        starter_manipulation_navigation_guard=False,
     )
     agent.set_tracker(benchmark.tracker)
     agent.set_runtime_controller(benchmark.runtime_controller)

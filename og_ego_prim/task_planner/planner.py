@@ -78,6 +78,7 @@ class AgentPlanner:
         verbose: bool = True,
         debug: bool = False,
         observation_dir: Optional[str] = None,
+        starter_manipulation_navigation_guard: bool = True,
     ) -> None:
         if work_dir is None:
             work_dir = WORK_DIR
@@ -98,8 +99,15 @@ class AgentPlanner:
         self.runtime_controller = None
         self._pending_rethinking_prompt = None
         self._pending_manipulation = None
+        self._last_plan_validation_error = None
         self._subtask_plan_start = 0
         self.held_object_getter = None
+        # Keep the exact text sent to the model available to long-running
+        # physical sessions.  ``EvalTracker`` retains model outputs, but it
+        # deliberately does not retain the full input prompt.
+        self.last_prompt: Optional[str] = None
+        self.last_prompt_sequence = 0
+        self.prompt_records: List[Dict[str, Any]] = []
 
         self.retry = retry
         self.verbose = verbose
@@ -107,6 +115,9 @@ class AgentPlanner:
 
         self.prompt_setting = prompt_setting
         self.primitive_type = primitive_type
+        self.starter_manipulation_navigation_guard = bool(
+            starter_manipulation_navigation_guard
+        )
         self.valid_primitives = get_valid_primitives(primitive_type)
         self.use_initial_setup = use_initial_setup
         self.use_self_caption = use_self_caption
@@ -162,6 +173,32 @@ class AgentPlanner:
             api_key=self.model_config.api_key,
             api_base=self.model_config.api_base,
         )
+
+    def _model_with_prompt_record(
+        self,
+        prompt: str,
+        *,
+        image_file: Any,
+        kind: str,
+    ) -> str:
+        """Call the model while retaining its exact textual input and result."""
+
+        self.last_prompt = prompt
+        self.last_prompt_sequence += 1
+        record: Dict[str, Any] = {
+            "sequence": self.last_prompt_sequence,
+            "kind": kind,
+            "prompt": prompt,
+            "raw_output": None,
+        }
+        self.prompt_records.append(record)
+        try:
+            output = self.client.model(prompt, image_file=image_file)
+        except Exception as exc:
+            record["error"] = f"{exc.__class__.__name__}: {exc}"
+            raise
+        record["raw_output"] = output if isinstance(output, str) else str(output)
+        return output
 
     def _get_last_execution_info(self, use_obs=True):
         last_step, last_plan = 0, 'init'
@@ -385,6 +422,7 @@ class AgentPlanner:
 
 
     def _verify_plan(self, plan: Optional[StepwisePlan]) -> Optional[Tuple[str, str, str]]:
+        self._last_plan_validation_error = None
         if plan is None:
             return None
         if 'action' not in plan:
@@ -392,6 +430,11 @@ class AgentPlanner:
 
         action = plan['action'].strip()
         if action.upper().startswith('DONE'):
+            done_validator = getattr(self, "done_validator", None)
+            reason = done_validator() if callable(done_validator) else None
+            if reason:
+                self._last_plan_validation_error = str(reason)
+                return None
             caution = plan.get('caution', None)
             return 'done', '', caution
 
@@ -483,6 +526,7 @@ class AgentPlanner:
 
         if (
             self.primitive_type == "starter"
+            and self.starter_manipulation_navigation_guard
             and operator.upper() in {
                 "GRASP", "PLACE_ON_TOP", "PLACE_INSIDE", "POUR_INTO", "DUMP_INTO"
             }
@@ -542,7 +586,11 @@ class AgentPlanner:
                 task_goal=self.goal_description,
                 wash_rules_str=self.wash_rules_str,
             )
-        output_caption = self.client.model(prompt_cp, image_file=obs)
+        output_caption = self._model_with_prompt_record(
+            prompt_cp,
+            image_file=obs,
+            kind="caption",
+        )
         return output_caption
 
     def generate_awareness(self, use_obs=True) -> str:
@@ -569,7 +617,11 @@ class AgentPlanner:
                     task_goal=self.goal_description,
                     wash_rules_str=self.wash_rules_str,
                 )
-        output = self.client.model(prompt_sa, image_file=obs)
+        output = self._model_with_prompt_record(
+            prompt_sa,
+            image_file=obs,
+            kind="awareness",
+        )
         return output
 
     def record_plan(
@@ -631,7 +683,11 @@ class AgentPlanner:
                     print(f'[agent] last_step: {last_plan}, Continue (y/Y): ')
                     sys.stdout.flush()
 
-            output = self.client.model(prompt, image_file=obs)
+            output = self._model_with_prompt_record(
+                prompt,
+                image_file=obs,
+                kind="planning",
+            )
             next_plan = parse_json_code_block(output)
             self.tracker.track_raw_output(
                 step=self.current_step + 1,
@@ -646,11 +702,14 @@ class AgentPlanner:
             results = self._verify_plan(next_plan)
             if results is None:
                 retry += 1
-                retry_feedback = (
+                retry_feedback = self._last_plan_validation_error or (
                     "The previous proposal was invalid, repeated a completed "
                     "action, or repeated a failed action without correcting "
                     "its precondition. Re-read Current held object and active "
-                    "processes, then choose a different applicable action."
+                    "processes, then choose a different applicable action. "
+                    "For starter primitives, OPEN and CLOSE are invalid while "
+                    "the gripper holds an object: first safely place or release "
+                    "the held object, then operate the openable object."
                 )
                 if retry < self.retry:
                     print(f"[agent] retry...")

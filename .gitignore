@@ -26,3 +26,4 @@ talk/
 lifelong_graph/
 docs/
 !docs/share
+data/tasks/**

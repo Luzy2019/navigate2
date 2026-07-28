@@ -5,6 +5,10 @@ includes:
 # modest tolerance for small contact-induced yaw stalls without accepting the
 # previous ~85-degree heading error as a valid arrival.
 navigation:
+  # The physical Fetch base contacted the office-corridor wall while following
+  # a route with only 0.232 m of clearance while carrying lint_screen.n.01_2.
+  # Inflate only this task's traversability footprint so A* rejects that corner.
+  trav_map_extra_erosion_margin: 0.10
   stuck_angle_tolerance: 0.45
   # Doorway tracking repeatedly stops 0.47-0.48 m from an intermediate A*
   # waypoint even though the base stays level and the next cell is clear.

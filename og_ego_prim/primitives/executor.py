@@ -150,6 +150,7 @@ class Executor:
             Tuple[int, str], Dict[str, Any]
         ] = {}
         self._cooked_particle_payloads: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._has_pending_heating_process: Optional[Callable[[Any], bool]] = None
 
         self.primitive_set = PRIMITIVE_SET[primitive_type]
 
@@ -182,6 +183,14 @@ class Executor:
         if isinstance(report, Mapping):
             return dict(report)
         return {"supported": True, "result": report}
+
+    def set_pending_heating_process_lookup(
+        self,
+        lookup: Optional[Callable[[Any], bool]],
+    ) -> None:
+        """Bind runtime scheduler state for checkpoint-resilient cook waits."""
+
+        self._has_pending_heating_process = lookup
 
     def close(self):
         return self.end_episode()
@@ -1072,7 +1081,12 @@ class Executor:
                 raise BadExecutionPlanError(
                     f'target object "{getattr(target, "name", target)}" is not cookable or heatable'
                 )
-            check_heat_source_before_cook(cook_target, self.env)
+            has_pending_heating = bool(
+                self._has_pending_heating_process
+                and self._has_pending_heating_process(target)
+            )
+            if not has_pending_heating:
+                check_heat_source_before_cook(cook_target, self.env)
 
         if primitive_name == "WAIT_FOR_WASHED":
             if len(object_refs) != 1:

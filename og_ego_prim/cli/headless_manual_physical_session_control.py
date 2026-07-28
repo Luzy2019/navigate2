@@ -12,18 +12,25 @@ from typing import Optional, Sequence
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session-dir", required=True)
-    parser.add_argument("command", choices=("advance", "status", "checkpoint", "restore", "close"))
+    parser.add_argument(
+        "command",
+        choices=("advance", "advance_async", "observe", "annotate", "preview", "reframe", "status", "checkpoint", "restore", "close"),
+    )
     parser.add_argument("--perception-json")
+    parser.add_argument("--camera-target")
     parser.add_argument("--frame-index", type=int)
     args = parser.parse_args(argv)
-    if args.command == "advance" and not args.perception_json:
-        parser.error("advance requires --perception-json")
+    if args.command in {"advance", "advance_async", "observe", "annotate", "preview"} and not args.perception_json:
+        parser.error(f"{args.command} requires --perception-json")
+    if args.command in {"observe", "reframe"} and not args.camera_target:
+        parser.error(f"{args.command} requires --camera-target")
     if args.command == "restore" and args.frame_index is None:
         parser.error("restore requires --frame-index")
     payload = {
         "command": args.command,
         "perception_json": args.perception_json,
         "frame_index": args.frame_index,
+        "camera_target": args.camera_target,
     }
     socket_path = Path(args.session_dir).resolve() / "control.sock"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:

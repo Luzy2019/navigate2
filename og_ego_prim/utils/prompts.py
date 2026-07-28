@@ -1,12 +1,33 @@
 def build_task_specific_sequence_prompt(task_instruction):
     instruction = task_instruction.lower()
+    cross_room_transfer = (
+        any(word in instruction for word in ("fetch", "bring", "carry"))
+        and any(word in instruction for word in ("living room", "living_room"))
+        and any(word in instruction for word in ("place", "pour", "transfer"))
+    )
     temporal_process = any(
         word in instruction for word in ("heat", "cook", "freeze", "cool")
     ) or (
         "wash" in instruction
         and any(word in instruction for word in ("appliance", "machine", "cycle"))
     )
-    if temporal_process:
+    if cross_room_transfer:
+        workflow = """Selected workflow: cross-room object transfer.
+Anonymous phase order:
+1. Identify the named source object and, while the gripper is empty, prepare its
+   access only if the active instruction requires an openable source or destination.
+2. GRASP the exact named source object.
+3. Place the held object on the named destination, then transfer its contents when
+   the active instruction requires it.
+4. Establish only the final object states explicitly requested by this active task.
+5. DONE.
+Room names describe where objects are; they are context, never action targets.
+Never emit NAVIGATE_TO(living_room_0), NAVIGATE_TO(kitchen_0), or another room
+label. Use the exact task-related object ID, for example GRASP(mason_jar.n.01_1).
+The runtime handles the physical navigation required by GRASP, placement, and
+pouring. Completion rule: do not repeat a successful GRASP, placement, or POUR
+whose required final relation has not been reversed."""
+    elif temporal_process:
         workflow = """Selected workflow: temporal appliance process.
 Anonymous phase order:
 1. While the gripper is empty, prepare appliance access and confirm it is open.

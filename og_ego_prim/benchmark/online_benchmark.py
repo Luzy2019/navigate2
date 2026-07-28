@@ -5,7 +5,7 @@ import math
 import os
 import random
 import time
-from typing import Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 import yaml
 
 import bddl
@@ -295,6 +295,9 @@ class OnlineBenchmark(Benchmark):
                 self.runtime_config.scheduler.expose_cross_subtask_timers
             ),
         )
+        self.executor.set_pending_heating_process_lookup(
+            self._has_pending_heating_process
+        )
         self.tracker.planner_episode = self.runtime_controller.planner_episode
         self.tracker.runtime_modules = {
             'schema_version': 'isbench.runtime_modules.v2',
@@ -332,6 +335,27 @@ class OnlineBenchmark(Benchmark):
                 getattr(getattr(risk_predictor.provider, 'catalog', None), 'rules', ())
             ),
         }
+
+    def _has_pending_heating_process(self, target_obj: Any) -> bool:
+        """Return whether the scheduler already owns this object's heating wait."""
+
+        scope = getattr(getattr(self.env, "task", None), "object_scope", {}) or {}
+        entity_id = next(
+            (
+                str(candidate_id)
+                for candidate_id, reference in scope.items()
+                if getattr(reference, "wrapped_obj", None) is target_obj
+            ),
+            None,
+        )
+        if entity_id is None:
+            return False
+        return bool(
+            self.runtime_controller.components.scheduler.pending_for(
+                entity_id,
+                process_type="heating",
+            )
+        )
 
     def _configure_video_sensors(self):
         image_size = self.runtime_config.artifacts.sensor_image_size

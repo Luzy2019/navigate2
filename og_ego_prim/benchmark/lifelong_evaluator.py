@@ -575,6 +575,29 @@ class LifelongEvaluator:
         instruction: Optional[str] = None,
         h_limit: Optional[int] = None,
     ) -> SubtaskResult:
+        result = self.preview_subtask_completion(
+            subtask_index=subtask_index,
+            action_start_index=action_start_index,
+            action_end_index=action_end_index,
+            termination_reason=termination_reason,
+            instruction=instruction,
+            h_limit=h_limit,
+        )
+        self.results.append(result)
+        return result
+
+    def preview_subtask_completion(
+        self,
+        subtask_index: int,
+        action_start_index: int,
+        action_end_index: int,
+        termination_reason: str,
+        *,
+        instruction: Optional[str] = None,
+        h_limit: Optional[int] = None,
+    ) -> SubtaskResult:
+        """Evaluate a subtask completion without mutating recorded results."""
+
         if subtask_index != len(self.results) + 1:
             raise ValueError("subtasks must be evaluated exactly once and in order")
 
@@ -595,7 +618,6 @@ class LifelongEvaluator:
             instruction=instruction,
             h_limit=h_limit,
         )
-        self.results.append(result)
         return result
 
     def summary(self) -> Dict[str, Any]:

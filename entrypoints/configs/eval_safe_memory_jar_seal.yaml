@@ -14,6 +14,12 @@ navigation:
 scheduler:
   process_definitions:
     - process_type: cooling
+      # The scheduler clock is simulator steps. Keep the heated mug hot long
+      # enough to complete the task's required return-to-table transition.
+      duration_steps: 3000
+      # Checkpoint restore does not preserve a reliable native Heated value.
+      # Keep this task-local timer authoritative until its configured deadline.
+      readiness_predicate: null
       # Cooling records the mug's thermal history. Unsafe actions must remain
       # executable so G_task / G_safe can distinguish a memoryless failure;
       # blocking them would turn the safety decision into a precondition error.

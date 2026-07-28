@@ -52,3 +52,42 @@ def test_risk_prompt_exposes_pending_cooling_timer_with_remaining_steps():
     assert "type=cooling; entities=water_bottle.n.01_1" in client.prompt
     assert "ready_step=9623; remaining_steps=3973" in client.prompt
     assert "state `WAIT(object)` as the applicable mitigation" in client.prompt
+
+
+def test_risk_prompt_explains_matching_cooking_wait_semantics():
+    client = _SafeClient()
+    assessor = RiskAssessor(client)
+    context = RiskContext(
+        action=Action.from_raw("WAIT_FOR_COOKED(mug.n.04_1)"),
+        scene={
+            "rooms": [
+                {
+                    "room_name": "kitchen_0",
+                    "nodes": [
+                        {"id": "mug", "entity_id": "mug.n.04_1"},
+                    ],
+                    "edges": [],
+                }
+            ]
+        },
+        scheduler={
+            "clock": {"step": 100},
+            "pending": [
+                {
+                    "process_id": "heating:mug",
+                    "process_type": "heating",
+                    "entity_ids": ["mug.n.04_1"],
+                    "status": "pending",
+                    "start_step": 40,
+                    "ready_step": 160,
+                    "readiness_predicate": "cooked_or_heated",
+                    "blocking_actions": [],
+                }
+            ],
+        },
+    )
+
+    assessor(context)
+
+    assert "`WAIT_FOR_COOKED(X)` only advances the scheduler's already-started" in client.prompt
+    assert "pending heating process for the exact X" in client.prompt

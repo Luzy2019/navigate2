@@ -67,6 +67,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-serve-key", default="sk-123456")
     parser.add_argument("--planner-work-dir", default="results")
     parser.add_argument(
+        "--prompt-setting",
+        choices=("v0", "v1", "v2", "v3"),
+        default="v1",
+        help="Planner prompt variant. Defaults to the existing v1 behavior.",
+    )
+    parser.add_argument(
+        "--disable-risk-predictor",
+        action="store_true",
+        help="Set the runtime risk predictor to None for this session.",
+    )
+    parser.add_argument(
         "--restore-frame",
         type=int,
         help="Restore immutable checkpoint/frame_NNNNNN.pt instead of latest.pt.",
@@ -119,6 +130,8 @@ class PersistentPhysicalSession:
         self.annotations_dir.mkdir(exist_ok=True)
         self.scene_graph_dir = self.session_dir / "scene_graph"
         self.scene_graph_dir.mkdir(exist_ok=True)
+        self.first_view_dir = self.session_dir / "first_view"
+        self.first_view_dir.mkdir(exist_ok=True)
         self.checkpoint_dir = self.session_dir / "checkpoint"
         self.checkpoint_dir.mkdir(exist_ok=True)
         self.video_dir = self.session_dir / "first_person_video"
@@ -132,10 +145,21 @@ class PersistentPhysicalSession:
         self.video_output_size = _parse_size(args.video_output_size)
         self.post_action_settle_steps = args.post_action_settle_steps
         self.session = self._load_session()
+        existing_prompt_setting = self.session.get("prompt_setting")
+        if (
+            self._session_existed_at_start
+            and existing_prompt_setting is not None
+            and str(existing_prompt_setting) != args.prompt_setting
+        ):
+            raise ValueError(
+                "existing session prompt_setting does not match this invocation: "
+                f"{existing_prompt_setting!r} != {args.prompt_setting!r}"
+            )
         self.benchmark, self.updater, runtime = _build_benchmark(args.task, args.config)
         self.runtime = runtime
         self.observer = ISBenchObservationAdapter(sensor_name=runtime.scene_graph.sensor_name)
         self.observer.reset()
+        self._initial_native_sensor_relative_pose = self._native_sensor_relative_pose()
         self.accumulator = GlobalSceneGraphAccumulator()
         self.active_subtask_index = int(self.session.get("active_subtask_index", 1))
         self.active_subtask_action_start = int(
@@ -147,6 +171,9 @@ class PersistentPhysicalSession:
             eval_awareness=False,
         )
         self.agent = _configure_agent(self.benchmark, args, self.active_subtask_index)
+        self.agent.done_validator = self._validate_done_proposal
+        if args.disable_risk_predictor:
+            self.benchmark.runtime_controller.components.risk_predictor = None
         self.planner_adapter = self.benchmark.runtime_controller.components.planner
         self._install_video_callback()
         self.restored_from_checkpoint = False
@@ -175,6 +202,15 @@ class PersistentPhysicalSession:
             self._bootstrap_checkpoint()
         else:
             self._capture_initial_frame()
+        self._set_branch_metadata()
+        self._ensure_v2_awareness()
+        self._flush_prompt_records(self._current_frame_index())
+        self._save_session()
+        # A source checkpoint predates branch-local prompt metadata. Refresh
+        # only the mutable latest checkpoint so a recovery resume keeps the
+        # v2 awareness and prompt-record cursor without overwriting frame 14.
+        if self.checkpoint_path.exists():
+            self._save_checkpoint()
 
     def _load_session(self) -> Dict[str, Any]:
         if not self.session_path.exists():
@@ -233,6 +269,66 @@ class PersistentPhysicalSession:
 
     def _save_session(self) -> None:
         _write_json(self.session_path, self.session)
+
+    def _set_branch_metadata(self) -> None:
+        """Keep branch-local experiment metadata out of source checkpoints."""
+
+        self.session["prompt_setting"] = self.args.prompt_setting
+        self.session["risk_predictor_disabled"] = bool(self.args.disable_risk_predictor)
+        self.session.setdefault("prompt_records_written", 0)
+
+    def _current_frame_index(self) -> int:
+        current_frame = self.session.get("current_frame") or {}
+        return int(current_frame.get("frame_index", 0))
+
+    def _ensure_v2_awareness(self) -> None:
+        """Provide the awareness prerequisite required by the v2 planner prompt."""
+
+        if self.args.prompt_setting != "v2":
+            return
+        awareness = self.benchmark.tracker.awareness
+        if (
+            isinstance(awareness, Mapping)
+            and awareness.get("content")
+            and int(awareness.get("subtask_index", -1)) == self.active_subtask_index
+        ):
+            return
+        content = self.agent.generate_awareness(use_obs=False)
+        self.benchmark.tracker.track_awareness(
+            content=content,
+            eval_results=None,
+            subtask_index=self.active_subtask_index,
+        )
+
+    def _flush_prompt_records(self, frame_index: int) -> None:
+        """Append each previously unwritten model call to the branch prompt log."""
+
+        records = self.agent.prompt_records
+        written = int(self.session.get("prompt_records_written") or 0)
+        written = max(0, min(written, len(records)))
+        if written == len(records):
+            return
+        path = self.session_dir / "prompt.txt"
+        with path.open("a", encoding="utf-8") as file:
+            for record in records[written:]:
+                raw_output = record.get("raw_output")
+                if raw_output is None:
+                    raw_output = "<no response: " + str(
+                        record.get("error") or "model call did not complete"
+                    ) + ">"
+                file.write("===== MODEL CALL =====\n")
+                file.write(f"prompt_setting: {self.args.prompt_setting}\n")
+                file.write(f"model: {self.agent.model_name}\n")
+                file.write(f"sequence: {record.get('sequence')}\n")
+                file.write(f"kind: {record.get('kind')}\n")
+                file.write(f"frame_index: {frame_index}\n")
+                file.write(f"subtask_index: {self.active_subtask_index}\n")
+                file.write("exact_prompt:\n")
+                file.write(str(record.get("prompt") or ""))
+                file.write("\nraw_output:\n")
+                file.write(str(raw_output))
+                file.write("\n===== END MODEL CALL =====\n\n")
+        self.session["prompt_records_written"] = len(records)
 
     def _llm_log_path(self, frame_index: int) -> Path:
         """Allocate an immutable planner/risk log path for one observation frame."""
@@ -313,6 +409,7 @@ class PersistentPhysicalSession:
             "schema_version": CHECKPOINT_SCHEMA_VERSION,
             "sim_state": self._dump_sim_state(),
             "robot_pose": self._robot_pose_checkpoint(),
+            "sensor_pose": self._sensor_pose_checkpoint(),
             "task_object_states": self._task_object_state_checkpoint(),
             "task_object_names": self._task_object_names(),
             "robot_name": self.benchmark.env.robots[0].name,
@@ -339,6 +436,9 @@ class PersistentPhysicalSession:
                 "current_step": self.agent.current_step,
                 "pending_manipulation": deepcopy(self.agent._pending_manipulation),
                 "subtask_plan_start": self.agent._subtask_plan_start,
+                "last_prompt": self.agent.last_prompt,
+                "last_prompt_sequence": self.agent.last_prompt_sequence,
+                "prompt_records": deepcopy(self.agent.prompt_records),
             },
             "planner_adapter": adapter_state,
             "lifelong_evaluator": {
@@ -352,6 +452,7 @@ class PersistentPhysicalSession:
                 "risk_evaluations": deepcopy(self.benchmark.tracker.risk_evaluations),
                 "risk_predictions": deepcopy(self.benchmark.tracker.risk_predictions),
                 "execution_diagnostics": deepcopy(self.benchmark.tracker.execution_diagnostics),
+                "awareness": deepcopy(self.benchmark.tracker.awareness),
             },
             "session": deepcopy(self.session),
         }
@@ -380,6 +481,44 @@ class PersistentPhysicalSession:
                 checkpoint[name] = value.detach().cpu().clone()
         return checkpoint
 
+    def _sensor_pose_checkpoint(self) -> Dict[str, Any]:
+        """Persist the native first-person sensor pose alongside the robot base."""
+
+        _, sensor = self._native_rgb_sensor()
+        if not callable(getattr(sensor, "get_position_orientation", None)):
+            return {}
+        position, orientation = sensor.get_position_orientation(frame="scene")
+        return {
+            "position": position.detach().cpu().clone(),
+            "orientation": orientation.detach().cpu().clone(),
+        }
+
+    def _native_rgb_sensor(self) -> tuple[str, Any]:
+        """Resolve the same RGB sensor that the observation adapter will capture."""
+
+        robot = self.benchmark.env.robots[0]
+        self.observer.ensure_robot_sensor_modalities(self.benchmark.env)
+        observation, _ = robot.get_obs()
+        sensor_name, _, sensor = self.observer._select_vision_sensor(robot, observation)
+        return sensor_name, sensor
+
+    def _native_sensor_relative_pose(self) -> Dict[str, Any]:
+        """Capture the eye-camera transform in the robot base frame."""
+
+        import omnigibson.utils.transform_utils as T
+
+        robot = self.benchmark.env.robots[0]
+        _, sensor = self._native_rgb_sensor()
+        if not callable(getattr(sensor, "get_position_orientation", None)):
+            return {}
+        robot_position, robot_orientation = robot.get_position_orientation(frame="scene")
+        sensor_position, sensor_orientation = sensor.get_position_orientation(frame="scene")
+        robot_rotation = T.quat2mat(robot_orientation)
+        return {
+            "position": robot_rotation.T @ (sensor_position - robot_position),
+            "rotation": robot_rotation.T @ T.quat2mat(sensor_orientation),
+        }
+
     def _restore_robot_pose(self, payload: Mapping[str, Any]) -> None:
         """Reapply the saved base pose after OmniGibson restores object state."""
 
@@ -402,6 +541,30 @@ class PersistentPhysicalSession:
         joint_velocities = pose.get("joint_velocities")
         if joint_velocities is not None:
             robot.set_joint_velocities(torch.as_tensor(joint_velocities, dtype=torch.float32))
+
+    def _restore_sensor_pose(self, payload: Mapping[str, Any]) -> None:
+        pose = payload.get("sensor_pose")
+        _, sensor = self._native_rgb_sensor()
+        if not callable(getattr(sensor, "set_position_orientation", None)):
+            raise ValueError("physical checkpoint sensor cannot be restored")
+        if isinstance(pose, Mapping) and pose.get("position") is not None and pose.get("orientation") is not None:
+            sensor_position = torch.as_tensor(pose["position"], dtype=torch.float32)
+            sensor_orientation = torch.as_tensor(pose["orientation"], dtype=torch.float32)
+        else:
+            relative = self._initial_native_sensor_relative_pose
+            if not relative:
+                return
+            import omnigibson.utils.transform_utils as T
+
+            robot_position, robot_orientation = self.benchmark.env.robots[0].get_position_orientation(frame="scene")
+            robot_rotation = T.quat2mat(robot_orientation)
+            sensor_position = robot_position + robot_rotation @ relative["position"]
+            sensor_orientation = T.mat2quat(robot_rotation @ relative["rotation"])
+        sensor.set_position_orientation(
+            position=sensor_position,
+            orientation=sensor_orientation,
+            frame="scene",
+        )
 
     def _task_object_names(self) -> Dict[str, str]:
         """Bind pose-bearing stable task entities to transient simulator names."""
@@ -491,11 +654,15 @@ class PersistentPhysicalSession:
         for entity_id, current_name in current_names.items():
             remapped_registry[current_name] = task_states[entity_id]
         saved_robot_name = str(payload.get("robot_name") or "").strip()
-        current_robot_name = self.benchmark.env.robots[0].name
         if not saved_robot_name or saved_robot_name not in remapped_registry:
             raise ValueError("checkpoint is missing simulator state for its robot")
-        saved_robot_state = remapped_registry.pop(saved_robot_name)
-        remapped_registry[current_robot_name] = saved_robot_state
+        # Robot controller state includes articulation paths generated from the
+        # source process's random robot name. Loading it under a newly spawned
+        # robot name leaves stale ``..._copy/base_link`` references and breaks
+        # the eye-camera articulation. The complete scene/object state is still
+        # restored here; the current robot is restored explicitly afterwards
+        # from the stable base/joint checkpoint in _restore_robot_pose().
+        remapped_registry.pop(saved_robot_name)
         remapped[0] = {**dict(scene_state), "object_registry": remapped_registry}
         self._remove_suspended_symbolic_particle_system_states(remapped, payload)
         return remapped
@@ -824,6 +991,25 @@ class PersistentPhysicalSession:
             actual=actual_robot["joint_positions"],
             atol=0.03,
         )
+        expected_sensor = payload.get("sensor_pose")
+        if isinstance(expected_sensor, Mapping) and expected_sensor.get("position") is not None:
+            _, sensor = self._native_rgb_sensor()
+            if not callable(getattr(sensor, "get_position_orientation", None)):
+                raise RuntimeError("checkpoint restore has no native RGB sensor")
+            sensor_position, sensor_orientation = sensor.get_position_orientation(frame="scene")
+            self._assert_close(
+                label="RGB sensor position",
+                expected=expected_sensor["position"],
+                actual=sensor_position,
+                atol=0.005,
+            )
+            self._assert_close(
+                label="RGB sensor orientation",
+                expected=expected_sensor["orientation"],
+                actual=sensor_orientation,
+                atol=0.005,
+                quaternion=True,
+            )
         scope = getattr(self.benchmark.env.task, "object_scope", {}) or {}
         for entity_id, expected in saved_object_states.items():
             reference = scope.get(str(entity_id))
@@ -917,6 +1103,7 @@ class PersistentPhysicalSession:
         expected_particle_counts = self._initialize_missing_particle_systems(payload)
         og.sim.load_state(self._remap_sim_state(payload), serialized=False)
         self._restore_robot_pose(payload)
+        self._restore_sensor_pose(payload)
         controller = self.benchmark.executor.controller
         synchronize_after_restore = getattr(
             controller, "synchronize_after_state_restore", None
@@ -989,6 +1176,11 @@ class PersistentPhysicalSession:
         self.agent.current_step = int(agent_state["current_step"])
         self.agent._pending_manipulation = agent_state["pending_manipulation"]
         self.agent._subtask_plan_start = int(agent_state["subtask_plan_start"])
+        self.agent.last_prompt = agent_state.get("last_prompt")
+        self.agent.last_prompt_sequence = int(
+            agent_state.get("last_prompt_sequence") or 0
+        )
+        self.agent.prompt_records = deepcopy(agent_state.get("prompt_records") or [])
         controller_state = payload.get("runtime_controller") or {}
         self.benchmark.runtime_controller.last_review = controller_state.get("last_review")
         self.benchmark.runtime_controller.last_outcome = controller_state.get("last_outcome")
@@ -1016,18 +1208,14 @@ class PersistentPhysicalSession:
             payload["session"], checkpoint_path.parent.parent
         )
         restored_frame_index = int(self.session["current_frame"]["frame_index"])
-        source_frame = Path(
-            str((payload.get("session") or {}).get("current_frame", {}).get("image") or "")
-        )
         target_frame = self.session_dir / f"frame_{restored_frame_index:06d}_current.png"
-        if source_frame.is_file() and source_frame.resolve() != target_frame.resolve():
-            shutil.copy2(source_frame, target_frame)
-        if not target_frame.is_file():
-            raise FileNotFoundError(
-                "checkpoint has no reusable native current-frame image: "
-                f"{source_frame}"
-            )
-        self.session["current_frame"]["image"] = str(target_frame)
+        self._render_restored_observation()
+        self.session["current_frame"] = _capture(
+            self.benchmark,
+            self.observer,
+            target_frame,
+            restored_frame_index,
+        )
         self.session.update(status="waiting_for_annotation", restored_from_checkpoint=True)
         self.session["active_subtask_action_start"] = self.active_subtask_action_start
         self._save_session()
@@ -1035,22 +1223,32 @@ class PersistentPhysicalSession:
             self._save_checkpoint(save_frame=True)
         self.restored_from_checkpoint = True
 
+    @staticmethod
+    def _render_restored_observation() -> None:
+        """Flush renderer frames after load_state without advancing simulation time."""
+
+        import omnigibson as og
+
+        for _ in range(2):
+            og.sim.render()
+
     def _finish_active_subtask(self, action_end_index: int) -> Dict[str, Any]:
         """Evaluate a successful DONE before exposing the next lifelong subtask."""
 
-        result = self.lifelong_evaluator.finish_subtask(
+        preview = self.lifelong_evaluator.preview_subtask_completion(
             subtask_index=self.active_subtask_index,
             action_start_index=self.active_subtask_action_start,
             action_end_index=action_end_index,
             termination_reason="done",
             instruction=_subtask_instruction(self.benchmark, self.active_subtask_index),
         )
-        result_dict = result.to_dict()
-        if not result.safe_success:
+        result_dict = preview.to_dict()
+        if not preview.safe_success:
             raise RuntimeError(
                 "planner emitted DONE before the active subtask goal was satisfied: "
                 + json.dumps(result_dict, ensure_ascii=False)
             )
+        self.lifelong_evaluator.results.append(preview)
         if self.active_subtask_index >= len(self.lifelong_evaluator.subtasks):
             return result_dict
         self.active_subtask_index += 1
@@ -1060,12 +1258,51 @@ class PersistentPhysicalSession:
             task_instruction=_subtask_instruction(self.benchmark, self.active_subtask_index),
             subtask_index=self.active_subtask_index,
         )
+        self._ensure_v2_awareness()
         base_adapter = getattr(self.planner_adapter, "base", None)
         if base_adapter is not None:
             base_adapter._iterator = None
         if hasattr(self.planner_adapter, "_inflight"):
             self.planner_adapter._inflight = None
         return result_dict
+
+    def _validate_done_proposal(self) -> Optional[str]:
+        """Reject DONE before it can create an executor or evaluator side effect."""
+
+        preview = self.lifelong_evaluator.preview_subtask_completion(
+            subtask_index=self.active_subtask_index,
+            action_start_index=self.active_subtask_action_start,
+            action_end_index=len(self.session.get("completed_actions") or ()) + 1,
+            termination_reason="done",
+            instruction=_subtask_instruction(self.benchmark, self.active_subtask_index),
+        )
+        if preview.safe_success:
+            return None
+        failed_atoms = [
+            atom
+            for atom in preview.g_task.atoms
+            if not bool(atom.get("satisfied"))
+        ]
+        return (
+            "DONE is invalid because the active subtask BDDL goal is not satisfied. "
+            "Do not execute or repeat DONE. Complete the missing goal atoms first: "
+            + json.dumps(failed_atoms, ensure_ascii=False)
+        )
+
+    def _completion_payload(self, action_count: int) -> Dict[str, Any]:
+        results = [
+            item.to_dict() if hasattr(item, "to_dict") else dict(item)
+            for item in self.lifelong_evaluator.results
+        ]
+        return {
+            "status": "completed",
+            "completed_action_count": action_count,
+            "completed_subtask_count": len(results),
+            "all_safe_success": bool(results) and all(
+                bool(item.get("safe_success")) for item in results
+            ),
+            "subtask_results": results,
+        }
 
     def _rebase_restored_session(
         self,
@@ -1108,6 +1345,9 @@ class PersistentPhysicalSession:
 
         session = rebase(session)
         session["snapshot_branch_source"] = str(source_session_dir)
+        # Exact model prompts are branch-local evidence and must not make a
+        # freshly restored branch look as though it already wrote source logs.
+        session["prompt_records_written"] = 0
         return session
 
     def restore_frame(self, frame_index: int) -> Dict[str, Any]:
@@ -1164,6 +1404,12 @@ class PersistentPhysicalSession:
         }
 
     def advance(self, perception_json: str) -> Dict[str, Any]:
+        if self.session.get("status") == "completed":
+            return {
+                "status": "completed",
+                "completion": deepcopy(self.session.get("completion") or {}),
+                "current_frame": self.session.get("current_frame"),
+            }
         current_frame = dict(self.session.get("current_frame") or {})
         if not current_frame:
             raise RuntimeError("session has no current frame")
@@ -1186,6 +1432,7 @@ class PersistentPhysicalSession:
             capture_robot_rgb_frame(self.benchmark.env.robots[0], self.video_output_size)
         )
         proposed = self.benchmark.runtime_controller.propose()
+        self._flush_prompt_records(frame_index)
         if proposed is None:
             raw_output = _latest_raw_output(self.benchmark)
             response = {
@@ -1262,16 +1509,22 @@ class PersistentPhysicalSession:
         next_index = len(completed)
         completed_subtask = self.active_subtask_index
         subtask_result = None
+        terminal_done = (
+            review.action.name == "DONE"
+            and self.active_subtask_index >= len(self.lifelong_evaluator.subtasks)
+        )
         if review.action.name == "DONE":
             subtask_result = self._finish_active_subtask(next_index)
+        self._flush_prompt_records(frame_index)
         next_frame = _capture(
             self.benchmark,
             self.observer,
             self.session_dir / f"frame_{next_index:06d}_current.png",
             next_index,
         )
+        completion = self._completion_payload(next_index) if terminal_done else None
         response = {
-            "status": "waiting_for_annotation",
+            "status": "completed" if completion is not None else "waiting_for_annotation",
             "executed_action": review.action.to_legacy_plan(),
             "planner_raw_output": raw_output,
             "subtask_index": completed_subtask,
@@ -1287,6 +1540,8 @@ class PersistentPhysicalSession:
             "first_person_video": video_path,
             "current_frame": next_frame,
         }
+        if completion is not None:
+            response["completion"] = completion
         self.session.update(
             completed_actions=completed,
             current_frame=next_frame,
@@ -1295,10 +1550,243 @@ class PersistentPhysicalSession:
             active_subtask_index=self.active_subtask_index,
             active_subtask_action_start=self.active_subtask_action_start,
         )
+        if completion is not None:
+            self.session["completion"] = completion
         self._save_session()
         frame_checkpoint = self._save_checkpoint(save_frame=True)
         response["frame_checkpoint"] = str(frame_checkpoint)
+        if completion is not None:
+            self.session["last_result"] = response
+            self._save_session()
         return response
+
+    def observe(self, perception_json: str, camera_target: str) -> Dict[str, Any]:
+        """Merge a human frame annotation and refresh RGB without taking an action."""
+
+        current_frame = dict(self.session.get("current_frame") or {})
+        if not current_frame:
+            raise RuntimeError("session has no current frame")
+        if self.session.get("status") != "waiting_for_annotation":
+            raise RuntimeError("observation refresh requires waiting_for_annotation status")
+        frame_index = int(current_frame["frame_index"])
+        source = Path(perception_json).resolve()
+        if not source.is_file():
+            raise FileNotFoundError(f"perception JSON does not exist: {source}")
+        annotation = self.annotations_dir / f"frame_{frame_index:06d}.json"
+        annotation_reused = False
+        if annotation.exists():
+            if annotation.read_bytes() != source.read_bytes():
+                raise FileExistsError(
+                    f"frame {frame_index} annotation already exists with different content"
+                )
+            annotation_reused = True
+        else:
+            annotation.write_bytes(source.read_bytes())
+        self._task_object(camera_target)
+        state_changes, _, global_snapshot = _observe_manual_frame(
+            self.benchmark,
+            self.updater,
+            self.accumulator,
+            annotation,
+            frame_index,
+            self.scene_graph_dir,
+        )
+        image_path = self.first_view_dir / f"frame_{frame_index:06d}_washer.png"
+        image = self._capture_facing((camera_target,), image_path, frame_index)
+        refresh = {
+            "frame_index": frame_index,
+            "annotation": str(annotation),
+            "annotation_reused": annotation_reused,
+            "camera_target": camera_target,
+            "image": image,
+            "state_change_count": len(state_changes),
+            "global_scene_summary": _scene_graph_payload(
+                global_snapshot, scope="current_global_state"
+            ).get("summary", {}),
+        }
+        _write_json(
+            self.first_view_dir / f"frame_{frame_index:06d}_washer.json",
+            refresh,
+        )
+        self.session["current_frame"] = image
+        self.session["last_observation_refresh"] = refresh
+        self._save_session()
+        return {"status": "waiting_for_annotation", **refresh}
+
+    def annotate(self, perception_json: str) -> Dict[str, Any]:
+        """Merge a confirmed frame annotation without altering the native camera."""
+
+        current_frame = dict(self.session.get("current_frame") or {})
+        if not current_frame:
+            raise RuntimeError("session has no current frame")
+        if self.session.get("status") != "waiting_for_annotation":
+            raise RuntimeError("annotation refresh requires waiting_for_annotation status")
+        frame_index = int(current_frame["frame_index"])
+        source = Path(perception_json).resolve()
+        if not source.is_file():
+            raise FileNotFoundError(f"perception JSON does not exist: {source}")
+        annotation = self.annotations_dir / f"frame_{frame_index:06d}.json"
+        if annotation.exists() and annotation.read_bytes() != source.read_bytes():
+            raise FileExistsError(
+                f"frame {frame_index} annotation already exists with different content"
+            )
+        if not annotation.exists():
+            annotation.write_bytes(source.read_bytes())
+        state_changes, _, global_snapshot = _observe_manual_frame(
+            self.benchmark,
+            self.updater,
+            self.accumulator,
+            annotation,
+            frame_index,
+            self.scene_graph_dir,
+        )
+        result = {
+            "status": "waiting_for_annotation",
+            "frame_index": frame_index,
+            "annotation": str(annotation),
+            "state_change_count": len(state_changes),
+            "global_scene_summary": _scene_graph_payload(
+                global_snapshot, scope="current_global_state"
+            ).get("summary", {}),
+        }
+        self.session["last_annotation_refresh"] = result
+        self._save_session()
+        self._save_checkpoint()
+        return result
+
+    def preview(self, perception_json: str) -> Dict[str, Any]:
+        """Return the next reviewed planner action without executing it."""
+
+        annotation_result = self.annotate(perception_json)
+        proposed = self.benchmark.runtime_controller.propose()
+        self._flush_prompt_records(int(annotation_result["frame_index"]))
+        if proposed is None:
+            return {
+                **annotation_result,
+                "preview_status": "planner_no_action",
+                "planner_raw_output": _latest_raw_output(self.benchmark),
+            }
+        return {
+            **annotation_result,
+            "preview_status": "proposed",
+            "action": proposed.to_legacy_plan(),
+            "planner_raw_output": _latest_raw_output(self.benchmark),
+        }
+
+    def _task_object(self, entity_id: str) -> Any:
+        reference = (getattr(self.benchmark.env.task, "object_scope", {}) or {}).get(entity_id)
+        obj = getattr(reference, "wrapped_obj", None)
+        if not callable(getattr(obj, "get_position_orientation", None)):
+            raise ValueError(f"camera target is not a pose-bearing task entity: {entity_id}")
+        return obj
+
+    def reframe(self, camera_targets: str) -> Dict[str, Any]:
+        """Refresh only the first-person image; existing frame annotations stay fixed."""
+
+        current_frame = dict(self.session.get("current_frame") or {})
+        if not current_frame:
+            raise RuntimeError("session has no current frame")
+        if self.session.get("status") != "waiting_for_annotation":
+            raise RuntimeError("camera refresh requires waiting_for_annotation status")
+        targets = tuple(part.strip() for part in camera_targets.split(",") if part.strip())
+        if not targets:
+            raise ValueError("camera refresh requires at least one target entity")
+        for target in targets:
+            self._task_object(target)
+        frame_index = int(current_frame["frame_index"])
+        image_path = self.first_view_dir / f"frame_{frame_index:06d}_lint_screens_v2.png"
+        if image_path.exists():
+            raise FileExistsError(f"camera refresh image already exists: {image_path}")
+        image = self._capture_facing(targets, image_path, frame_index)
+        refresh = {
+            "frame_index": frame_index,
+            "camera_targets": list(targets),
+            "image": image,
+        }
+        _write_json(
+            self.first_view_dir / f"frame_{frame_index:06d}_lint_screens_corrected.json",
+            refresh,
+        )
+        self.session["current_frame"] = image
+        self.session["last_observation_refresh"] = refresh
+        self._save_session()
+        return {"status": "waiting_for_annotation", **refresh}
+
+    def _capture_facing(
+        self,
+        camera_targets: Sequence[str],
+        image_path: Path,
+        frame_index: int,
+    ) -> Dict[str, Any]:
+        """Capture a non-mutating diagnostic view toward targets."""
+
+        import omnigibson as og
+        import omnigibson.utils.transform_utils as T
+
+        target_positions = [
+            self._task_object(target).get_position_orientation(frame="scene")[0]
+            for target in camera_targets
+        ]
+        target_position = torch.stack(target_positions).mean(dim=0)
+        robot_position, _ = self.benchmark.env.robots[0].get_position_orientation(frame="scene")
+        camera_offset = target_position[:2] - robot_position[:2]
+        if float(torch.linalg.vector_norm(camera_offset).item()) < 1e-6:
+            camera_offset = torch.tensor([1.0, 0.0], dtype=torch.float32)
+        camera_position = target_position.clone()
+        camera_position[:2] -= (
+            camera_offset / torch.linalg.vector_norm(camera_offset) * 0.9
+        )
+        camera_position[2] += 0.55
+        forward = target_position - camera_position
+        if float(torch.linalg.vector_norm(forward).item()) < 1e-6:
+            raise ValueError("camera targets coincide with the RGB sensor")
+        forward = forward / torch.linalg.vector_norm(forward)
+        up = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32)
+        if abs(float(torch.dot(forward, up).item())) > 0.95:
+            up = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)
+        right = torch.linalg.cross(forward, up)
+        right = right / torch.linalg.vector_norm(right)
+        camera_up = torch.linalg.cross(right, forward)
+        camera_up = camera_up / torch.linalg.vector_norm(camera_up)
+        optical_rotation = torch.stack((right, camera_up, -forward), dim=1)
+        # The sensor API uses USD camera axes; FrameObservation converts them
+        # to optical axes by diag(1, -1, -1), whose inverse is itself.
+        optical_to_usd = torch.diag(
+            torch.tensor([1.0, -1.0, -1.0], dtype=torch.float32)
+        )
+        facing_orientation = T.mat2quat(optical_rotation @ optical_to_usd)
+        camera = og.sim.viewer_camera
+        camera_position_before, camera_orientation_before = camera.get_position_orientation()
+        camera.set_position_orientation(position=camera_position, orientation=facing_orientation)
+        try:
+            for _ in range(2):
+                og.sim.render()
+            observation, _ = camera.get_obs()
+            rgb = observation.get("rgb")
+            if rgb is None:
+                raise RuntimeError("diagnostic camera did not return RGB")
+            if hasattr(rgb, "detach"):
+                rgb = rgb.detach().cpu().numpy()
+            from og_ego_prim.cli.headless_manual_physical_step import _write_rgb
+
+            _write_rgb(image_path, rgb)
+            image = {
+                "frame_index": frame_index,
+                "sensor_name": "viewer_camera",
+                "rgb_shape": list(rgb.shape),
+                "robot_position": [float(value) for value in robot_position.tolist()],
+                "image": str(image_path),
+            }
+        finally:
+            camera.set_position_orientation(
+                position=camera_position_before,
+                orientation=camera_orientation_before,
+            )
+            for _ in range(2):
+                og.sim.render()
+        image["camera_targets"] = list(camera_targets)
+        image["camera_mode"] = "temporary_viewer_pose_restored"
+        return image
 
     def status(self) -> Dict[str, Any]:
         return {
@@ -1314,20 +1802,68 @@ class PersistentPhysicalSession:
                 ),
                 "physical_held_object": self.benchmark._current_grasped_object_id(),
             },
+            "runtime_scene": self._runtime_scene_diagnostics(),
         }
 
+    def _runtime_scene_diagnostics(self) -> Dict[str, Any]:
+        """Expose room and pose evidence for a restored physical frame."""
+
+        scene = self.benchmark.env.scene
+        seg_map = getattr(scene, "seg_map", None) or getattr(scene, "_seg_map", None)
+
+        def record(entity_id: str, obj: Any) -> Dict[str, Any]:
+            position, orientation = obj.get_position_orientation(frame="scene")
+            xy = position[:2].detach().cpu().tolist()
+            room_instance = None
+            room_type = None
+            if seg_map is not None:
+                try:
+                    room_instance = seg_map.get_room_instance_by_point(xy)
+                    room_type = seg_map.get_room_type_by_point(xy)
+                except Exception:
+                    pass
+            return {
+                "entity_id": entity_id,
+                "simulator_name": str(getattr(obj, "name", "")),
+                "position": [float(value) for value in position.detach().cpu().tolist()],
+                "orientation": [float(value) for value in orientation.detach().cpu().tolist()],
+                "room_instance": room_instance,
+                "room_type": room_type,
+            }
+
+        robot = self.benchmark.env.robots[0]
+        entities = {"agent.n.01_1": record("agent.n.01_1", robot)}
+        for entity_id in (
+            "washer.n.03_1",
+            "clothes_dryer.n.01_1",
+            "desk.n.01_1",
+            "lint_screen.n.01_1",
+            "lint_screen.n.01_2",
+            "lint_screen.n.01_3",
+        ):
+            reference = (getattr(self.benchmark.env.task, "object_scope", {}) or {}).get(entity_id)
+            obj = getattr(reference, "wrapped_obj", None)
+            if callable(getattr(obj, "get_position_orientation", None)):
+                entities[entity_id] = record(entity_id, obj)
+        sensor_name, sensor = self._native_rgb_sensor()
+        if callable(getattr(sensor, "get_position_orientation", None)):
+            entities["native_rgb_sensor"] = record(sensor_name, sensor)
+        return {"entities": entities}
+
     def close(self) -> Dict[str, Any]:
-        checkpoint_saved = self.session.get("status") != "blocked_or_failed"
+        prior_status = self.session.get("status")
+        checkpoint_saved = prior_status != "blocked_or_failed"
         if checkpoint_saved:
             self._save_checkpoint()
         response = self.benchmark.close()
-        self.session.update(
-            status="closed",
-            last_result={
+        close_result = {
                 "close": response,
                 "checkpoint_saved": checkpoint_saved,
-            },
-        )
+        }
+        if prior_status == "completed":
+            self.session["close"] = close_result
+        else:
+            self.session.update(status="closed", last_result=close_result)
         self._save_session()
         return response
 
@@ -1342,12 +1878,28 @@ def serve(args: argparse.Namespace) -> int:
         server.listen(1)
         while True:
             connection, _ = server.accept()
+            deferred_advance = None
             with connection:
                 try:
+                    connection.settimeout(10.0)
                     request = json.loads(connection.recv(65536).decode("utf-8"))
                     command = request.get("command")
                     if command == "advance":
                         response = session.advance(str(request.get("perception_json") or ""))
+                    elif command == "advance_async":
+                        deferred_advance = str(request.get("perception_json") or "")
+                        response = {"status": "advance_accepted"}
+                    elif command == "observe":
+                        response = session.observe(
+                            str(request.get("perception_json") or ""),
+                            str(request.get("camera_target") or ""),
+                        )
+                    elif command == "annotate":
+                        response = session.annotate(str(request.get("perception_json") or ""))
+                    elif command == "preview":
+                        response = session.preview(str(request.get("perception_json") or ""))
+                    elif command == "reframe":
+                        response = session.reframe(str(request.get("camera_target") or ""))
                     elif command == "status":
                         response = session.status()
                     elif command == "checkpoint":
@@ -1370,6 +1922,18 @@ def serve(args: argparse.Namespace) -> int:
                         "traceback": traceback.format_exc(),
                     }
                 connection.sendall(json.dumps(response, ensure_ascii=False).encode("utf-8"))
+            if deferred_advance is not None:
+                try:
+                    session.advance(deferred_advance)
+                except Exception as exc:
+                    response = {
+                        "status": "error",
+                        "type": exc.__class__.__name__,
+                        "message": str(exc),
+                        "traceback": traceback.format_exc(),
+                    }
+                    session.session.update(status="error", last_result=response)
+                    session._save_session()
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
