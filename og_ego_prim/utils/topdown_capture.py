@@ -14,6 +14,36 @@ from PIL import Image
 XY = tuple[float, float]
 
 
+def camera_look_at_quaternion(
+    position: Sequence[float],
+    target: Sequence[float],
+    *,
+    up_hint: Optional[Sequence[float]] = None,
+):
+    """Return an xyzw quaternion that points the viewer camera at ``target``."""
+    import torch as th
+    from omnigibson.utils import transform_utils as T
+
+    camera_position = th.tensor(position, dtype=th.float32)
+    camera_target = th.tensor(target, dtype=th.float32)
+    forward = camera_target - camera_position
+    forward = forward / th.linalg.vector_norm(forward).clamp_min(1e-6)
+    up = (
+        th.tensor(up_hint, dtype=th.float32)
+        if up_hint is not None
+        else th.tensor([0.0, 0.0, 1.0], dtype=th.float32)
+    )
+    up = up / th.linalg.vector_norm(up).clamp_min(1e-6)
+    if abs(float(th.dot(forward, up).item())) > 0.95:
+        up = th.tensor([0.0, 1.0, 0.0], dtype=th.float32)
+    right = th.linalg.cross(forward, up)
+    right = right / th.linalg.vector_norm(right).clamp_min(1e-6)
+    camera_up = th.linalg.cross(right, forward)
+    camera_up = camera_up / th.linalg.vector_norm(camera_up).clamp_min(1e-6)
+    optical_rotation = th.stack((right, camera_up, -forward), dim=1)
+    return T.mat2quat(optical_rotation)
+
+
 def capture_topdown_scene(
     env: Any,
     output_path: Path,
@@ -35,7 +65,6 @@ def capture_topdown_scene(
     """Save a clean top-down RGB render using the active OmniGibson viewer camera."""
     import omnigibson as og
     import torch as th
-    from omnigibson.utils import transform_utils as T
 
     bounds, bounds_source = _resolve_world_bounds(
         env,
@@ -57,7 +86,11 @@ def capture_topdown_scene(
 
     if camera_quat is None:
         yaw = math.radians(float(yaw_degrees))
-        camera_quat_tensor = T.euler2quat(th.tensor([0.0, 0.0, yaw], dtype=th.float32))
+        camera_quat_tensor = camera_look_at_quaternion(
+            camera_position,
+            [center_x, center_y, floor_z],
+            up_hint=[-math.sin(yaw), math.cos(yaw), 0.0],
+        )
     else:
         if len(camera_quat) != 4:
             raise ValueError("camera_quat must contain x y z w")
@@ -97,6 +130,9 @@ def capture_topdown_scene(
         )
         for _ in range(max(0, int(settle_steps))):
             og.sim.step()
+        # Replicator can lag a moved viewer camera by multiple app updates.
+        for _ in range(6):
+            og.sim.render()
         obs, _info = viewer_camera.get_obs()
         rgb = _rgb_array(obs.get("rgb"))
 
@@ -124,11 +160,6 @@ def capture_topdown_scene(
     finally:
         for robot, visible in old_robot_visibility:
             robot.visible = visible
-        if restore_camera and old_pose is not None:
-            try:
-                viewer_camera.set_position_orientation(*old_pose)
-            except Exception:
-                pass
         if restore_camera and old_size is not None:
             old_width, old_height = old_size
             try:
@@ -141,6 +172,13 @@ def capture_topdown_scene(
         if restore_camera and old_focal_length is not None:
             try:
                 viewer_camera.focal_length = float(old_focal_length)
+            except Exception:
+                pass
+        if restore_camera and old_pose is not None:
+            try:
+                viewer_camera.set_position_orientation(*old_pose)
+                for _ in range(6):
+                    og.sim.render()
             except Exception:
                 pass
 
@@ -257,7 +295,14 @@ def _rgb_array(value: Any) -> np.ndarray:
         raise ValueError(f"viewer RGB observation must be HxWxC, got shape={arr.shape}")
     if arr.shape[-1] > 3:
         arr = arr[..., :3]
-    return np.asarray(arr, dtype=np.uint8)
+    if not np.issubdtype(arr.dtype, np.number):
+        raise ValueError(f"viewer RGB observation must be numeric, got dtype={arr.dtype}")
+    values = np.asarray(arr, dtype=np.float32)
+    if not np.isfinite(values).all():
+        raise ValueError("viewer RGB observation contains non-finite values")
+    if np.issubdtype(arr.dtype, np.floating) and values.size and float(values.max()) <= 1.0:
+        values *= 255.0
+    return np.clip(values, 0.0, 255.0).astype(np.uint8)
 
 
 def _resolve_world_bounds(

@@ -9,6 +9,7 @@ from typing import Any, Dict, Generator, List, Optional
 import yaml
 
 import bddl
+import numpy as np
 from bddl.config import get_definition_filename as get_bddl_definition_filename
 from numpy.typing import ArrayLike as NumpyArrayLike
 import omnigibson as og
@@ -1038,6 +1039,26 @@ class OnlineBenchmark(Benchmark):
                 continue
 
             try:
+                sampling_seed = relation.get('sampling_seed')
+                rng_state = None
+                if sampling_seed is not None:
+                    try:
+                        sampling_seed = int(sampling_seed)
+                    except (TypeError, ValueError):
+                        print(
+                            '[benchmark][warning] Could not apply task object initial relation: '
+                            f'object={object_name!r} target={target_name!r} '
+                            f'invalid sampling_seed={sampling_seed!r}'
+                        )
+                        continue
+                    rng_state = (
+                        random.getstate(),
+                        np.random.get_state(),
+                        torch.random.get_rng_state(),
+                    )
+                    random.seed(sampling_seed)
+                    np.random.seed(sampling_seed)
+                    torch.manual_seed(sampling_seed)
                 try:
                     success = obj.states[predicate].set_value(
                         target_obj,
@@ -1053,6 +1074,11 @@ class OnlineBenchmark(Benchmark):
                     f'predicate={predicate_name} error={type(exc).__name__}: {exc}'
                 )
                 continue
+            finally:
+                if rng_state is not None:
+                    random.setstate(rng_state[0])
+                    np.random.set_state(rng_state[1])
+                    torch.random.set_rng_state(rng_state[2])
 
             obj.keep_still()
             target_obj.keep_still()

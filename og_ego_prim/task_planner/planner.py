@@ -59,6 +59,14 @@ class ExamplePlanner:
             return cls.from_config(json.load(file))
 
 
+def _format_safety_tips(tips) -> str:
+    """Render task-authored safety tips as a numbered prompt section."""
+    return '\n'.join(
+        f"Safety tip {index}. {tip}"
+        for index, tip in enumerate(tips or (), start=1)
+    )
+
+
 class AgentPlanner:
 
     def __init__(
@@ -130,6 +138,7 @@ class AgentPlanner:
             self.object_abilities_str,
             self.wash_rules_str,
             self.goal_description,
+            self.safety_tips_str,
         ) = self.load_info_data()
         if self.verbose:
             print(f'[agent] instruction: {self.task_instruction}')
@@ -156,6 +165,15 @@ class AgentPlanner:
             self._pending_rethinking_prompt = None
             return
         self._pending_rethinking_prompt = self.runtime_controller.rethinking_prompt()
+
+    def _warn_v3_fallback_once(self) -> None:
+        if getattr(self, "_v3_fallback_warned", False):
+            return
+        self._v3_fallback_warned = True
+        print(
+            "[agent] WARNING: prompt_setting=v3 but no task-authored safety tips "
+            "were found; falling back to the implicit v1 template."
+        )
 
     def _held_object(self) -> Optional[str]:
         getter = self.held_object_getter
@@ -297,6 +315,7 @@ class AgentPlanner:
                 prompt_setting=self.prompt_setting,
                 scene_description=scene_description,
                 awareness=awareness,
+                safety_tips=self.safety_tips_str,
             )
 
         if not self.use_initial_setup and not self.use_self_caption:
@@ -331,15 +350,27 @@ class AgentPlanner:
                     awareness=awareness
                 )
             elif self.prompt_setting == 'v3':
-                # Task-authored evaluator cautions are not planner inputs.
-                prompt = V1StepPlanningPrompt.format(
-                    objects_str=self.objects_str,
-                    task_instruction=self.task_instruction,
-                    object_abilities_str=self.object_abilities_str,
-                    task_goal=self.goal_description,
-                    wash_rules_str=self.wash_rules_str,
-                    history_actions=history_plans
-                )
+                # v3: explicit task-authored (GT) safety tips injection.
+                if self.safety_tips_str:
+                    prompt = V3StepPlanningPrompt.format(
+                        objects_str=self.objects_str,
+                        task_instruction=self.task_instruction,
+                        object_abilities_str=self.object_abilities_str,
+                        task_goal=self.goal_description,
+                        wash_rules_str=self.wash_rules_str,
+                        history_actions=history_plans,
+                        safety_tips=self.safety_tips_str
+                    )
+                else:
+                    self._warn_v3_fallback_once()
+                    prompt = V1StepPlanningPrompt.format(
+                        objects_str=self.objects_str,
+                        task_instruction=self.task_instruction,
+                        object_abilities_str=self.object_abilities_str,
+                        task_goal=self.goal_description,
+                        wash_rules_str=self.wash_rules_str,
+                        history_actions=history_plans
+                    )
             else:
                 raise Exception('Wrong prompt setting.')
         else:
@@ -383,16 +414,29 @@ class AgentPlanner:
                     awareness=awareness
                 )
             elif self.prompt_setting == 'v3':
-                # Preserve the legacy option without injecting safety oracles.
-                prompt = T1StepPlanningPrompt.format(
-                    objects_str=self.objects_str,
-                    task_instruction=self.task_instruction,
-                    object_abilities_str=self.object_abilities_str,
-                    task_goal=self.goal_description,
-                    wash_rules_str=self.wash_rules_str,
-                    history_actions=history_plans,
-                    scene_description=scene_description
-                )
+                # v3: explicit task-authored (GT) safety tips injection.
+                if self.safety_tips_str:
+                    prompt = T3StepPlanningPrompt.format(
+                        objects_str=self.objects_str,
+                        task_instruction=self.task_instruction,
+                        object_abilities_str=self.object_abilities_str,
+                        task_goal=self.goal_description,
+                        wash_rules_str=self.wash_rules_str,
+                        history_actions=history_plans,
+                        scene_description=scene_description,
+                        safety_tips=self.safety_tips_str
+                    )
+                else:
+                    self._warn_v3_fallback_once()
+                    prompt = T1StepPlanningPrompt.format(
+                        objects_str=self.objects_str,
+                        task_instruction=self.task_instruction,
+                        object_abilities_str=self.object_abilities_str,
+                        task_goal=self.goal_description,
+                        wash_rules_str=self.wash_rules_str,
+                        history_actions=history_plans,
+                        scene_description=scene_description
+                    )
             else:
                 raise Exception('Wrong prompt setting.')
 
@@ -417,6 +461,12 @@ class AgentPlanner:
         self._pending_rethinking_prompt = None
         self._pending_manipulation = None
         self._subtask_plan_start = len(self.tracker.plans)
+        # v3 explicit safety injection follows the active subtask; fall back to
+        # the whole-task aggregate when the subtask declares no tips.
+        subtask_tips = self._subtask_safety_tips.get(int(subtask_index))
+        if not subtask_tips:
+            subtask_tips = self._aggregate_safety_tips
+        self.safety_tips_str = _format_safety_tips(subtask_tips)
         if self.runtime_controller is not None:
             self.runtime_controller.set_subtask(subtask_index)
 
@@ -766,6 +816,14 @@ class AgentPlanner:
             wash_rules_str = json.dumps(wash_rules, indent=4, ensure_ascii=False)
 
         self.allowed_entity_ids = tuple(context.object_list)
+        # Task-authored (GT) safety tips for the explicit v3 prompt setting.
+        # Lifelong runners switch the active subset per subtask in
+        # ``begin_lifelong_subtask``; the aggregate is the fallback.
+        self._aggregate_safety_tips = list(context.safety_tips)
+        self._subtask_safety_tips = {
+            index: list(tips)
+            for index, tips in context.subtask_safety_tips.items()
+        }
         return (
             task_instruction,
             objects_str,
@@ -773,6 +831,7 @@ class AgentPlanner:
             object_abilities_str,
             wash_rules_str,
             context.goal_description,
+            _format_safety_tips(self._aggregate_safety_tips),
         )
 
 

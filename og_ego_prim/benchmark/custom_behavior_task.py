@@ -430,6 +430,18 @@ class CustomBehaviorTask(BehaviorTask):
             reward_config=reward_config,
         )
 
+    @property
+    def task_metadata(self):
+        metadata = super().task_metadata
+        agent_name = self.sampler._agent.name
+        metadata["inst_to_name"].update(
+            {
+                instance: agent_name
+                for instance in self.activity_conditions.parsed_objects.get("agent.n.01", ())
+            }
+        )
+        return metadata
+
     def initialize_activity(self, env):
         accept_scene = True
         feedback = None

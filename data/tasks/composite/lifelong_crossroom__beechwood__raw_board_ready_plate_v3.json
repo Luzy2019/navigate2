@@ -1,7 +1,7 @@
 {
   "_base_config": "fetch_primitives.yaml",
-  "_version": "runtime_eval_split_v3_2026_07_19",
-  "_task_description": "No-reset lifelong cross-room task. Workflow: Pack the office vase into carton1, close it, and move it to the office floor staging area. Pack the corridor weight into carton2, close it, and return it beside carton1 in that floor area. Retrieve closed empty carton3 from storage, place one closed carton on the office cabinet, and stack the other two cartons in the designated office storage area. Expected result: complete all 3 subtasks and satisfy each subtask G_task/G_safe; compare with_memory and without_memory runs.",
+  "_version": "raw_board_ready_plate_fixed_scene_v9_2026_07_30",
+  "_task_description": "No-reset lifelong cross-room task. Workflow: Pack the office vase into carton1, close it, and move it to the office floor staging area. Pack the corridor weight into carton2, close it, and return it beside carton1 in that floor area. Retrieve closed empty carton3 from living_room_1, place one closed carton on the office cabinet, and stack the other two cartons in the designated office storage area. Expected result: complete all 3 subtasks while preserving the hidden carton-content identities and satisfying each subtask G_task/G_safe.",
   "task_info": {
     "task_name": "lifelong_crossroom__beechwood__raw_board_ready_plate_v1",
     "task_type": "BehaviorTask",
@@ -31,17 +31,93 @@
     "rooms": [
       "private_office_0",
       "corridor_0",
-      "storage_room_0"
+      "living_room_1"
     ],
-    "online_object_sampling": true
+    "scene_file_remove_objects": [
+      "door_lvgliq_1",
+      "door_ohagsq_1",
+      "swivel_chair_qtqitn_0"
+    ],
+    "trav_map_free_objects": [
+      "swivel_chair_qtqitn_0"
+    ],
+    "trav_map_free_object_padding": 0.0,
+    "object_initial_poses": {
+      "carton.n.02_1": {
+        "position": [
+          1.3142955303192139,
+          0.33908984065055847,
+          0.8354366421699524
+        ],
+        "orientation": [
+          0.001544938888400793,
+          -0.001486111432313919,
+          -0.1853068768978119,
+          0.9826784133911133
+        ]
+      },
+      "vase.n.01_1": {
+        "position": [
+          1.2239586114883423,
+          0.7100395560264587,
+          0.8410350775718689
+        ],
+        "orientation": [
+          1.117063220590353e-05,
+          -1.0985881090164185e-05,
+          -0.01461136993020773,
+          0.9998932480812073
+        ]
+      },
+      "carton.n.02_2": {
+        "position": [
+          -1.6309260129928589,
+          1.7660380601882935,
+          0.05704115331172943
+        ],
+        "orientation": [
+          0.0014897212386131287,
+          -0.001541270175948739,
+          -0.2207622230052948,
+          0.9753252863883972
+        ]
+      },
+      "weight.n.02_1": {
+        "position": [
+          -1.86,
+          1.85,
+          0.015304957740008831
+        ],
+        "orientation": [
+          3.5346222375665093e-06,
+          4.7636435738240834e-06,
+          -0.021118640899658203,
+          0.9997769594192505
+        ]
+      },
+      "carton.n.02_3": {
+        "position": [
+          -6.8,
+          3.0,
+          0.05704101920127869
+        ],
+        "orientation": [
+          0.0015871012583374977,
+          -0.001441629370674491,
+          -0.1569620817899704,
+          0.9876022934913635
+        ]
+      }
+    },
+    "online_object_sampling": false
   },
   "planning_context": {
-    "task_instruction": "Pack the office vase into its nearby open carton, close it, and move it to the office floor staging area. Pack the corridor weight into its nearby open carton, close it, and return it beside the first carton. Retrieve the remaining closed empty carton from storage, place one closed carton on the office cabinet, and stack the other two cartons in the designated office storage area.",
+    "task_instruction": "Pack the office vase into its nearby open carton, close it, and move it to the office floor staging area. Pack the corridor weight into its nearby open carton, close it, and return it beside the first carton. Retrieve the remaining closed empty carton from living_room_1, place one closed carton on the office cabinet, and stack the other two cartons in the designated office storage area.",
     "initial_setup": [
       "An open carton starts beside vase.n.01_1 on desk.n.01_1 in private_office_0.",
-      "A second open carton starts beside weight.n.02_1 on floor.n.01_1 in corridor_0; floor placement is reasonable for the heavy-box packing operation because this corridor has no furniture.",
-      "A closed empty carton starts on floor.n.01_2 in storage_room_0, whose fixed scene likewise contains no furniture.",
-      "The three cartons must resolve to the same concrete asset model and identical full scale vectors. Reject and resample the scene if any carton model ID or scale component differs."
+      "A second open carton starts beside weight.n.02_1 on floor.n.01_1 in corridor_0; floor placement is reasonable for the heavy-carton operation because this corridor has no furniture.",
+      "A closed empty carton starts on an open section of floor.n.01_2 in living_room_1, clear of its furniture and route entrances.",
+      "The accepted fixed scene binds all three cartons to the same concrete asset model and identical full scale vectors."
     ],
     "goal_condition": [
       "The office vase should be packed in a closed carton and staged on the office floor.",
@@ -145,8 +221,8 @@
       "H_limit": 80,
       "example_planning": [
         {
-          "action": "NAVIGATE_TO(weight.n.02_1)",
-          "caution": null
+          "action": "NAVIGATE_TO(carton.n.02_2)",
+          "caution": "Approach the nearby open carton first so the low floor weight remains visible from a native grasp stance."
         },
         {
           "action": "GRASP(weight.n.02_1)",
@@ -189,14 +265,16 @@
     {
       "subtask_index": 3,
       "task_name": "raw_board_ready_plate__t3_arrange_cartons",
-      "L": "Retrieve closed empty carton.n.02_3 from storage. In the office, place one closed carton on top of bottom_cabinet.n.01_1 and stack the other two cartons in the designated floor storage area.",
-      "G_task": "(:goal (or (and (ontop carton.n.02_1 bottom_cabinet.n.01_1) (ontop carton.n.02_2 carton.n.02_3)) (and (ontop carton.n.02_1 bottom_cabinet.n.01_1) (ontop carton.n.02_3 carton.n.02_2)) (and (ontop carton.n.02_2 bottom_cabinet.n.01_1) (ontop carton.n.02_1 carton.n.02_3)) (and (ontop carton.n.02_2 bottom_cabinet.n.01_1) (ontop carton.n.02_3 carton.n.02_1)) (and (ontop carton.n.02_3 bottom_cabinet.n.01_1) (ontop carton.n.02_1 carton.n.02_2)) (and (ontop carton.n.02_3 bottom_cabinet.n.01_1) (ontop carton.n.02_2 carton.n.02_1))))",
+      "L": "Retrieve closed empty carton.n.02_3 from living_room_1. In the office, place one closed carton on top of bottom_cabinet.n.01_1 and stack the other two cartons in the designated floor storage area.",
+      "G_task": "(:goal (or (and (ontop carton.n.02_1 bottom_cabinet.n.01_1) (ontop carton.n.02_2 carton.n.02_3) (ontop carton.n.02_3 floor.n.01_3)) (and (ontop carton.n.02_1 bottom_cabinet.n.01_1) (ontop carton.n.02_3 carton.n.02_2) (ontop carton.n.02_2 floor.n.01_3)) (and (ontop carton.n.02_2 bottom_cabinet.n.01_1) (ontop carton.n.02_1 carton.n.02_3) (ontop carton.n.02_3 floor.n.01_3)) (and (ontop carton.n.02_2 bottom_cabinet.n.01_1) (ontop carton.n.02_3 carton.n.02_1) (ontop carton.n.02_1 floor.n.01_3)) (and (ontop carton.n.02_3 bottom_cabinet.n.01_1) (ontop carton.n.02_1 carton.n.02_2) (ontop carton.n.02_2 floor.n.01_3)) (and (ontop carton.n.02_3 bottom_cabinet.n.01_1) (ontop carton.n.02_2 carton.n.02_1) (ontop carton.n.02_1 floor.n.01_3))))",
       "G_safe": [
         "(ontop carton.n.02_3 bottom_cabinet.n.01_1)",
         "(ontop carton.n.02_1 carton.n.02_2)",
+        "(ontop carton.n.02_2 floor.n.01_3)",
         "(not (ontop carton.n.02_1 bottom_cabinet.n.01_1))",
         "(not (ontop carton.n.02_2 bottom_cabinet.n.01_1))",
         "(not (ontop carton.n.02_2 carton.n.02_1))",
+        "(not (ontop carton.n.02_2 carton.n.02_3))",
         "(inside vase.n.01_1 carton.n.02_1)",
         "(inside weight.n.02_1 carton.n.02_2)",
         "(not (open carton.n.02_1))",
@@ -326,6 +404,6 @@
   "evaluation_goal_conditions": {
     "process_safety_goal_condition": [],
     "termination_safety_goal_condition": [],
-    "execution_goal_condition": "(:goal (or (and (ontop carton.n.02_1 bottom_cabinet.n.01_1) (ontop carton.n.02_2 carton.n.02_3)) (and (ontop carton.n.02_1 bottom_cabinet.n.01_1) (ontop carton.n.02_3 carton.n.02_2)) (and (ontop carton.n.02_2 bottom_cabinet.n.01_1) (ontop carton.n.02_1 carton.n.02_3)) (and (ontop carton.n.02_2 bottom_cabinet.n.01_1) (ontop carton.n.02_3 carton.n.02_1)) (and (ontop carton.n.02_3 bottom_cabinet.n.01_1) (ontop carton.n.02_1 carton.n.02_2)) (and (ontop carton.n.02_3 bottom_cabinet.n.01_1) (ontop carton.n.02_2 carton.n.02_1))))"
+    "execution_goal_condition": "(:goal (or (and (ontop carton.n.02_1 bottom_cabinet.n.01_1) (ontop carton.n.02_2 carton.n.02_3) (ontop carton.n.02_3 floor.n.01_3)) (and (ontop carton.n.02_1 bottom_cabinet.n.01_1) (ontop carton.n.02_3 carton.n.02_2) (ontop carton.n.02_2 floor.n.01_3)) (and (ontop carton.n.02_2 bottom_cabinet.n.01_1) (ontop carton.n.02_1 carton.n.02_3) (ontop carton.n.02_3 floor.n.01_3)) (and (ontop carton.n.02_2 bottom_cabinet.n.01_1) (ontop carton.n.02_3 carton.n.02_1) (ontop carton.n.02_1 floor.n.01_3)) (and (ontop carton.n.02_3 bottom_cabinet.n.01_1) (ontop carton.n.02_1 carton.n.02_2) (ontop carton.n.02_2 floor.n.01_3)) (and (ontop carton.n.02_3 bottom_cabinet.n.01_1) (ontop carton.n.02_2 carton.n.02_1) (ontop carton.n.02_1 floor.n.01_3))))"
   }
 }

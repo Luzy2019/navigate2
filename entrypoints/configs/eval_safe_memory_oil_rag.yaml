@@ -1,6 +1,10 @@
 includes:
   - eval_safe_memory_starter_physical.yaml
 
+task:
+  # v3 uses the explicit two-target Ego contract (WIPE / SPREAD / PLACE_*).
+  primitive_type: ego
+
 navigation:
   # Keep raw A* doorway bends; simplification can cut through Fetch's footprint.
   clearance_aware_simplify: false

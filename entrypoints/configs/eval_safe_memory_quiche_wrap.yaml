@@ -1,0 +1,18 @@
+includes:
+  - eval_safe_memory_starter_physical.yaml
+
+starter_primitives:
+  # GRASP and PLACE are symbolic for this task. Keep the raised trunk, but
+  # fold the arm inside Fetch's base footprint during idle and navigation.
+  fixed_navigation_arm_pose_name: tucked_high
+
+navigation:
+  # The refrigerator's usable approach strip is narrow. The full Fetch
+  # footprint erosion remains active; use a two-cell endpoint-clearance test
+  # so the native sampler retains the verified connected approach cells.
+  goal_clearance_radius: 0.20
+  # The compact path avoids the refrigerator-exit waypoint stall. Slow only
+  # the in-place pivot that previously lifted Fetch into the fridge--oven
+  # corner while it was carrying a carton.
+  clearance_aware_simplify: true
+  angular_command: 0.25

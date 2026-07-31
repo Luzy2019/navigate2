@@ -497,6 +497,14 @@ class StarterPrimitivesConfig:
     explicit_navigation_max_goal_radius: Optional[float] = None
     explicit_grasp_use_object_navigation: bool = False
     explicit_grasp_navigation_max_goal_radius: Optional[float] = None
+    first_view_targeting: bool = True
+    first_view_targeting_max_steps: int = 120
+    first_view_targeting_angular_tolerance: float = 0.045
+    first_view_targeting_max_joint_step: float = 0.16
+    first_view_targeting_settle_steps: int = 6
+    first_view_targeting_align_base: bool = True
+    first_view_targeting_roll_tolerance: float = 0.045
+    first_view_targeting_max_base_yaw_change: float = 0.35
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any]) -> "StarterPrimitivesConfig":
@@ -699,6 +707,58 @@ class StarterPrimitivesConfig:
                 None
                 if mapping.get("explicit_grasp_navigation_max_goal_radius") is None
                 else float(mapping["explicit_grasp_navigation_max_goal_radius"])
+            ),
+            first_view_targeting=_to_bool(
+                _pop(mapping, "first_view_targeting", cls.first_view_targeting)
+            ),
+            first_view_targeting_max_steps=int(
+                _pop(
+                    mapping,
+                    "first_view_targeting_max_steps",
+                    cls.first_view_targeting_max_steps,
+                )
+            ),
+            first_view_targeting_angular_tolerance=float(
+                _pop(
+                    mapping,
+                    "first_view_targeting_angular_tolerance",
+                    cls.first_view_targeting_angular_tolerance,
+                )
+            ),
+            first_view_targeting_max_joint_step=float(
+                _pop(
+                    mapping,
+                    "first_view_targeting_max_joint_step",
+                    cls.first_view_targeting_max_joint_step,
+                )
+            ),
+            first_view_targeting_settle_steps=int(
+                _pop(
+                    mapping,
+                    "first_view_targeting_settle_steps",
+                    cls.first_view_targeting_settle_steps,
+                )
+            ),
+            first_view_targeting_align_base=bool(
+                _pop(
+                    mapping,
+                    "first_view_targeting_align_base",
+                    cls.first_view_targeting_align_base,
+                )
+            ),
+            first_view_targeting_roll_tolerance=float(
+                _pop(
+                    mapping,
+                    "first_view_targeting_roll_tolerance",
+                    cls.first_view_targeting_roll_tolerance,
+                )
+            ),
+            first_view_targeting_max_base_yaw_change=float(
+                _pop(
+                    mapping,
+                    "first_view_targeting_max_base_yaw_change",
+                    cls.first_view_targeting_max_base_yaw_change,
+                )
             ),
         )
 

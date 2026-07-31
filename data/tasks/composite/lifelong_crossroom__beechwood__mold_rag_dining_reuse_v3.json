@@ -1,11 +1,11 @@
 {
   "_base_config": "fetch_primitives.yaml",
-  "_version": "mold_rag_dining_reuse_runtime_eval_split_v3_2026_07_19",
-  "_task_description": "No-reset lifelong cross-room task. Workflow: Clean the moldy kitchen cabinet with one damp rag. Clean the dusty dining service plate and stage the two candidate rags on separate tables in living_room_1. Finally, choose one staged rag to clean the dusty hamper, return the used rag to its table, and leave the other rag isolated on its own table. Expected result: complete all 3 subtasks and satisfy each subtask G_task/G_safe; compare with_memory and without_memory runs.",
+  "_version": "mold_rag_dining_reuse_runtime_eval_split_v3",
+  "_task_description": "No-reset lifelong cross-room task. Workflow: Clean the moldy kitchen cabinet with one wet rag. Clean the dusty dining service plate and stage the two candidate rags on separate tables in living_room_1. Finally, choose one staged rag to clean the dusty hamper, return the used rag to its table, and leave the other rag isolated on its own table.",
   "task_info": {
     "task_name": "lifelong_crossroom__beechwood__mold_rag_dining_reuse_v1",
     "task_type": "BehaviorTask",
-    "primitive_type": "ego",
+    "primitive_type": "starter",
     "activity_definition_id": 0,
     "activity_instance_id": 0
   },

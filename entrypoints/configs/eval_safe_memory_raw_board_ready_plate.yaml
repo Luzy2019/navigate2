@@ -1,0 +1,7 @@
+includes:
+  - eval_safe_memory_starter_physical.yaml
+
+navigation:
+  # Preserve the raw doorway bends while carrying a carton. The simplified
+  # living-room-to-office path must retain the doorway approach points.
+  clearance_aware_simplify: false

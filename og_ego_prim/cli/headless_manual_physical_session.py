@@ -16,6 +16,7 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import traceback
@@ -159,7 +160,7 @@ class PersistentPhysicalSession:
         self.runtime = runtime
         self.observer = ISBenchObservationAdapter(sensor_name=runtime.scene_graph.sensor_name)
         self.observer.reset()
-        self._initial_native_sensor_relative_pose = self._native_sensor_relative_pose()
+        self._initial_native_sensor_parent_pose = self._native_sensor_parent_pose()
         self.accumulator = GlobalSceneGraphAccumulator()
         self.active_subtask_index = int(self.session.get("active_subtask_index", 1))
         self.active_subtask_action_start = int(
@@ -410,6 +411,7 @@ class PersistentPhysicalSession:
             "sim_state": self._dump_sim_state(),
             "robot_pose": self._robot_pose_checkpoint(),
             "sensor_pose": self._sensor_pose_checkpoint(),
+            "first_view_focus": self._first_view_focus_checkpoint(),
             "task_object_states": self._task_object_state_checkpoint(),
             "task_object_names": self._task_object_names(),
             "robot_name": self.benchmark.env.robots[0].name,
@@ -493,6 +495,26 @@ class PersistentPhysicalSession:
             "orientation": orientation.detach().cpu().clone(),
         }
 
+    def _first_view_focus_checkpoint(self) -> Optional[Dict[str, Any]]:
+        controller = self.benchmark.executor.controller
+        getter = getattr(controller, "first_view_focus_checkpoint", None)
+        focus = getter() if callable(getter) else None
+        if not isinstance(focus, Mapping):
+            return None
+        simulator_name = str(focus.get("target_object_name") or "")
+        entity_id = next(
+            (
+                entity
+                for entity, name in self._task_object_names().items()
+                if name == simulator_name
+            ),
+            None,
+        )
+        return {
+            **dict(focus),
+            "entity_id": entity_id,
+        }
+
     def _native_rgb_sensor(self) -> tuple[str, Any]:
         """Resolve the same RGB sensor that the observation adapter will capture."""
 
@@ -502,21 +524,16 @@ class PersistentPhysicalSession:
         sensor_name, _, sensor = self.observer._select_vision_sensor(robot, observation)
         return sensor_name, sensor
 
-    def _native_sensor_relative_pose(self) -> Dict[str, Any]:
-        """Capture the eye-camera transform in the robot base frame."""
+    def _native_sensor_parent_pose(self) -> Dict[str, Any]:
+        """Capture the native eye-camera mount in its parent-link frame."""
 
-        import omnigibson.utils.transform_utils as T
-
-        robot = self.benchmark.env.robots[0]
         _, sensor = self._native_rgb_sensor()
         if not callable(getattr(sensor, "get_position_orientation", None)):
             return {}
-        robot_position, robot_orientation = robot.get_position_orientation(frame="scene")
-        sensor_position, sensor_orientation = sensor.get_position_orientation(frame="scene")
-        robot_rotation = T.quat2mat(robot_orientation)
+        sensor_position, sensor_orientation = sensor.get_position_orientation(frame="parent")
         return {
-            "position": robot_rotation.T @ (sensor_position - robot_position),
-            "rotation": robot_rotation.T @ T.quat2mat(sensor_orientation),
+            "position": sensor_position.clone(),
+            "orientation": sensor_orientation.clone(),
         }
 
     def _restore_robot_pose(self, payload: Mapping[str, Any]) -> None:
@@ -543,27 +560,16 @@ class PersistentPhysicalSession:
             robot.set_joint_velocities(torch.as_tensor(joint_velocities, dtype=torch.float32))
 
     def _restore_sensor_pose(self, payload: Mapping[str, Any]) -> None:
-        pose = payload.get("sensor_pose")
         _, sensor = self._native_rgb_sensor()
         if not callable(getattr(sensor, "set_position_orientation", None)):
             raise ValueError("physical checkpoint sensor cannot be restored")
-        if isinstance(pose, Mapping) and pose.get("position") is not None and pose.get("orientation") is not None:
-            sensor_position = torch.as_tensor(pose["position"], dtype=torch.float32)
-            sensor_orientation = torch.as_tensor(pose["orientation"], dtype=torch.float32)
-        else:
-            relative = self._initial_native_sensor_relative_pose
-            if not relative:
-                return
-            import omnigibson.utils.transform_utils as T
-
-            robot_position, robot_orientation = self.benchmark.env.robots[0].get_position_orientation(frame="scene")
-            robot_rotation = T.quat2mat(robot_orientation)
-            sensor_position = robot_position + robot_rotation @ relative["position"]
-            sensor_orientation = T.mat2quat(robot_rotation @ relative["rotation"])
+        parent_pose = self._initial_native_sensor_parent_pose
+        if not parent_pose:
+            raise ValueError("native eye-camera parent mount was not captured")
         sensor.set_position_orientation(
-            position=sensor_position,
-            orientation=sensor_orientation,
-            frame="scene",
+            position=parent_pose["position"],
+            orientation=parent_pose["orientation"],
+            frame="parent",
         )
 
     def _task_object_names(self) -> Dict[str, str]:
@@ -1094,6 +1100,88 @@ class PersistentPhysicalSession:
             "cooked_particle_payloads": payload_diagnostics,
         }
 
+    @staticmethod
+    def _parse_completed_action(action: Any) -> tuple[str, tuple[str, ...]]:
+        match = re.fullmatch(r"\s*([a-zA-Z_]+)\s*\((.*)\)\s*", str(action or ""))
+        if match is None:
+            return "", ()
+        operator = match.group(1).lower()
+        arguments = tuple(
+            part.strip()
+            for part in match.group(2).split(",")
+            if part.strip()
+        )
+        return operator, arguments
+
+    def _infer_restored_first_view_focus_entity(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Optional[str]:
+        focus = payload.get("first_view_focus")
+        if isinstance(focus, Mapping) and focus.get("entity_id"):
+            return str(focus["entity_id"])
+
+        completed = list((payload.get("session") or {}).get("completed_actions") or ())
+        for index in range(len(completed) - 1, -1, -1):
+            operator, arguments = self._parse_completed_action(
+                (completed[index] or {}).get("action")
+                if isinstance(completed[index], Mapping)
+                else completed[index]
+            )
+            if not operator or operator == "done":
+                continue
+            if operator.startswith("place_") or operator in {"pour_into", "dump_into"}:
+                for previous in range(index - 1, -1, -1):
+                    previous_operator, previous_arguments = self._parse_completed_action(
+                        (completed[previous] or {}).get("action")
+                        if isinstance(completed[previous], Mapping)
+                        else completed[previous]
+                    )
+                    if previous_operator == "grasp" and previous_arguments:
+                        return previous_arguments[0]
+                return arguments[0] if arguments else None
+            if arguments:
+                return arguments[0]
+        return None
+
+    def _restore_first_view_focus(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        controller = self.benchmark.executor.controller
+        align = getattr(controller, "center_first_view_on_object", None)
+        if not callable(align):
+            return {"status": "unsupported"}
+        entity_id = self._infer_restored_first_view_focus_entity(payload)
+        if not entity_id:
+            return {"status": "no_focus_entity"}
+        obj = self._task_object(entity_id)
+        focus = payload.get("first_view_focus")
+        target_point = None
+        if isinstance(focus, Mapping) and focus.get("entity_id") == entity_id:
+            target_point = focus.get("target_point")
+        generator = align(
+            obj,
+            phase="checkpoint_restore",
+            target_point=target_point,
+            require_success=True,
+        )
+        executor = self.benchmark.executor
+        steps = 0
+        for steps, action in enumerate(generator, 1):
+            self._synchronize_symbolic_carry()
+            executor._step_environment(
+                action,
+                raw_plan="restore_first_view_focus",
+                primitive_name="FIRST_VIEW_TARGETING",
+                step_index=steps - 1,
+            )
+            self._synchronize_symbolic_carry()
+        diagnostic = deepcopy(getattr(controller, "last_first_view_alignment", None) or {})
+        return {
+            "status": diagnostic.get("status", "unknown"),
+            "entity_id": entity_id,
+            "steps": steps,
+            "diagnostic": diagnostic,
+        }
+
     def _restore_checkpoint(self, checkpoint_path: Path) -> None:
         payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         if payload.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
@@ -1207,6 +1295,10 @@ class PersistentPhysicalSession:
         self.session = self._rebase_restored_session(
             payload["session"], checkpoint_path.parent.parent
         )
+        first_view_restore = self._restore_first_view_focus(payload)
+        validation["first_view_restore"] = first_view_restore
+        self.session["last_first_view_alignment"] = first_view_restore
+        _write_json(self.checkpoint_dir / "restore_validation.json", validation)
         restored_frame_index = int(self.session["current_frame"]["frame_index"])
         target_frame = self.session_dir / f"frame_{restored_frame_index:06d}_current.png"
         self._render_restored_observation()
@@ -1848,7 +1940,32 @@ class PersistentPhysicalSession:
         sensor_name, sensor = self._native_rgb_sensor()
         if callable(getattr(sensor, "get_position_orientation", None)):
             entities["native_rgb_sensor"] = record(sensor_name, sensor)
-        return {"entities": entities}
+        camera_controller = robot.controllers.get("camera")
+        camera_diagnostics = None
+        if camera_controller is not None:
+            dof_idx = torch.as_tensor(camera_controller.dof_idx, dtype=torch.long)
+            goal = getattr(camera_controller, "_goal", None)
+            camera_diagnostics = {
+                "dof_idx": [int(value) for value in dof_idx.tolist()],
+                "joint_positions": [
+                    float(value)
+                    for value in robot.get_joint_positions()[dof_idx].detach().cpu().tolist()
+                ],
+                "goal": None
+                if not isinstance(goal, Mapping) or goal.get("target") is None
+                else [
+                    float(value)
+                    for value in torch.as_tensor(goal["target"]).detach().cpu().tolist()
+                ],
+                "last_alignment": deepcopy(
+                    getattr(
+                        self.benchmark.executor.controller,
+                        "last_first_view_alignment",
+                        None,
+                    )
+                ),
+            }
+        return {"entities": entities, "camera": camera_diagnostics}
 
     def close(self) -> Dict[str, Any]:
         prior_status = self.session.get("status")

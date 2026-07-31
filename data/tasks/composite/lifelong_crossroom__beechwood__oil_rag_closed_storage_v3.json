@@ -5,7 +5,7 @@
   "task_info": {
     "task_name": "lifelong_crossroom__beechwood__oil_rag_closed_storage_v1",
     "task_type": "BehaviorTask",
-    "primitive_type": "ego",
+    "primitive_type": "starter",
     "activity_definition_id": 0,
     "activity_instance_id": 0
   },
@@ -34,34 +34,31 @@
       "storage_room_1"
     ],
     "online_object_sampling": false,
-    "scene_file_remove_objects": [
-      "door_lvgliq_2"
-    ],
     "object_initial_poses": {
       "carton.n.02_1": {
         "position": [
-          0.52372,
-          2.018615,
-          0.05704
+          -0.3636440634727478,
+          3.0961008071899414,
+          0.057040516287088394
         ],
         "orientation": [
-          0.001697,
-          -0.00131,
-          -0.077893,
-          0.996959
+          0.0016042707720771432,
+          -0.0014215352712199092,
+          -0.14486518502235413,
+          0.9894490838050842
         ]
       },
       "carton.n.02_2": {
         "position": [
-          -2.448082,
-          -0.349405,
-          0.057041
+          -2.3880398273468018,
+          -0.199630007147789,
+          0.05704105272889137
         ],
         "orientation": [
-          0.001762,
-          -0.001221,
-          -0.02638,
-          0.99965
+          0.0017455840716138482,
+          -0.0012445591855794191,
+          -0.039770495146512985,
+          0.99920654296875
         ]
       },
       "bicycle_chain.n.01_1": {
@@ -96,15 +93,21 @@
           0.999899,
           -0.014239
         ]
+      },
+      "sponge.n.01_1": {
+        "position": [
+          -1.051455020904541,
+          2.716952323913574,
+          0.010603968054056168
+        ],
+        "orientation": [
+          -3.0942746320761216e-07,
+          -1.2429526350388187e-06,
+          -0.002805988537147641,
+          0.9999960660934448
+        ]
       }
     },
-    "object_initial_relations": [
-      {
-        "object": "sponge.n.01_1",
-        "predicate": "ontop",
-        "target": "floor.n.01_1"
-      }
-    ],
     "scene_asset_requirements": {
       "required_instance_models": {
         "carton.n.02_1": {
@@ -166,7 +169,7 @@
       "T1 starts in utility_room_0 with a dust-covered bicycle chain, a filled lubricant bottle, a sponge, two visually identical rags, and a transport carton.",
       "The T1 lubrication work will leave one of the two visually identical rags with lubricant contact history.",
       "The transport carton and both candidate rags must pass through the corridor staging area before being placed in storage_room_1.",
-      "Storage_room_1 contains a closed storage carton and an open isolation carton for the two rags."
+      "Storage_room_1 contains the closed storage carton; the utility-room transport carton becomes the open isolation carton after it is carried there."
     ],
     "goal_condition": [
       "1. Remove the dust from the bicycle chain, lubricate it, and complete the intended lubricant-contact history on one candidate rag.",

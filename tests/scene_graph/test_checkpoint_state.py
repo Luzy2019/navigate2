@@ -5,7 +5,14 @@ from og_ego_prim.scene_graph.manual_current_frame import manual_current_frame_pe
 from og_ego_prim.scene_graph.perception_scene_graph import PerceptionSceneGraphUpdater
 from og_ego_prim.cli.headless_manual_physical_session import PersistentPhysicalSession
 from og_ego_prim.scheduler import ScheduledProcess, build_scheduler
-from og_ego_prim.primitives.starter_primitives import StarterPrimitiveController
+from omnigibson.action_primitives.action_primitive_set_base import ActionPrimitiveError
+from og_ego_prim.primitives.starter_primitives import (
+    PhysicalStarterSemanticActionPrimitives,
+    StarterSemanticActionPrimitiveSet,
+)
+
+
+StarterPrimitiveController = PhysicalStarterSemanticActionPrimitives
 
 
 def test_global_scene_checkpoint_round_trip_preserves_history_and_relations():
@@ -96,6 +103,574 @@ def test_checkpoint_held_object_falls_back_to_registry_state():
     )
 
 
+def test_legacy_place_checkpoint_focuses_previously_grasped_source():
+    session = object.__new__(PersistentPhysicalSession)
+    payload = {
+        "session": {
+            "completed_actions": [
+                {"action": "navigate_to(lint_screen.n.01_2)"},
+                {"action": "grasp(lint_screen.n.01_2)"},
+                {"action": "navigate_to(washer.n.03_1)"},
+                {"action": "place_on_top(washer.n.03_1)"},
+                {"action": "done()"},
+            ]
+        }
+    }
+
+    assert (
+        session._infer_restored_first_view_focus_entity(payload)
+        == "lint_screen.n.01_2"
+    )
+
+
+def test_native_first_view_angular_error_uses_optical_camera_axes():
+    import math
+    import torch
+
+    position = torch.zeros(3)
+    orientation = torch.tensor([0.0, 0.0, 0.0, 1.0])
+    centered = PhysicalStarterSemanticActionPrimitives._first_view_angular_error(
+        position,
+        orientation,
+        torch.tensor([0.0, 0.0, -1.0]),
+    )
+    right = PhysicalStarterSemanticActionPrimitives._first_view_angular_error(
+        position,
+        orientation,
+        torch.tensor([1.0, 0.0, -1.0]),
+    )
+    above = PhysicalStarterSemanticActionPrimitives._first_view_angular_error(
+        position,
+        orientation,
+        torch.tensor([0.0, 1.0, -1.0]),
+    )
+
+    assert centered[:2] == (0.0, 0.0)
+    assert math.isclose(right[0], math.pi / 4.0, abs_tol=1e-6)
+    assert math.isclose(above[1], math.pi / 4.0, abs_tol=1e-6)
+
+
+def _first_view_limit_controller(*, vertical_error, camera_tilt, max_steps=3):
+    import torch
+
+    controller = object.__new__(PhysicalStarterSemanticActionPrimitives)
+    controller.first_view_targeting = True
+    controller.first_view_targeting_max_steps = max_steps
+    controller.first_view_targeting_angular_tolerance = 0.05
+    controller.first_view_targeting_max_joint_step = 0.25
+    controller.first_view_targeting_settle_steps = 2
+    controller.first_view_targeting_align_base = False
+    controller.first_view_targeting_roll_tolerance = 0.05
+    controller.first_view_targeting_max_base_yaw_change = 0.35
+    controller.last_first_view_alignment = None
+    controller._first_view_focus = None
+
+    camera_controller = type(
+        "CameraController",
+        (),
+        {
+            "dof_idx": [0, 1],
+            "use_delta_commands": False,
+            "command_input_limits": (
+                torch.tensor([-1.0, -1.0]),
+                torch.tensor([1.0, 1.0]),
+            ),
+            "command_output_limits": None,
+        },
+    )()
+    robot = type(
+        "Robot",
+        (),
+        {
+            "controllers": {"camera": camera_controller},
+            "control_limits": {
+                "position": (
+                    torch.tensor([-1.0, -1.0]),
+                    torch.tensor([1.0, 1.45]),
+                ),
+                "has_limit": torch.tensor([True, True]),
+            },
+            "get_joint_positions": lambda self: torch.tensor([0.0, camera_tilt]),
+            "get_position_orientation": lambda self: (
+                torch.zeros(3),
+                torch.tensor([0.0, 0.0, 0.0, 1.0]),
+            ),
+        },
+    )()
+    controller.env = type("Environment", (), {"robots": [robot]})()
+    sensor = type(
+        "Sensor",
+        (),
+        {
+            "intrinsic_matrix": torch.tensor(
+                [
+                    [256.0, 0.0, 256.0],
+                    [0.0, 256.0, 256.0],
+                    [0.0, 0.0, 1.0],
+                ]
+            ),
+            "image_width": 512,
+            "image_height": 512,
+            "clipping_range": torch.tensor([0.01, 10.0]),
+            "get_position_orientation": lambda self, frame: (
+                torch.zeros(3),
+                torch.tensor([0.0, 0.0, 0.0, 1.0]),
+            ),
+        },
+    )()
+    controller._native_first_view_sensor = lambda: ("eye", sensor)
+    controller._first_view_angular_error = lambda *args: (
+        0.0,
+        vertical_error,
+        1.0,
+        1.0,
+    )
+    controller._first_view_roll_error = lambda *args: 0.0
+    controller._camera_target_action = lambda target: target.clone()
+    obj = type("Object", (), {"name": "low_target"})()
+    return controller, obj, torch.tensor([0.0, 0.0, -1.0])
+
+
+def test_native_first_view_accepts_visible_target_at_camera_joint_limit():
+    controller, obj, target_point = _first_view_limit_controller(
+        vertical_error=-0.1,
+        camera_tilt=1.0,
+    )
+
+    actions = list(
+        controller.center_first_view_on_object(
+            obj,
+            phase="post_navigation",
+            target_point=target_point,
+        )
+    )
+
+    assert len(actions) == 1
+    assert controller.last_first_view_alignment["status"] == "visible_at_joint_limit"
+    assert controller.last_first_view_alignment["joint_limit"]["blocked_axes"] == [
+        False,
+        True,
+    ]
+    assert controller.last_first_view_alignment["joint_limit"]["limit_source"] == (
+        "camera_command_input_limits"
+    )
+    assert controller.last_first_view_alignment["joint_limit"]["raw_upper_limits"] == [
+        1.0,
+        1.45,
+    ]
+    assert controller.last_first_view_alignment["joint_limit"]["upper_limits"] == [
+        1.0,
+        1.0,
+    ]
+    assert controller.last_first_view_alignment["frustum"]["inside_frustum"] is True
+
+
+def test_native_first_view_restore_accepts_prior_visible_joint_limit_focus():
+    controller, obj, target_point = _first_view_limit_controller(
+        vertical_error=-0.1,
+        camera_tilt=1.0,
+    )
+
+    list(
+        controller.center_first_view_on_object(
+            obj,
+            phase="checkpoint_restore",
+            target_point=target_point,
+        )
+    )
+
+    assert controller.last_first_view_alignment["status"] == "visible_at_joint_limit"
+
+
+def test_native_first_view_rejects_target_outside_frustum_at_joint_limit():
+    controller, obj, target_point = _first_view_limit_controller(
+        vertical_error=-1.0,
+        camera_tilt=1.0,
+        max_steps=2,
+    )
+
+    try:
+        list(
+            controller.center_first_view_on_object(
+                obj,
+                phase="post_navigation",
+                target_point=target_point,
+            )
+        )
+    except ActionPrimitiveError:
+        pass
+    else:
+        raise AssertionError("a target outside the native RGB frustum must fail")
+
+    assert controller.last_first_view_alignment["status"] == "failed"
+    assert controller.last_first_view_alignment["frustum"]["available"] is True
+    assert controller.last_first_view_alignment["frustum"]["inside_image"] is False
+    assert controller.last_first_view_alignment["frustum"]["inside_frustum"] is False
+
+
+def test_native_first_view_does_not_relax_centering_before_joint_limit():
+    controller, obj, target_point = _first_view_limit_controller(
+        vertical_error=-0.1,
+        camera_tilt=0.8,
+        max_steps=1,
+    )
+
+    try:
+        list(
+            controller.center_first_view_on_object(
+                obj,
+                phase="post_navigation",
+                target_point=target_point,
+            )
+        )
+    except ActionPrimitiveError:
+        pass
+    else:
+        raise AssertionError("in-frustum visibility must not bypass available centering motion")
+
+    assert controller.last_first_view_alignment["status"] == "failed"
+    assert (
+        controller.last_first_view_alignment["joint_limit"][
+            "all_residual_axes_blocked"
+        ]
+        is False
+    )
+    assert controller.last_first_view_alignment["frustum"] is None
+
+
+def test_native_first_view_keeps_pre_grasp_centering_strict_at_joint_limit():
+    controller, obj, target_point = _first_view_limit_controller(
+        vertical_error=-0.1,
+        camera_tilt=1.0,
+        max_steps=1,
+    )
+
+    try:
+        list(
+            controller.center_first_view_on_object(
+                obj,
+                phase="pre_grasp",
+                target_point=target_point,
+            )
+        )
+    except ActionPrimitiveError:
+        pass
+    else:
+        raise AssertionError("pre-grasp targeting must remain strictly centered")
+
+    assert controller.last_first_view_alignment["status"] == "failed"
+    assert controller.last_first_view_alignment["joint_limit"] is None
+    assert controller.last_first_view_alignment["frustum"] is None
+
+
+def test_native_first_view_settling_holds_current_camera_joints():
+    import torch
+
+    controller = object.__new__(PhysicalStarterSemanticActionPrimitives)
+    controller.first_view_targeting = True
+    controller.first_view_targeting_max_steps = 8
+    controller.first_view_targeting_angular_tolerance = 0.05
+    controller.first_view_targeting_max_joint_step = 0.25
+    controller.first_view_targeting_settle_steps = 2
+    controller.first_view_targeting_align_base = False
+    controller.first_view_targeting_roll_tolerance = 0.05
+    controller.first_view_targeting_max_base_yaw_change = 0.35
+    controller.last_first_view_alignment = None
+    controller._first_view_focus = None
+
+    camera_controller = type("CameraController", (), {"dof_idx": [0, 1]})()
+    joint_positions = iter(
+        (
+            torch.tensor([0.0, 0.0]),
+            torch.tensor([0.0, 0.0]),
+            torch.tensor([0.2, 0.1]),
+            torch.tensor([0.2, 0.1]),
+            torch.tensor([0.2, 0.1]),
+        )
+    )
+    robot = type(
+        "Robot",
+        (),
+        {
+            "controllers": {"camera": camera_controller},
+            "get_joint_positions": lambda self: next(joint_positions),
+            "get_position_orientation": lambda self: (
+                torch.zeros(3),
+                torch.tensor([0.0, 0.0, 0.0, 1.0]),
+            ),
+        },
+    )()
+    controller.env = type("Environment", (), {"robots": [robot]})()
+    sensor = type(
+        "Sensor",
+        (),
+        {
+            "get_position_orientation": lambda self, frame: (
+                torch.zeros(3),
+                torch.tensor([0.0, 0.0, 0.0, 1.0]),
+            )
+        },
+    )()
+    errors = iter(
+        (
+            (0.2, 0.1, 1.0, 1.0),
+            (0.01, -0.01, 1.0, 1.0),
+            (0.01, -0.01, 1.0, 1.0),
+        )
+    )
+    roll_errors = iter((0.2, 0.01, 0.01))
+    controller._native_first_view_sensor = lambda: ("eye", sensor)
+    controller._first_view_angular_error = lambda *args: next(errors)
+    controller._first_view_roll_error = lambda *args: next(roll_errors)
+    controller._camera_target_action = lambda target: target.clone()
+    obj = type("Object", (), {"name": "lint_screen_179"})()
+
+    actions = list(
+        controller.center_first_view_on_object(
+            obj,
+            phase="checkpoint_restore",
+            target_point=torch.tensor([0.0, 0.0, -1.0]),
+        )
+    )
+
+    assert torch.allclose(actions[0], torch.tensor([-0.2, -0.1]))
+    assert torch.allclose(actions[1], torch.tensor([0.2, 0.1]))
+    assert controller.last_first_view_alignment["status"] == "centered"
+    assert controller.last_first_view_alignment["stable_frames"] == 2
+    assert controller.last_first_view_alignment["roll_error_rad"] == 0.01
+
+
+def test_native_first_view_skips_implicit_floor_bbox_targeting():
+    controller = object.__new__(PhysicalStarterSemanticActionPrimitives)
+    controller.first_view_targeting = True
+
+    def fail_bbox_target(*args, **kwargs):
+        raise AssertionError("floor bbox targeting must be skipped")
+
+    controller._first_view_bbox_target = fail_bbox_target
+    floor = type("Floor", (), {"name": "floors_mknpoc_0", "category": "floors"})()
+
+    assert list(
+        controller.center_first_view_on_object(floor, phase="post_navigation")
+    ) == []
+    assert list(
+        controller.center_first_view_on_object(
+            floor,
+            phase="pre_place_on_top",
+            surface=True,
+        )
+    ) == []
+
+
+def test_action_first_view_alignment_gate_modes():
+    controller = object.__new__(PhysicalStarterSemanticActionPrimitives)
+    target = type("Target", (), {"name": "target"})()
+    held = type("Held", (), {"name": "held"})()
+    calls = []
+    alignment_targets = []
+
+    def no_actions(*args):
+        if False:
+            yield None
+
+    def record_alignment(
+        obj,
+        *,
+        phase,
+        target_point=None,
+        surface=False,
+        require_success=True,
+    ):
+        calls.append((obj, phase, surface, require_success))
+        alignment_targets.append(target_point)
+        if False:
+            yield None
+
+    controller._apply_grasp_without_default_reset = no_actions
+    controller.center_first_view_on_object = record_alignment
+    list(controller.apply_ref(StarterSemanticActionPrimitiveSet.GRASP, target))
+    assert calls == [(target, "post_grasp", False, False)]
+
+    calls.clear()
+    controller._get_obj_in_hand = lambda: held
+    controller._primitive_uses_symbolic_shortcut = lambda primitive: True
+    controller.controller_functions = {
+        StarterSemanticActionPrimitiveSet.PLACE_INSIDE: no_actions,
+    }
+    list(controller.apply_ref(StarterSemanticActionPrimitiveSet.PLACE_INSIDE, target))
+    assert calls == [
+        (target, "pre_place_inside", False, True),
+        (held, "post_place_inside", False, False),
+    ]
+
+    calls.clear()
+    alignment_targets.clear()
+    controller._settle_robot = no_actions
+    controller._with_navigation_hand_actions_suppressed = lambda actions: actions
+    focus = object()
+
+    def navigate_with_focus(*args):
+        if False:
+            yield None
+        return focus
+
+    controller._navigate_to_explicit_target = navigate_with_focus
+    list(controller.apply_ref(StarterSemanticActionPrimitiveSet.NAVIGATE_TO, target))
+    assert calls == [(target, "post_navigation", False, True)]
+    assert alignment_targets == [focus]
+
+
+def test_explicit_pickup_navigation_reuses_grasp_pose_for_first_view():
+    import torch
+
+    controller = object.__new__(PhysicalStarterSemanticActionPrimitives)
+    target = type("Target", (), {"name": "hoodie_183"})()
+    controller._should_use_open_pose_navigation = lambda obj: False
+    controller._should_use_grasp_ready_navigation = lambda obj: True
+    controller.explicit_grasp_use_object_navigation = True
+    controller.explicit_grasp_navigation_max_goal_radius = 1.2
+    controller.explicit_navigation_max_goal_radius = None
+    calls = []
+
+    def navigate_to_obj(*args, **kwargs):
+        calls.append(("navigate", kwargs["navigation_reason"]))
+        if False:
+            yield None
+
+    grasp_pose = (
+        torch.tensor([0.45, 3.3, 0.44]),
+        torch.tensor([0.0, 0.0, 0.0, 1.0]),
+    )
+
+    def navigate_to_grasp_ready_pose(obj, navigation_reason):
+        calls.append(("grasp_ready", navigation_reason))
+        if False:
+            yield None
+        return grasp_pose, torch.tensor([1.0, 0.0])
+
+    controller._navigate_to_obj = navigate_to_obj
+    controller._navigate_to_grasp_ready_pose = navigate_to_grasp_ready_pose
+    result = []
+
+    def collect_result():
+        result.append((yield from controller._navigate_to_explicit_target(target)))
+
+    list(collect_result())
+
+    assert calls == [
+        ("navigate", "explicit_grasp_object"),
+        ("grasp_ready", "explicit_grasp_object"),
+    ]
+    assert torch.equal(result[0], grasp_pose[0])
+
+
+def test_first_view_failure_does_not_retry_completed_navigation():
+    controller = object.__new__(PhysicalStarterSemanticActionPrimitives)
+    target = type("Target", (), {"name": "target"})()
+    navigation_calls = []
+
+    def navigate(*args):
+        navigation_calls.append(args)
+        if False:
+            yield None
+        return None
+
+    def no_actions(*args):
+        if False:
+            yield None
+
+    def fail_alignment(*args, **kwargs):
+        raise RuntimeError("first-view failure")
+        yield None
+
+    controller._navigate_to_explicit_target = navigate
+    controller._settle_robot = no_actions
+    controller._with_navigation_hand_actions_suppressed = lambda actions: actions
+    controller.center_first_view_on_object = fail_alignment
+
+    try:
+        list(
+            controller.apply_ref(
+                StarterSemanticActionPrimitiveSet.NAVIGATE_TO,
+                target,
+                attempts=3,
+            )
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "first-view failure"
+    else:
+        raise AssertionError("first-view failure should propagate")
+
+    assert navigation_calls == [(target,)]
+
+
+def test_navigation_hand_suppression_forwards_generator_return_value():
+    controller = object.__new__(PhysicalStarterSemanticActionPrimitives)
+    robot = type("Robot", (), {"_disable_grasp_handling": False})()
+    controller.env = type("Environment", (), {"robots": [robot]})()
+    controller._suppress_navigation_hand_actions = False
+    controller._pin_current_arm_targets_for_navigation = lambda: None
+    controller.navigation_backend = type(
+        "NavigationBackend",
+        (),
+        {"last_navigation_result": {}},
+    )()
+    returned = object()
+
+    def source():
+        yield "navigation_action"
+        return returned
+
+    result = []
+
+    def collect_result():
+        result.append(
+            (
+                yield from controller._with_navigation_hand_actions_suppressed(
+                    source()
+                )
+            )
+        )
+
+    assert list(collect_result()) == ["navigation_action"]
+    assert result == [returned]
+    assert robot._disable_grasp_handling is False
+    assert controller._suppress_navigation_hand_actions is False
+
+
+def test_restore_sensor_pose_uses_native_parent_mount():
+    import torch
+
+    session = object.__new__(PersistentPhysicalSession)
+    calls = []
+    sensor = type(
+        "Sensor",
+        (),
+        {
+            "set_position_orientation": lambda self, **kwargs: calls.append(kwargs),
+        },
+    )()
+    session._native_rgb_sensor = lambda: ("eye", sensor)
+    session._initial_native_sensor_parent_pose = {
+        "position": torch.tensor([0.0, 0.0, 0.1]),
+        "orientation": torch.tensor([0.0, 0.0, 0.0, 1.0]),
+    }
+
+    session._restore_sensor_pose(
+        {
+            "sensor_pose": {
+                "position": [100.0, 100.0, 100.0],
+                "orientation": [1.0, 0.0, 0.0, 0.0],
+            }
+        }
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["frame"] == "parent"
+    assert torch.equal(calls[0]["position"], torch.tensor([0.0, 0.0, 0.1]))
+    assert torch.equal(calls[0]["orientation"], torch.tensor([0.0, 0.0, 0.0, 1.0]))
+
+
 def test_llm_log_path_preserves_retries(tmp_path):
     session = object.__new__(PersistentPhysicalSession)
     session.session_dir = tmp_path
@@ -131,7 +706,7 @@ def test_symbolic_carry_diagnostics_are_json_serializable():
         "eef_to_obj_pos": __import__("torch").zeros(3),
         "eef_to_obj_orn": __import__("torch").tensor([0.0, 0.0, 0.0, 1.0]),
     }
-    controller.robot = type(
+    robot = type(
         "Robot",
         (),
         {
@@ -149,6 +724,7 @@ def test_symbolic_carry_diagnostics_are_json_serializable():
             }
         },
     )()
+    controller.env = type("Environment", (), {"robots": [robot]})()
 
     import json
 

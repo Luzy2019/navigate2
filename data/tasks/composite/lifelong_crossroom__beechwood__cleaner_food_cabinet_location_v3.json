@@ -252,16 +252,16 @@
           "caution": null
         },
         {
-          "action": "TOGGLE_ON(sink.n.01_1)",
-          "caution": null
-        },
-        {
           "action": "WIPE(sponge.n.01_1)",
           "caution": "Sanitize the remembered floor sponge under the running sink before it touches the plate; the starter primitive does not expose SOAK_UNDER."
         },
         {
-          "action": "TOGGLE_OFF(sink.n.01_1)",
+          "action": "NAVIGATE_TO(plate.n.04_1)",
           "caution": null
+        },
+        {
+          "action": "WIPE(plate.n.04_1)",
+          "caution": "The single starter WIPE removes the remaining plate dirt and stain while the rinsed sponge is held."
         },
         {
           "action": "NAVIGATE_TO(table.n.02_1)",
@@ -292,46 +292,6 @@
       ],
       "H_limit": 60,
       "example_planning": [
-        {
-          "action": "NAVIGATE_TO(bottle__of__cleaner.n.01_1)",
-          "caution": "Fetch the cleaner from storage_room_0 before returning to the kitchen."
-        },
-        {
-          "action": "GRASP(bottle__of__cleaner.n.01_1)",
-          "caution": null
-        },
-        {
-          "action": "NAVIGATE_TO(table.n.02_1)",
-          "caution": "Return to kitchen_0 before cleaning the plate or storing the cleaner."
-        },
-        {
-          "action": "PLACE_ON_TOP(table.n.02_1)",
-          "caution": null
-        },
-        {
-          "action": "NAVIGATE_TO(sponge.n.01_1)",
-          "caution": "Use the sponge that was rinsed in T2; do not substitute the cleaner bottle as the wiping tool."
-        },
-        {
-          "action": "GRASP(sponge.n.01_1)",
-          "caution": null
-        },
-        {
-          "action": "NAVIGATE_TO(plate.n.04_1)",
-          "caution": null
-        },
-        {
-          "action": "WIPE(plate.n.04_1)",
-          "caution": "The single starter WIPE removes the remaining plate dirt and stain while the rinsed sponge is held."
-        },
-        {
-          "action": "NAVIGATE_TO(table.n.02_1)",
-          "caution": null
-        },
-        {
-          "action": "PLACE_ON_TOP(table.n.02_1)",
-          "caution": null
-        },
         {
           "action": "NAVIGATE_TO(top_cabinet.n.01_1)",
           "caution": null

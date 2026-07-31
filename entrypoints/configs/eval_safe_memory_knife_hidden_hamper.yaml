@@ -6,6 +6,9 @@ navigation:
   clearance_aware_simplify: false
 
 starter_primitives:
+  # The corridor carton sits below the camera's upward pitch limit during T4.
+  # Keep the native first-view gate while accepting the measured visible pose.
+  first_view_targeting_angular_tolerance: 0.05
   # The kitchen table approach is sensitive to the sampled side after its
   # surrounding chairs are removed. Keep a bounded set of native retries and
   # the compact arm pose used by the validated Beechwood routes.

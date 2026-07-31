@@ -261,6 +261,54 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             raise ValueError(
                 "starter_primitives.explicit_grasp_navigation_max_goal_radius must be at least 0.45"
             )
+        self.first_view_targeting = bool(config.first_view_targeting)
+        self.first_view_targeting_max_steps = int(
+            config.first_view_targeting_max_steps
+        )
+        self.first_view_targeting_angular_tolerance = float(
+            config.first_view_targeting_angular_tolerance
+        )
+        self.first_view_targeting_max_joint_step = float(
+            config.first_view_targeting_max_joint_step
+        )
+        self.first_view_targeting_settle_steps = int(
+            config.first_view_targeting_settle_steps
+        )
+        self.first_view_targeting_align_base = bool(
+            config.first_view_targeting_align_base
+        )
+        self.first_view_targeting_roll_tolerance = float(
+            config.first_view_targeting_roll_tolerance
+        )
+        self.first_view_targeting_max_base_yaw_change = float(
+            config.first_view_targeting_max_base_yaw_change
+        )
+        if self.first_view_targeting_max_steps < 1:
+            raise ValueError(
+                "starter_primitives.first_view_targeting_max_steps must be positive"
+            )
+        if not 0.0 < self.first_view_targeting_angular_tolerance < math.pi / 2.0:
+            raise ValueError(
+                "starter_primitives.first_view_targeting_angular_tolerance must be in (0, pi/2)"
+            )
+        if not 0.0 < self.first_view_targeting_max_joint_step <= math.pi / 2.0:
+            raise ValueError(
+                "starter_primitives.first_view_targeting_max_joint_step must be in (0, pi/2]"
+            )
+        if self.first_view_targeting_settle_steps < 0:
+            raise ValueError(
+                "starter_primitives.first_view_targeting_settle_steps must be non-negative"
+            )
+        if not 0.0 < self.first_view_targeting_roll_tolerance < math.pi / 2.0:
+            raise ValueError(
+                "starter_primitives.first_view_targeting_roll_tolerance must be in (0, pi/2)"
+            )
+        if self.first_view_targeting_max_base_yaw_change <= 0.0:
+            raise ValueError(
+                "starter_primitives.first_view_targeting_max_base_yaw_change must be positive"
+            )
+        self.last_first_view_alignment = None
+        self._first_view_focus = None
         self._cached_ik_solver = None
         self.controller_functions[
             StarterSemanticActionPrimitiveSet.NAVIGATE_TO
@@ -293,15 +341,18 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
 
         if prim == StarterSemanticActionPrimitiveSet.NAVIGATE_TO:
             errors = []
+            first_view_target = None
             for attempt in range(attempts):
                 try:
-                    yield from self._with_navigation_hand_actions_suppressed(
-                        self._navigate_to_explicit_target(*args)
+                    first_view_target = yield from (
+                        self._with_navigation_hand_actions_suppressed(
+                            self._navigate_to_explicit_target(*args)
+                        )
                     )
                     yield from self._with_navigation_hand_actions_suppressed(
                         self._settle_robot()
                     )
-                    return
+                    break
                 except ActionPrimitiveError as exc:
                     errors.append(exc)
                     print(
@@ -320,12 +371,39 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                         )
                     except ActionPrimitiveError:
                         pass
-            raise errors[-1]
+            else:
+                raise errors[-1]
+            yield from self.center_first_view_on_object(
+                args[0],
+                phase="post_navigation",
+                target_point=first_view_target,
+            )
+            return
         if prim == StarterSemanticActionPrimitiveSet.GRASP:
             yield from self._apply_grasp_without_default_reset(*args)
+            yield from self.center_first_view_on_object(
+                args[0],
+                phase="post_grasp",
+                require_success=False,
+            )
             return
 
         ctrl = self.controller_functions[prim]
+        placement_source = (
+            self._get_obj_in_hand()
+            if prim
+            in {
+                StarterSemanticActionPrimitiveSet.PLACE_INSIDE,
+                StarterSemanticActionPrimitiveSet.PLACE_ON_TOP,
+            }
+            else None
+        )
+        if args:
+            yield from self.center_first_view_on_object(
+                args[0],
+                phase=f"pre_{prim.name.lower()}",
+                surface=(prim == StarterSemanticActionPrimitiveSet.PLACE_ON_TOP),
+            )
         try:
             yield from ctrl(*args)
         except ActionPrimitiveError:
@@ -335,6 +413,14 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                 except ActionPrimitiveError:
                     pass
             raise
+
+        focus_after = placement_source if placement_source is not None else (args[0] if args else None)
+        if focus_after is not None:
+            yield from self.center_first_view_on_object(
+                focus_after,
+                phase=f"post_{prim.name.lower()}",
+                require_success=False,
+            )
 
         if self._primitive_uses_symbolic_shortcut(prim):
             return
@@ -624,6 +710,11 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             grasp_pose, preferred_goal_direction = yield from (
                 self._navigate_to_grasp_ready_pose(obj)
             )
+            yield from self.center_first_view_on_object(
+                obj,
+                phase="pre_grasp",
+                target_point=grasp_pose[0],
+            )
             yield from self._symbolic_grasp(
                 obj,
                 grasp_pose=grasp_pose,
@@ -670,7 +761,12 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             )
 
     def _grasp(self, obj):
-        yield from self._navigate_to_grasp_ready_pose(obj)
+        grasp_pose, _ = yield from self._navigate_to_grasp_ready_pose(obj)
+        yield from self.center_first_view_on_object(
+            obj,
+            phase="pre_grasp",
+            target_point=grasp_pose[0],
+        )
         print(f"[starter][grasp] starting physical grasp target={obj.name}")
         sys.stdout.flush()
         try:
@@ -1787,6 +1883,609 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             action = self._mask_navigation_hand_action(action)
         return action
 
+    def _native_first_view_sensor(self):
+        """Resolve the RGB sensor used by robot first-person observations."""
+
+        observation, _ = self.robot.get_obs()
+        sensors = getattr(self.robot, "sensors", None)
+        if sensors is None:
+            sensors = getattr(self.robot, "_sensors", {})
+        for sensor_name, sensor_obs in observation.items():
+            if not isinstance(sensor_obs, Mapping) or "rgb" not in sensor_obs:
+                continue
+            sensor = sensors.get(sensor_name) if isinstance(sensors, Mapping) else None
+            if callable(getattr(sensor, "get_position_orientation", None)):
+                return str(sensor_name), sensor
+        raise RuntimeError(
+            "robot first-view targeting requires a pose-bearing RGB sensor; "
+            f"available observations={list(observation)}"
+        )
+
+    @staticmethod
+    def _first_view_bbox_target(obj, *, surface: bool = False):
+        """Return a stable world-space focus point for an object operation."""
+
+        try:
+            center, _, extent, _ = obj.get_base_aligned_bbox(visual=False)
+        except Exception:
+            try:
+                center, _, extent, _ = obj.get_base_aligned_bbox()
+            except Exception:
+                center = obj.get_position_orientation()[0]
+                extent = torch.zeros(3, dtype=torch.float32)
+        point = torch.as_tensor(center, dtype=torch.float32).clone()
+        if surface:
+            point[2] += 0.5 * float(torch.as_tensor(extent, dtype=torch.float32)[2])
+        return point
+
+    @staticmethod
+    def _first_view_angular_error(sensor_position, sensor_orientation, target_point):
+        """Compute horizontal and vertical target error in the native camera frame."""
+
+        sensor_position = torch.as_tensor(sensor_position, dtype=torch.float32)
+        target_point = torch.as_tensor(target_point, dtype=torch.float32)
+        direction = target_point - sensor_position
+        distance = torch.linalg.vector_norm(direction)
+        if float(distance.item()) < 1e-6:
+            raise ValueError("first-view target coincides with the RGB sensor")
+        direction = direction / distance
+        rotation = T.quat2mat(torch.as_tensor(sensor_orientation, dtype=torch.float32))
+        camera_right = rotation[:, 0]
+        camera_up = rotation[:, 1]
+        camera_forward = -rotation[:, 2]
+        forward_component = float(torch.dot(direction, camera_forward).item())
+        horizontal = math.atan2(
+            float(torch.dot(direction, camera_right).item()),
+            forward_component,
+        )
+        vertical = math.atan2(
+            float(torch.dot(direction, camera_up).item()),
+            forward_component,
+        )
+        return horizontal, vertical, forward_component, float(distance.item())
+
+    @staticmethod
+    def _first_view_roll_error(sensor_orientation):
+        """Return image roll relative to world-up for the native RGB sensor."""
+
+        rotation = T.quat2mat(torch.as_tensor(sensor_orientation, dtype=torch.float32))
+        camera_right = rotation[:, 0]
+        camera_up = rotation[:, 1]
+        world_up = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32)
+        return math.atan2(
+            float(torch.dot(world_up, camera_right).item()),
+            float(torch.dot(world_up, camera_up).item()),
+        )
+
+    def _first_view_joint_limit_diagnostic(
+        self,
+        current_joint,
+        dof_idx,
+        horizontal,
+        vertical,
+    ):
+        """Report whether every remaining pan / tilt error is blocked by a joint limit."""
+
+        diagnostic = {
+            "available": False,
+            "all_residual_axes_blocked": False,
+        }
+        try:
+            control_limits = self.robot.control_limits
+            lower_all, upper_all = control_limits["position"]
+            current = torch.as_tensor(current_joint).flatten().to(dtype=torch.float32)
+            indices = torch.as_tensor(
+                dof_idx,
+                dtype=torch.long,
+                device=current.device,
+            )
+            lower = torch.as_tensor(
+                lower_all,
+                dtype=current.dtype,
+                device=current.device,
+            )[indices]
+            upper = torch.as_tensor(
+                upper_all,
+                dtype=current.dtype,
+                device=current.device,
+            )[indices]
+            has_limit_all = control_limits.get(
+                "has_limit",
+                torch.ones_like(torch.as_tensor(lower_all), dtype=torch.bool),
+            )
+            has_limit = torch.as_tensor(
+                has_limit_all,
+                dtype=torch.bool,
+                device=current.device,
+            )[indices]
+        except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
+            diagnostic["error"] = f"{type(exc).__name__}: {exc}"
+            return diagnostic
+
+        if current.numel() != 2 or lower.numel() != 2 or upper.numel() != 2:
+            diagnostic["error"] = "first-view targeting requires two camera joint limits"
+            return diagnostic
+
+        raw_lower = lower.clone()
+        raw_upper = upper.clone()
+        limit_source = "robot_control_limits"
+        camera_controller = self.robot.controllers.get("camera")
+        if camera_controller is not None and not bool(
+            getattr(camera_controller, "use_delta_commands", True)
+        ):
+            command_input_limits = getattr(
+                camera_controller,
+                "command_input_limits",
+                None,
+            )
+            if command_input_limits is not None:
+                command_output_limits = getattr(
+                    camera_controller,
+                    "command_output_limits",
+                    None,
+                )
+                command_limits = (
+                    command_output_limits
+                    if command_output_limits is not None
+                    else command_input_limits
+                )
+                command_lower = torch.as_tensor(
+                    command_limits[0],
+                    dtype=current.dtype,
+                    device=current.device,
+                ).flatten()
+                command_upper = torch.as_tensor(
+                    command_limits[1],
+                    dtype=current.dtype,
+                    device=current.device,
+                ).flatten()
+                if command_lower.numel() != 2 or command_upper.numel() != 2:
+                    diagnostic["error"] = (
+                        "first-view targeting requires two camera command limits"
+                    )
+                    return diagnostic
+                lower = torch.maximum(lower, command_lower)
+                upper = torch.minimum(upper, command_upper)
+                limit_source = (
+                    "camera_command_output_limits"
+                    if command_output_limits is not None
+                    else "camera_command_input_limits"
+                )
+
+        errors = torch.tensor(
+            [horizontal, vertical],
+            dtype=current.dtype,
+            device=current.device,
+        )
+        correction = -errors
+        residual = errors.abs() > self.first_view_targeting_angular_tolerance
+        finite_limit = torch.isfinite(lower) & torch.isfinite(upper) & has_limit
+        limit_tolerance = 1e-3
+        at_lower = finite_limit & (current <= lower + limit_tolerance)
+        at_upper = finite_limit & (current >= upper - limit_tolerance)
+        blocked = ((correction < 0.0) & at_lower) | (
+            (correction > 0.0) & at_upper
+        )
+        all_residual_axes_blocked = bool(
+            torch.any(residual).item() and torch.all(~residual | blocked).item()
+        )
+        diagnostic.update(
+            available=True,
+            limit_source=limit_source,
+            raw_lower_limits=self._to_float_list(raw_lower),
+            raw_upper_limits=self._to_float_list(raw_upper),
+            lower_limits=self._to_float_list(lower),
+            upper_limits=self._to_float_list(upper),
+            at_lower=[bool(value) for value in at_lower.tolist()],
+            at_upper=[bool(value) for value in at_upper.tolist()],
+            residual_axes=[bool(value) for value in residual.tolist()],
+            blocked_axes=[bool(value) for value in blocked.tolist()],
+            limit_tolerance_rad=limit_tolerance,
+            all_residual_axes_blocked=all_residual_axes_blocked,
+        )
+        return diagnostic
+
+    @staticmethod
+    def _first_view_frustum_diagnostic(
+        sensor,
+        horizontal,
+        vertical,
+        forward,
+        distance,
+    ):
+        """Project the target point with the native RGB sensor calibration."""
+
+        diagnostic = {
+            "available": False,
+            "inside_frustum": False,
+        }
+        try:
+            intrinsics = torch.as_tensor(
+                sensor.intrinsic_matrix,
+                dtype=torch.float64,
+            )
+            width = int(sensor.image_width)
+            height = int(sensor.image_height)
+            if intrinsics.shape != (3, 3) or width <= 0 or height <= 0:
+                raise ValueError(
+                    f"invalid RGB calibration shape={tuple(intrinsics.shape)} "
+                    f"resolution=({width}, {height})"
+                )
+            fx = float(intrinsics[0, 0].item())
+            fy = float(intrinsics[1, 1].item())
+            cx = float(intrinsics[0, 2].item())
+            cy = float(intrinsics[1, 2].item())
+            pixel_x = cx + fx * math.tan(float(horizontal))
+            pixel_y = cy - fy * math.tan(float(vertical))
+            camera_depth = float(forward) * float(distance)
+            clipping = getattr(sensor, "clipping_range", None)
+            near = 0.0
+            far = float("inf")
+            if clipping is not None:
+                clipping_values = torch.as_tensor(
+                    clipping,
+                    dtype=torch.float64,
+                ).flatten()
+                if clipping_values.numel() >= 2:
+                    near = float(clipping_values[0].item())
+                    far = float(clipping_values[1].item())
+        except Exception as exc:
+            diagnostic["error"] = f"{type(exc).__name__}: {exc}"
+            return diagnostic
+
+        finite_projection = all(
+            math.isfinite(value) for value in (pixel_x, pixel_y, camera_depth)
+        )
+        valid_clipping = math.isfinite(near) and (
+            math.isfinite(far) or (math.isinf(far) and far > 0.0)
+        )
+        inside_image = (
+            finite_projection
+            and 0.0 <= pixel_x < width
+            and 0.0 <= pixel_y < height
+        )
+        inside_clipping = (
+            finite_projection
+            and valid_clipping
+            and camera_depth > 0.0
+            and near <= camera_depth <= far
+        )
+        diagnostic.update(
+            available=True,
+            image_width=width,
+            image_height=height,
+            pixel_x=round(pixel_x, 3),
+            pixel_y=round(pixel_y, 3),
+            camera_depth=round(camera_depth, 6),
+            clipping_range=[round(near, 6), round(far, 6)],
+            inside_image=inside_image,
+            inside_clipping=inside_clipping,
+            inside_frustum=inside_image and inside_clipping,
+        )
+        return diagnostic
+
+    def _first_view_alignment_mode(
+        self,
+        sensor,
+        current_joint,
+        dof_idx,
+        horizontal,
+        vertical,
+        forward,
+        distance,
+        roll_error,
+        allow_visible_at_joint_limit,
+    ):
+        """Return strict centering or calibrated visibility at a mechanical limit."""
+
+        roll_centered = abs(roll_error) <= self.first_view_targeting_roll_tolerance
+        centered = (
+            forward > 0.0
+            and abs(horizontal) <= self.first_view_targeting_angular_tolerance
+            and abs(vertical) <= self.first_view_targeting_angular_tolerance
+            and roll_centered
+        )
+        if centered:
+            return "centered", None, None
+        if not roll_centered or not allow_visible_at_joint_limit:
+            return None, None, None
+
+        joint_limit = self._first_view_joint_limit_diagnostic(
+            current_joint,
+            dof_idx,
+            horizontal,
+            vertical,
+        )
+        if not joint_limit["all_residual_axes_blocked"]:
+            return None, joint_limit, None
+        frustum = self._first_view_frustum_diagnostic(
+            sensor,
+            horizontal,
+            vertical,
+            forward,
+            distance,
+        )
+        if frustum["inside_frustum"]:
+            return "visible_at_joint_limit", joint_limit, frustum
+        return None, joint_limit, frustum
+
+    def _camera_target_action(self, joint_target):
+        camera_controller = self.robot.controllers.get("camera")
+        if camera_controller is None:
+            raise RuntimeError("robot has no native camera controller")
+        action = self._empty_action()
+        action_idx = self.robot.controller_action_idx["camera"]
+        command = torch.as_tensor(joint_target, dtype=torch.float32)
+        reverse = getattr(camera_controller, "_reverse_preprocess_command", None)
+        if not callable(reverse):
+            raise RuntimeError("native camera controller cannot encode a joint target")
+        action[action_idx] = reverse(command)
+        return self._postprocess_action(action)
+
+    def center_first_view_on_object(
+        self,
+        obj,
+        *,
+        phase: str,
+        target_point=None,
+        surface: bool = False,
+        require_success: bool = True,
+    ):
+        """Center and level an operation target in Fetch's native first view.
+
+        After navigation or checkpoint restore, a bounded in-place base turn
+        faces the target before pan / tilt performs precise centering. Image
+        roll is validated against the native sensor mount rather than corrected
+        by treating base yaw as a nonexistent roll axis.
+        """
+
+        if not self.first_view_targeting:
+            return
+        if (
+            target_point is None
+            and OmniGibsonNavigationBackend._is_floor_target(obj)
+        ):
+            return
+        camera_controller = self.robot.controllers.get("camera")
+        if camera_controller is None:
+            if require_success:
+                raise ActionPrimitiveError(
+                    ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                    "The robot has no camera controller for first-view targeting.",
+                    {"target object": getattr(obj, "name", None), "phase": phase},
+                )
+            return
+        if target_point is None:
+            target_point = self._first_view_bbox_target(obj, surface=surface)
+        target_point = torch.as_tensor(target_point, dtype=torch.float32).clone()
+        sensor_name, sensor = self._native_first_view_sensor()
+        dof_idx = torch.as_tensor(camera_controller.dof_idx, dtype=torch.long)
+        if dof_idx.numel() != 2:
+            raise RuntimeError(
+                "first-view targeting requires two camera joints, "
+                f"got dof_idx={dof_idx.tolist()}"
+            )
+
+        initial_joint = self.robot.get_joint_positions()[dof_idx].clone()
+        initial_robot_yaw = float(
+            T.quat2euler(self.robot.get_position_orientation()[1])[2].item()
+        )
+        base_alignment_steps = 0
+        if self.first_view_targeting_align_base and phase in {
+            "post_navigation",
+            "checkpoint_restore",
+        }:
+            robot_position = self.robot.get_position_orientation()[0]
+            target_delta = target_point[:2] - robot_position[:2]
+            if float(torch.linalg.vector_norm(target_delta).item()) > 1e-6:
+                desired_yaw = math.atan2(
+                    float(target_delta[1].item()),
+                    float(target_delta[0].item()),
+                )
+                yaw_delta = self._wrap_navigation_yaw(desired_yaw - initial_robot_yaw)
+                yaw_delta = max(
+                    -self.first_view_targeting_max_base_yaw_change,
+                    min(self.first_view_targeting_max_base_yaw_change, yaw_delta),
+                )
+                target_yaw = self._wrap_navigation_yaw(initial_robot_yaw + yaw_delta)
+                rotate = getattr(self.navigation_backend, "_rotate_to_yaw", None)
+                if not callable(rotate):
+                    raise RuntimeError("navigation backend cannot align the base for first view")
+                for base_alignment_steps, action in enumerate(
+                    rotate(
+                        self,
+                        target_yaw,
+                        rotation_kind="first_view_alignment",
+                    ),
+                    1,
+                ):
+                    yield action
+        final_error = None
+        initial_roll_error = None
+        final_roll_error = float("inf")
+        final_joint = initial_joint.clone()
+        success = False
+        success_mode = None
+        stable_mode = None
+        step_count = 0
+        stable_count = 0
+        joint_limit_diagnostic = None
+        frustum_diagnostic = None
+        allow_visible_at_joint_limit = (
+            phase in {"post_navigation", "checkpoint_restore"}
+            and require_success
+        )
+        required_stable_count = max(1, self.first_view_targeting_settle_steps)
+        while step_count < self.first_view_targeting_max_steps:
+            sensor_position, sensor_orientation = sensor.get_position_orientation(
+                frame="scene"
+            )
+            horizontal, vertical, forward, distance = self._first_view_angular_error(
+                sensor_position,
+                sensor_orientation,
+                target_point,
+            )
+            final_error = (horizontal, vertical, forward, distance)
+            final_roll_error = self._first_view_roll_error(sensor_orientation)
+            if initial_roll_error is None:
+                initial_roll_error = final_roll_error
+            current_joint = self.robot.get_joint_positions()[dof_idx].clone()
+            alignment_mode, joint_limit_diagnostic, frustum_diagnostic = (
+                self._first_view_alignment_mode(
+                    sensor,
+                    current_joint,
+                    dof_idx,
+                    horizontal,
+                    vertical,
+                    forward,
+                    distance,
+                    final_roll_error,
+                    allow_visible_at_joint_limit,
+                )
+            )
+            if alignment_mode is not None:
+                if stable_mode != alignment_mode:
+                    stable_count = 0
+                    stable_mode = alignment_mode
+                stable_count += 1
+                if stable_count >= required_stable_count:
+                    success = True
+                    success_mode = alignment_mode
+                    break
+                step_count += 1
+                yield self._camera_target_action(current_joint)
+                continue
+
+            stable_count = 0
+            stable_mode = None
+            correction = torch.tensor(
+                [-horizontal, -vertical],
+                dtype=torch.float32,
+            ).clamp(
+                -self.first_view_targeting_max_joint_step,
+                self.first_view_targeting_max_joint_step,
+            )
+            if step_count % 30 == 0:
+                print(
+                    "[starter][first_view][progress] "
+                    f"phase={phase} step={step_count} "
+                    f"horizontal_error={round(horizontal, 6)} "
+                    f"vertical_error={round(vertical, 6)} "
+                    f"roll_error={round(final_roll_error, 6)} "
+                    f"camera_joints={self._to_float_list(current_joint)}"
+                )
+                sys.stdout.flush()
+            step_count += 1
+            yield self._camera_target_action(current_joint + correction)
+
+        if not success:
+            sensor_position, sensor_orientation = sensor.get_position_orientation(
+                frame="scene"
+            )
+            final_error = self._first_view_angular_error(
+                sensor_position,
+                sensor_orientation,
+                target_point,
+            )
+            final_roll_error = self._first_view_roll_error(sensor_orientation)
+            horizontal, vertical, forward, distance = final_error
+            current_joint = self.robot.get_joint_positions()[dof_idx].clone()
+            alignment_mode, joint_limit_diagnostic, frustum_diagnostic = (
+                self._first_view_alignment_mode(
+                    sensor,
+                    current_joint,
+                    dof_idx,
+                    horizontal,
+                    vertical,
+                    forward,
+                    distance,
+                    final_roll_error,
+                    allow_visible_at_joint_limit,
+                )
+            )
+            if alignment_mode is not None:
+                if stable_mode != alignment_mode:
+                    stable_count = 0
+                    stable_mode = alignment_mode
+                stable_count += 1
+                success = stable_count >= required_stable_count
+                if success:
+                    success_mode = alignment_mode
+            else:
+                stable_count = 0
+                stable_mode = None
+
+        final_joint = self.robot.get_joint_positions()[dof_idx].clone()
+        final_robot_yaw = float(
+            T.quat2euler(self.robot.get_position_orientation()[1])[2].item()
+        )
+        horizontal, vertical, forward, distance = final_error or (
+            float("inf"),
+            float("inf"),
+            -1.0,
+            float("inf"),
+        )
+        diagnostic = {
+            "status": success_mode if success else "failed",
+            "phase": str(phase),
+            "target_object_name": str(getattr(obj, "name", "")),
+            "target_point": self._to_float_list(target_point),
+            "sensor_name": sensor_name,
+            "steps": int(step_count),
+            "stable_frames": int(stable_count),
+            "required_stable_frames": int(required_stable_count),
+            "initial_camera_joints": self._to_float_list(initial_joint),
+            "final_camera_joints": self._to_float_list(final_joint),
+            "horizontal_error_rad": round(float(horizontal), 6),
+            "vertical_error_rad": round(float(vertical), 6),
+            "initial_roll_error_rad": round(
+                float(initial_roll_error if initial_roll_error is not None else float("inf")),
+                6,
+            ),
+            "roll_error_rad": round(float(final_roll_error), 6),
+            "forward_component": round(float(forward), 6),
+            "target_distance": round(float(distance), 6),
+            "angular_tolerance_rad": self.first_view_targeting_angular_tolerance,
+            "roll_tolerance_rad": self.first_view_targeting_roll_tolerance,
+            "base_alignment_enabled": self.first_view_targeting_align_base,
+            "base_alignment_steps": int(base_alignment_steps),
+            "initial_robot_yaw": round(initial_robot_yaw, 6),
+            "final_robot_yaw": round(final_robot_yaw, 6),
+            "base_yaw_change": round(
+                self._wrap_navigation_yaw(final_robot_yaw - initial_robot_yaw),
+                6,
+            ),
+            "joint_limit": joint_limit_diagnostic,
+            "frustum": frustum_diagnostic,
+            "joint_limit_visibility_allowed": allow_visible_at_joint_limit,
+        }
+        self.last_first_view_alignment = diagnostic
+        self._first_view_focus = {
+            "target_object_name": diagnostic["target_object_name"],
+            "target_point": diagnostic["target_point"],
+            "phase": diagnostic["phase"],
+        }
+        print(
+            "[starter][first_view] "
+            f"status={diagnostic['status']} phase={phase} "
+            f"target={diagnostic['target_object_name']} "
+            f"steps={diagnostic['steps']} "
+            f"horizontal_error={diagnostic['horizontal_error_rad']} "
+            f"vertical_error={diagnostic['vertical_error_rad']} "
+            f"roll_error={diagnostic['roll_error_rad']} "
+            f"camera_joints={diagnostic['final_camera_joints']}"
+        )
+        sys.stdout.flush()
+        if not success and require_success:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.EXECUTION_ERROR,
+                "Could not center the manipulation target in the native first view.",
+                diagnostic,
+            )
+
+    def first_view_focus_checkpoint(self):
+        return None if self._first_view_focus is None else dict(self._first_view_focus)
+
     def _with_navigation_hand_actions_suppressed(self, generator):
         """Run a navigation generator without letting OG drive arm/gripper.
 
@@ -1813,7 +2512,7 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                 assisted_grasp_handling_disabled=True,
             )
         try:
-            yield from generator
+            return (yield from generator)
         finally:
             self.robot._disable_grasp_handling = previous_disable_grasp_handling
             self._suppress_navigation_hand_actions = previous
@@ -5528,7 +6227,7 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
     def _navigate_to_explicit_target(self, obj):
         if self._should_use_open_pose_navigation(obj):
             yield from self._navigate_to_open_pose_preview(obj)
-            return
+            return None
 
         if self._should_use_grasp_ready_navigation(obj):
             if self.explicit_grasp_use_object_navigation:
@@ -5544,13 +6243,17 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                     maximum_goal_radius_override=max_radius,
                     enforce_navigation_postcondition=max_radius is not None,
                 )
-                return
+                grasp_pose, _ = yield from self._navigate_to_grasp_ready_pose(
+                    obj,
+                    navigation_reason="explicit_grasp_object",
+                )
+                return grasp_pose[0]
 
-            yield from self._navigate_to_grasp_ready_pose(
+            grasp_pose, _ = yield from self._navigate_to_grasp_ready_pose(
                 obj,
                 navigation_reason="explicit_grasp_ready_stance",
             )
-            return
+            return grasp_pose[0]
 
         yield from self._navigate_to_obj(
             obj,
@@ -5561,6 +6264,7 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                 self.explicit_navigation_max_goal_radius is not None
             ),
         )
+        return None
 
     def _should_use_grasp_ready_navigation(self, obj) -> bool:
         """Route explicit NAVIGATE_TO(pickup) to the physical GRASP stance.

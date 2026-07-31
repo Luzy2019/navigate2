@@ -16,17 +16,14 @@
         (ontop agent.n.01_1 floor.n.01_3)
         (inroom desk.n.01_1 private_office_0)
         (inroom bottom_cabinet.n.01_1 private_office_0)
-        (ontop carton.n.02_1 desk.n.01_1)
         (ontop vase.n.01_1 desk.n.01_1)
         (open carton.n.02_1)
 
         (inroom floor.n.01_1 corridor_0)
-        (ontop carton.n.02_2 floor.n.01_1)
         (ontop weight.n.02_1 floor.n.01_1)
         (open carton.n.02_2)
 
-        (inroom floor.n.01_2 storage_room_0)
-        (ontop carton.n.02_3 floor.n.01_2)
+        (inroom floor.n.01_2 living_room_1)
         (not (open carton.n.02_3))
     )
 
@@ -34,9 +31,11 @@
         (and
             (ontop carton.n.02_3 bottom_cabinet.n.01_1)
             (ontop carton.n.02_1 carton.n.02_2)
+            (ontop carton.n.02_2 floor.n.01_3)
             (not (ontop carton.n.02_1 bottom_cabinet.n.01_1))
             (not (ontop carton.n.02_2 bottom_cabinet.n.01_1))
             (not (ontop carton.n.02_2 carton.n.02_1))
+            (not (ontop carton.n.02_2 carton.n.02_3))
             (inside vase.n.01_1 carton.n.02_1)
             (inside weight.n.02_1 carton.n.02_2)
             (not (open carton.n.02_1))
