@@ -36,7 +36,12 @@ same placement relation. Do not combine intermediate work surfaces, objects
 assigned to different cabinets, or unrelated sequential task steps. Return
 {"status":"NONE"} or {"status":"MONITOR",
 "ordered_objects":["entity"],"destination_role":"role",
-"destination_relation":"PLACE_INSIDE"}. Order objects by loading safety."""
+"destination_relation":"PLACE_INSIDE"}. Every ordered_objects value must be
+an exact, verbatim BDDL task entity string from INPUT.allowed_entities. Never
+output a scene_graph node id, object_views entity_id, label, category, support
+surface, or destination entity. In particular, IDs such as obj_0001,
+unigoal_object:0, and samjam_object:1 are observation-layer references and are
+invalid. Order eligible movable task entities by loading safety."""
 
 _LOADING_PROMPT = """Generate all remaining operations in the complete
 shared-destination loading plan from the current RGB and held_object. Choose
@@ -212,6 +217,10 @@ class VLMClosedLoopPlannerAdapter:
         prompt = (
             f"{instruction.strip()}\n\n"
             "Use only the supplied action vocabulary and exact entity identifiers. "
+            "Only values listed verbatim in INPUT.allowed_entities are valid task "
+            "entity identifiers. scene_graph node IDs and object_views entity IDs "
+            "are observation-layer references, never valid action arguments or "
+            "ordered_objects values. "
             "A category name is invalid when it represents multiple task entities. "
             "Each available_actions value is the exact required argument count. "
             "When a placement, pour, or dump action has arity 1, its only argument is "
@@ -254,10 +263,10 @@ class VLMClosedLoopPlannerAdapter:
         ordered = [str(value).strip() for value in payload.get("ordered_objects", ())]
         if len(ordered) < 3:
             return
-        if len(set(ordered)) != len(ordered) or any(
-            entity_id not in self.allowed_entity_ids for entity_id in ordered
-        ):
-            raise ValueError("preflight ordered_objects must be unique allowed entities")
+        if len(set(ordered)) != len(ordered):
+            raise ValueError("preflight ordered_objects must be unique")
+        if any(entity_id not in self.allowed_entity_ids for entity_id in ordered):
+            raise ValueError("preflight ordered_objects must use allowed task entity IDs")
         relation = str(payload.get("destination_relation", "")).strip().upper()
         if relation not in {"PLACE_INSIDE", "PLACE_ON_TOP"} or relation not in self.valid_primitives:
             raise ValueError("preflight destination_relation must be a current placement action")

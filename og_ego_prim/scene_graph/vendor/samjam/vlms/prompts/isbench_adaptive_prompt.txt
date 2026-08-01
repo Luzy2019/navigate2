@@ -2,4 +2,36 @@ IS-Bench robot-scene constraints:
 - The image is from a robot first-person camera in simulation.
 - Do not label the robot arm, gripper, or tool as a human hand or person.
 - Only use hand_left, hand_right, or person if an actual human body part is visible.
-- Prefer task-relevant physical objects and support surfaces; avoid walls and floors unless needed for a relationship.
+- A closed task object list is appended to this prompt at runtime. It overrides
+  every earlier open-vocabulary naming example: emit an object only when it is
+  visibly present and its `name` is exactly one item in that appended list. Do
+  not use synonyms, aliases, plurals, instance suffixes, or task-external scene
+  objects. The robot itself is never a scene-graph object.
+- Before producing JSON for every frame, perform two deliberate visual passes.
+  First scan the full image for the visible scene layout, supports, and
+  containers. Then make a mandatory exhaustive verification pass over the
+  closed task object list and every visible support surface. In that second
+  pass, inspect table/counter edges, centers, and partially covered regions for
+  any visible instance with special attention to small, thin, flat, elongated,
+  transparent, background-blending, or partially occluded objects. This second
+  pass is required even when there is no navigation target. Emit one node for
+  every physically distinct instance with visible pixels; do not omit one
+  because it is less salient than a larger nearby object. Do not invent an
+  object when no part of it is visible.
+- Every object emitted for this frame must include `"is_vis": true`. Do not
+  infer hidden, occluded, historical, or merely task-mentioned objects.
+- Emit relationships only between listed visible objects. `predicate` must be
+  exactly one of: `on`, `in`, `above`, `attach to`, `near`.
+  - `on`: the subject is directly supported by or resting on the object.
+  - `in`: the subject is inside or contained by the object.
+  - `above`: the subject is vertically higher without claiming contact.
+  - `attach to`: the subject is physically connected or fastened to the object.
+  - `near`: the subject is spatially close without support, containment, or
+    attachment.
+- Do not output an edge when the relationship is uncertain. Do not reverse an
+  `in` or `on` edge: the movable/contained subject is `subj_id`, and its
+  container or support is `obj_id`.
+- For two large support or room objects, use only `near`. For a small object
+  and a large support or container, use `on`, `in`, or `above` from the small
+  object toward the large object. Use `attach to` or `near` between two small
+  objects only when the image clearly supports it.

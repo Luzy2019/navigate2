@@ -390,22 +390,10 @@ class PersistentPhysicalSession:
         self.session.update(current_frame=frame, status="waiting_for_annotation")
         self._save_session()
 
-    def _runtime_checkpoint(self) -> Dict[str, Any]:
+    def _physical_checkpoint_payload(self) -> Dict[str, Any]:
+        """Capture the simulator-owned state shared by physical session runners."""
+
         scheduler = self.benchmark.runtime_controller.components.scheduler
-        adapter = self.planner_adapter
-        adapter_state = {
-            name: deepcopy(getattr(adapter, name))
-            for name in (
-                "_start_step",
-                "_preflight_done",
-                "_loading",
-                "_root_action",
-                "_safety_goal",
-                "_steps",
-                "_inflight",
-            )
-            if hasattr(adapter, name)
-        }
         return {
             "schema_version": CHECKPOINT_SCHEMA_VERSION,
             "sim_state": self._dump_sim_state(),
@@ -426,38 +414,61 @@ class PersistentPhysicalSession:
             "symbolic_carry_checkpoint": self._symbolic_carry_checkpoint(),
             "symbolic_carry": self._symbolic_carry_diagnostics(),
             "cooked_particle_payloads": self.benchmark.executor.cooked_particle_payload_checkpoint(),
-            "runtime_controller": {
-                "last_review": deepcopy(self.benchmark.runtime_controller.last_review),
-                "last_outcome": deepcopy(self.benchmark.runtime_controller.last_outcome),
-                "proposal_count": self.benchmark.runtime_controller.proposal_count,
-                "pending_scheduler_state_changes": deepcopy(
-                    self.benchmark.runtime_controller._pending_scheduler_state_changes
-                ),
-            },
-            "agent": {
-                "current_step": self.agent.current_step,
-                "pending_manipulation": deepcopy(self.agent._pending_manipulation),
-                "subtask_plan_start": self.agent._subtask_plan_start,
-                "last_prompt": self.agent.last_prompt,
-                "last_prompt_sequence": self.agent.last_prompt_sequence,
-                "prompt_records": deepcopy(self.agent.prompt_records),
-            },
-            "planner_adapter": adapter_state,
-            "lifelong_evaluator": {
-                "results": deepcopy(self.lifelong_evaluator.results),
-                "process_results": deepcopy(self.lifelong_evaluator._process_results),
-                "awareness_results": deepcopy(self.lifelong_evaluator._awareness_results),
-            },
-            "tracker": {
-                "plans": deepcopy(self.benchmark.tracker.plans),
-                "raw_outputs": deepcopy(self.benchmark.tracker.raw_outputs),
-                "risk_evaluations": deepcopy(self.benchmark.tracker.risk_evaluations),
-                "risk_predictions": deepcopy(self.benchmark.tracker.risk_predictions),
-                "execution_diagnostics": deepcopy(self.benchmark.tracker.execution_diagnostics),
-                "awareness": deepcopy(self.benchmark.tracker.awareness),
-            },
-            "session": deepcopy(self.session),
         }
+
+    def _runtime_checkpoint(self) -> Dict[str, Any]:
+        scheduler = self.benchmark.runtime_controller.components.scheduler
+        adapter = self.planner_adapter
+        adapter_state = {
+            name: deepcopy(getattr(adapter, name))
+            for name in (
+                "_start_step",
+                "_preflight_done",
+                "_loading",
+                "_root_action",
+                "_safety_goal",
+                "_steps",
+                "_inflight",
+            )
+            if hasattr(adapter, name)
+        }
+        payload = self._physical_checkpoint_payload()
+        payload.update(
+            {
+                "runtime_controller": {
+                    "last_review": deepcopy(self.benchmark.runtime_controller.last_review),
+                    "last_outcome": deepcopy(self.benchmark.runtime_controller.last_outcome),
+                    "proposal_count": self.benchmark.runtime_controller.proposal_count,
+                    "pending_scheduler_state_changes": deepcopy(
+                        self.benchmark.runtime_controller._pending_scheduler_state_changes
+                    ),
+                },
+                "agent": {
+                    "current_step": self.agent.current_step,
+                    "pending_manipulation": deepcopy(self.agent._pending_manipulation),
+                    "subtask_plan_start": self.agent._subtask_plan_start,
+                    "last_prompt": self.agent.last_prompt,
+                    "last_prompt_sequence": self.agent.last_prompt_sequence,
+                    "prompt_records": deepcopy(self.agent.prompt_records),
+                },
+                "planner_adapter": adapter_state,
+                "lifelong_evaluator": {
+                    "results": deepcopy(self.lifelong_evaluator.results),
+                    "process_results": deepcopy(self.lifelong_evaluator._process_results),
+                    "awareness_results": deepcopy(self.lifelong_evaluator._awareness_results),
+                },
+                "tracker": {
+                    "plans": deepcopy(self.benchmark.tracker.plans),
+                    "raw_outputs": deepcopy(self.benchmark.tracker.raw_outputs),
+                    "risk_evaluations": deepcopy(self.benchmark.tracker.risk_evaluations),
+                    "risk_predictions": deepcopy(self.benchmark.tracker.risk_predictions),
+                    "execution_diagnostics": deepcopy(self.benchmark.tracker.execution_diagnostics),
+                    "awareness": deepcopy(self.benchmark.tracker.awareness),
+                },
+                "session": deepcopy(self.session),
+            }
+        )
+        return payload
 
     @staticmethod
     def _dump_sim_state() -> Any:
@@ -1182,8 +1193,13 @@ class PersistentPhysicalSession:
             "diagnostic": diagnostic,
         }
 
-    def _restore_checkpoint(self, checkpoint_path: Path) -> None:
-        payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    def _restore_physical_checkpoint_payload(
+        self,
+        payload: Mapping[str, Any],
+        checkpoint_path: Path,
+    ) -> Dict[str, Any]:
+        """Restore and validate the simulator-owned part of a physical checkpoint."""
+
         if payload.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
             raise ValueError("unsupported physical checkpoint")
         import omnigibson as og
@@ -1226,6 +1242,11 @@ class PersistentPhysicalSession:
         validation["frame_index"] = int(
             (payload.get("session") or {}).get("current_frame", {}).get("frame_index", -1)
         )
+        return validation
+
+    def _restore_checkpoint(self, checkpoint_path: Path) -> None:
+        payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        validation = self._restore_physical_checkpoint_payload(payload, checkpoint_path)
         _write_json(self.checkpoint_dir / "restore_validation.json", validation)
         self.accumulator.load_state(payload["global_scene"])
         self.updater.global_step_index = int(payload["updater_global_step"])

@@ -1,3 +1,4 @@
+from copy import deepcopy
 import re
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
@@ -283,6 +284,91 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
 
     def to_prompt_context(self) -> str:
         return self.get_snapshot().to_prompt_context()
+
+    def checkpoint_state(self) -> Dict[str, Any]:
+        """Return the logical perception state needed after a process restore.
+
+        The simulator snapshot contains geometry only.  Identity tracking,
+        scene-graph diffs, and backend-specific map memory live in Python, so
+        they must travel with a physical frame checkpoint as well.
+        """
+
+        backend_state = None
+        if self.backend is not None:
+            save = getattr(self.backend, "checkpoint_state", None)
+            if not callable(save):
+                raise RuntimeError(
+                    "scene graph backend does not support physical checkpoint state: "
+                    f"{type(self.backend).__name__}"
+                )
+            backend_state = save()
+        if self.truth_updater is not None:
+            save = getattr(self.truth_updater, "checkpoint_state", None)
+            if not callable(save):
+                raise RuntimeError(
+                    "truth scene graph updater does not support physical checkpoint state: "
+                    f"{type(self.truth_updater).__name__}"
+                )
+            backend_state = save()
+        return {
+            "schema_version": "isbench.perception_scene_graph_checkpoint.v1",
+            "backend_name": self.backend_name,
+            "disabled": self.disabled,
+            "global_step_index": self.global_step_index,
+            "latest_result": deepcopy(self.latest_result),
+            "task_instruction": self.task_instruction,
+            "task_entity_ids": tuple(self.task_entity_ids),
+            "snapshot": deepcopy(self.snapshot),
+            "perception_errors": deepcopy(self.perception_errors),
+            "held_object_name": self.held_object_name,
+            "manipulation_event_history": deepcopy(self.manipulation_event_history),
+            "last_manipulation_key": deepcopy(self._last_manipulation_key),
+            "state_tracker": {
+                "previous": deepcopy(self.state_tracker.previous),
+                "current": deepcopy(self.state_tracker.current),
+            },
+            "backend_state": backend_state,
+        }
+
+    def restore_checkpoint_state(self, payload: Dict[str, Any]) -> None:
+        """Restore :meth:`checkpoint_state` without rebuilding a perception map."""
+
+        if str(payload.get("schema_version") or "") != "isbench.perception_scene_graph_checkpoint.v1":
+            raise ValueError("unsupported perception scene graph checkpoint")
+        if str(payload.get("backend_name") or "") != self.backend_name:
+            raise ValueError(
+                "checkpoint scene graph backend does not match the active backend: "
+                f"{payload.get('backend_name')!r} != {self.backend_name!r}"
+            )
+        if bool(payload.get("disabled")) != self.disabled:
+            raise ValueError("checkpoint scene graph disabled state does not match")
+        self.global_step_index = int(payload.get("global_step_index") or 0)
+        self.latest_result = deepcopy(payload.get("latest_result"))
+        self.task_instruction = payload.get("task_instruction")
+        self.task_entity_ids = tuple(payload.get("task_entity_ids") or ())
+        self.snapshot = deepcopy(payload.get("snapshot"))
+        self.perception_errors = list(deepcopy(payload.get("perception_errors") or ()))
+        self.held_object_name = payload.get("held_object_name")
+        self.manipulation_event_history = list(
+            deepcopy(payload.get("manipulation_event_history") or ())
+        )
+        self._last_manipulation_key = deepcopy(payload.get("last_manipulation_key"))
+        tracker = dict(payload.get("state_tracker") or {})
+        self.state_tracker.previous = deepcopy(tracker.get("previous"))
+        self.state_tracker.current = deepcopy(tracker.get("current"))
+        self.set_task_instruction(self.task_instruction)
+        self.set_task_entities(self.task_entity_ids)
+
+        backend_state = payload.get("backend_state")
+        target = self.truth_updater if self.truth_updater is not None else self.backend
+        if target is not None:
+            restore = getattr(target, "restore_checkpoint_state", None)
+            if not callable(restore):
+                raise RuntimeError(
+                    "scene graph backend cannot restore physical checkpoint state: "
+                    f"{type(target).__name__}"
+                )
+            restore(backend_state)
 
     def mark_manipulated_nodes(self, node_uids: List[int]) -> None:
         if self.truth_updater is not None:

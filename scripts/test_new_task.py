@@ -1250,6 +1250,9 @@ def install_disabled_scene_graph_patch():
             self.snapshot = self._snapshot(context=None)
             self.backend = None
             self.state_tracker = SceneGraphStateTracker()
+            self.task_entity_ids = ()
+            self.task_categories = ()
+            self.task_instruction = None
 
         def _snapshot(self, context=None):
             primitive_name = None if context is None else context.primitive_name
@@ -1294,6 +1297,22 @@ def install_disabled_scene_graph_patch():
 
         def state_changes(self, snapshot, *, subtask_id=None):
             return self.state_tracker.update(snapshot, subtask_id=subtask_id)
+
+        def set_task_entities(self, entity_ids):
+            self.task_entity_ids = tuple(
+                dict.fromkeys(str(value).strip() for value in entity_ids if str(value).strip())
+            )
+
+        def set_task_categories(self, categories):
+            self.task_categories = tuple(
+                dict.fromkeys(str(value).strip() for value in categories if str(value).strip())
+            )
+
+        def set_task_instruction(self, instruction):
+            self.task_instruction = str(instruction or "").strip() or None
+
+        def set_object_goal_from_action(self, raw_plan):
+            return None
 
         def to_prompt_context(self):
             return ""

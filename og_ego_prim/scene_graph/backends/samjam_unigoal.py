@@ -335,6 +335,31 @@ class SAMJAMFilterResult:
 class SAMJAMUniGoalGraphAdapter:
     """Feed SAMJAM masks and labels into UniGoal's native 3D graph pipeline."""
 
+    _GRAPH_CHECKPOINT_FIELDS = (
+        "visited",
+        "classes",
+        "objects",
+        "objects_post",
+        "nodes",
+        "edge_list",
+        "scenegraph",
+        "goalgraph",
+        "goalgraph_decomposed",
+        "group_nodes",
+        "room_nodes",
+        "room_map",
+        "fbe_free_map",
+        "frontier_map",
+        "full_map",
+        "full_pose",
+        "obj_goal",
+        "text_goal",
+        "instance_imagegoal",
+        "navigate_steps",
+        "segment2d_results",
+        "scenegraph_update_step",
+    )
+
     def __init__(
         self,
         room_lookup: Optional[Callable[[List[float]], str]] = None,
@@ -389,6 +414,84 @@ class SAMJAMUniGoalGraphAdapter:
 
     def set_env(self, env: Any) -> None:
         self.env = env
+
+    def checkpoint_state(self) -> Dict[str, Any]:
+        """Save UniGoal map/identity state while excluding inference models."""
+
+        graph_state = None
+        if self.graph is not None:
+            graph_state = {
+                name: getattr(self.graph, name)
+                for name in self._GRAPH_CHECKPOINT_FIELDS
+                if hasattr(self.graph, name)
+            }
+        return {
+            "schema_version": "isbench.samjam_unigoal_mapping_checkpoint.v1",
+            "graph_state": graph_state,
+            "class_names": list(self.class_names),
+            "node_ids": self.node_ids,
+            "node_uids": self.node_uids,
+            "node_moved": self.node_moved,
+            "track_to_map_object": self.track_to_map_object,
+            "track_moved": self.track_moved,
+            "segment_frame_indices": list(self.segment_frame_indices),
+            "next_node_id": int(self.next_node_id),
+            "next_node_uid": int(self.next_node_uid),
+            "manipulated_node_uids": set(self.manipulated_node_uids),
+            "pending_manipulation_events": self.pending_manipulation_events,
+            "manipulation_event_history": self.manipulation_event_history,
+            "manipulation_resolutions": self.manipulation_resolutions,
+            "edge_update_events": self.edge_update_events,
+            "last_mapping_debug": self.last_mapping_debug,
+            "name_vote_scores": self.name_vote_scores,
+            "name_vote_current": self.name_vote_current,
+        }
+
+    def restore_checkpoint_state(
+        self,
+        payload: Optional[Dict[str, Any]],
+        *,
+        reference_frame: Optional[FrameObservation],
+    ) -> None:
+        """Restore map objects into a freshly initialized UniGoal graph shell."""
+
+        if not isinstance(payload, dict) or str(payload.get("schema_version") or "") != "isbench.samjam_unigoal_mapping_checkpoint.v1":
+            raise ValueError("unsupported SAMJAM-UniGoal mapping checkpoint")
+        graph_state = payload.get("graph_state")
+        if graph_state is not None:
+            if not isinstance(graph_state, dict):
+                raise ValueError("SAMJAM-UniGoal graph checkpoint is not a mapping")
+            if self.graph is None:
+                if reference_frame is None:
+                    raise ValueError("SAMJAM-UniGoal graph checkpoint has no reference frame")
+                self._ensure_graph(reference_frame)
+            for name, value in graph_state.items():
+                setattr(self.graph, name, value)
+            self.graph.set_room_lookup(self.room_lookup)
+
+        self.class_names = list(payload.get("class_names") or ())
+        self.node_ids = dict(payload.get("node_ids") or {})
+        self.node_uids = dict(payload.get("node_uids") or {})
+        self.node_moved = dict(payload.get("node_moved") or {})
+        self.track_to_map_object = dict(payload.get("track_to_map_object") or {})
+        self.track_moved = dict(payload.get("track_moved") or {})
+        self.segment_frame_indices = [
+            int(value) for value in payload.get("segment_frame_indices") or ()
+        ]
+        self.next_node_id = int(payload.get("next_node_id") or 0)
+        self.next_node_uid = int(payload.get("next_node_uid") or 1)
+        self.manipulated_node_uids = set(payload.get("manipulated_node_uids") or ())
+        self.pending_manipulation_events = list(
+            payload.get("pending_manipulation_events") or ()
+        )
+        self.manipulation_event_history = list(
+            payload.get("manipulation_event_history") or ()
+        )
+        self.manipulation_resolutions = list(payload.get("manipulation_resolutions") or ())
+        self.edge_update_events = list(payload.get("edge_update_events") or ())
+        self.last_mapping_debug = payload.get("last_mapping_debug")
+        self.name_vote_scores = dict(payload.get("name_vote_scores") or {})
+        self.name_vote_current = dict(payload.get("name_vote_current") or {})
 
     def stable_name_for_samjam_object(
         self,
@@ -2806,6 +2909,32 @@ class SAMJAMUniGoalBackend:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         return result
+
+    def checkpoint_state(self) -> Dict[str, Any]:
+        """Capture the two-stage SAMJAM and UniGoal memory for a frame restore."""
+
+        return {
+            "schema_version": "isbench.samjam_unigoal_checkpoint.v1",
+            "samjam": self.samjam_backend.checkpoint_state(),
+            "unigoal": self.unigoal_adapter.checkpoint_state(),
+            "last_frame": self.last_frame,
+            "last_samjam_result": self.last_samjam_result,
+            "last_result": self.last_result,
+        }
+
+    def restore_checkpoint_state(self, payload: Optional[Dict[str, Any]]) -> None:
+        """Restore semantic map state without restoring model-weight objects."""
+
+        if not isinstance(payload, dict) or str(payload.get("schema_version") or "") != "isbench.samjam_unigoal_checkpoint.v1":
+            raise ValueError("unsupported SAMJAM-UniGoal checkpoint state")
+        self.samjam_backend.restore_checkpoint_state(payload.get("samjam"))
+        self.last_frame = payload.get("last_frame")
+        self.last_samjam_result = payload.get("last_samjam_result")
+        self.last_result = payload.get("last_result")
+        self.unigoal_adapter.restore_checkpoint_state(
+            payload.get("unigoal"),
+            reference_frame=self.last_frame,
+        )
 
     def _prepare_samjam_mapping_inputs(
         self,

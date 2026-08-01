@@ -1,0 +1,4 @@
+interface:
+  display_name: "Checkpoint Recover"
+  short_description: "Save and restore physical benchmark state safely"
+  default_prompt: "Use $checkpoint-recover to run or recover an IS-Bench benchmark from a validated physical checkpoint."

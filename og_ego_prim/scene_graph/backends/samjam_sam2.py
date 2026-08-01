@@ -284,6 +284,16 @@ def _canonical_object_name(name: Optional[str], is_hand: bool = False) -> str:
     return normalized
 
 
+def _task_category_name(value: Optional[str]) -> str:
+    """Convert a BDDL entity ID into the category used by the VLM graph."""
+
+    text = re.sub(r"\.n\.\d+_\d+$", "", str(value or "").strip())
+    return _canonical_object_name(text)
+
+
+CLOSED_RELATIONSHIPS = frozenset({"on", "in", "above", "attach to", "near"})
+
+
 def _extract_json_object(text: str) -> Dict[str, Any]:
     try:
         parsed = json.loads(text)
@@ -792,7 +802,19 @@ class SAMJAMVLMAdapter:
         )
         self.isbench_prompt_path = self.prompt_path.with_name("isbench_adaptive_prompt.txt")
         self.prompt: Optional[str] = None
+        self.allowed_object_names: Tuple[str, ...] = ()
         self.printed_request_config = False
+
+    def set_allowed_object_names(self, names: Tuple[str, ...]) -> None:
+        """Set the category-level task-object closure for subsequent VLM calls."""
+
+        self.allowed_object_names = tuple(
+            dict.fromkeys(
+                _task_category_name(name)
+                for name in names
+                if _task_category_name(name) and _task_category_name(name) != "agent"
+            )
+        )
 
     def generate(
         self,
@@ -822,6 +844,15 @@ class SAMJAMVLMAdapter:
         self._print_request_config(base_url, model, api_key)
 
         prompt = self._load_prompt()
+        if self.allowed_object_names:
+            prompt += (
+                "\n\nClosed task object list (category names only):\n- "
+                + "\n- ".join(self.allowed_object_names)
+                + "\nUse objects[].name exactly from this list. This is a closed "
+                "set: do not emit aliases, plural forms, instance suffixes, or "
+                "task-external objects. Do not emit the robot, robot arm, gripper, "
+                "or an agent node."
+            )
         task_focus = re.sub(r"\.n\.\d+_\d+", "", str(task_instruction or ""))
         task_focus = re.sub(r"_+", " ", task_focus)
         task_focus = re.sub(r"\s+", " ", task_focus).strip()
@@ -941,13 +972,21 @@ class SAMJAMVLMAdapter:
                 obj_id = int(obj_id)
             except (TypeError, ValueError):
                 obj_id = index
+            name = _task_category_name(obj.get("name"))
+            if bool(obj.get("is_hand", False)):
+                name = _canonical_object_name(obj.get("name"), is_hand=True)
+            if self.allowed_object_names and name not in self.allowed_object_names:
+                continue
+            if name == "agent":
+                continue
             normalized_objects.append(
                 {
                     "id": obj_id,
-                    "name": str(obj.get("name") or f"object_{obj_id}"),
+                    "name": name or f"object_{obj_id}",
                     "bbox": obj.get("bbox"),
                     "is_hand": bool(obj.get("is_hand", False)),
                     "is_moving": bool(obj.get("is_moving", False)),
+                    "is_vis": bool(obj.get("is_vis", True)),
                 }
             )
 
@@ -963,6 +1002,11 @@ class SAMJAMVLMAdapter:
             predicate = str(rel.get("predicate") or "").strip()
             if not predicate:
                 continue
+            if predicate not in CLOSED_RELATIONSHIPS:
+                raise ValueError(
+                    "VLM scene graph predicate must be one of "
+                    f"{sorted(CLOSED_RELATIONSHIPS)!r}, got {predicate!r}"
+                )
             normalized_relationships.append(
                 {"subj_id": subj_id, "obj_id": obj_id, "predicate": predicate}
             )
@@ -1022,11 +1066,13 @@ class SAMJAMSAM2Backend:
     def set_task_categories(self, categories: Tuple[str, ...]) -> None:
         self.task_categories = tuple(
             dict.fromkeys(
-                _canonical_object_name(category)
+                _task_category_name(category)
                 for category in categories
-                if _canonical_object_name(category)
+                if _task_category_name(category)
             )
         )
+        if self.vlm_adapter is not None:
+            self.vlm_adapter.set_allowed_object_names(self.task_categories)
 
     def observe(self, env: Any) -> FrameObservation:
         return self.adapter.observe(env)
@@ -1157,6 +1203,86 @@ class SAMJAMSAM2Backend:
         self._write_samjam_outputs(result)
         self.last_result = result
         return result
+
+    def checkpoint_state(self) -> Dict[str, Any]:
+        """Serialize tracker state without serializing SAM2 model weights."""
+
+        native_frames = []
+        if self.samjam_frame_indices:
+            if self._native_video_dir is None:
+                raise RuntimeError("SAMJAM checkpoint has tracking frames but no frame directory")
+            for local_index, external_index in enumerate(self.samjam_frame_indices):
+                path = self._native_video_dir / f"{local_index:06d}.jpg"
+                if not path.is_file():
+                    raise RuntimeError(
+                        "SAMJAM checkpoint is missing native tracking frame: "
+                        f"{path}"
+                    )
+                native_frames.append(
+                    {
+                        "local_index": local_index,
+                        "external_index": int(external_index),
+                        "jpeg": path.read_bytes(),
+                    }
+                )
+        return {
+            "schema_version": "isbench.samjam_sam2_checkpoint.v1",
+            "adapter_frame_index": int(self.adapter.frame_index),
+            "last_result": self.last_result,
+            "object_goal": self.object_goal,
+            "task_instruction": self.task_instruction,
+            "task_categories": tuple(self.task_categories),
+            "samjam_total_objs": self.samjam_total_objs,
+            "samjam_cur_objs": self.samjam_cur_objs,
+            "samjam_rels": self.samjam_rels,
+            "samjam_next_id": int(self.samjam_next_id),
+            "samjam_frame_indices": list(self.samjam_frame_indices),
+            "native_frames": native_frames,
+        }
+
+    def restore_checkpoint_state(self, payload: Optional[Dict[str, Any]]) -> None:
+        """Restore SAM2 identity memory and its native-frame history."""
+
+        if not isinstance(payload, dict) or str(payload.get("schema_version") or "") != "isbench.samjam_sam2_checkpoint.v1":
+            raise ValueError("unsupported SAMJAM checkpoint state")
+        frame_indices = [int(value) for value in payload.get("samjam_frame_indices") or ()]
+        frames = list(payload.get("native_frames") or ())
+        if len(frame_indices) != len(frames):
+            raise ValueError("SAMJAM checkpoint frame index and image counts do not match")
+        for expected_index, frame in enumerate(frames):
+            if not isinstance(frame, dict) or int(frame.get("local_index", -1)) != expected_index:
+                raise ValueError("SAMJAM checkpoint native frames are not contiguous")
+            if int(frame.get("external_index", -1)) != frame_indices[expected_index]:
+                raise ValueError("SAMJAM checkpoint native frame identity does not match")
+            if not isinstance(frame.get("jpeg"), (bytes, bytearray)):
+                raise ValueError("SAMJAM checkpoint native frame has no JPEG bytes")
+
+        if self._native_video_tmp is not None:
+            self._native_video_tmp.cleanup()
+        self._native_video_tmp = tempfile.TemporaryDirectory(prefix="isbench_samjam_restore_")
+        self._native_video_dir = Path(self._native_video_tmp.name)
+        for frame in frames:
+            path = self._native_video_dir / f"{int(frame['local_index']):06d}.jpg"
+            path.write_bytes(bytes(frame["jpeg"]))
+
+        self.adapter.frame_index = int(payload.get("adapter_frame_index") or 0)
+        self.last_result = payload.get("last_result")
+        self.object_goal = payload.get("object_goal")
+        self.task_instruction = payload.get("task_instruction")
+        self.task_categories = tuple(payload.get("task_categories") or ())
+        self.samjam_total_objs = dict(payload.get("samjam_total_objs") or {})
+        self.samjam_cur_objs = dict(payload.get("samjam_cur_objs") or {})
+        self.samjam_rels = dict(payload.get("samjam_rels") or {})
+        self.samjam_next_id = int(payload.get("samjam_next_id") or 0)
+        self.samjam_frame_indices = frame_indices
+        self.pending_debug = None
+        # Native video propagation re-initializes its state from the frame
+        # directory on each update, so cached predictor state is intentionally
+        # discarded rather than carrying stale GPU references across processes.
+        self.video_predictor = None
+        if self.vlm_adapter is not None:
+            self.vlm_adapter.object_goal = self.object_goal
+            self.vlm_adapter.set_allowed_object_names(self.task_categories)
 
     def _write_samjam_detection_log(
         self,
@@ -1760,6 +1886,7 @@ class SAMJAMSAM2Backend:
         if self.vlm_adapter is None:
             self.vlm_adapter = SAMJAMVLMAdapter(self.scene_graph_config)
             self.vlm_adapter.object_goal = self.object_goal
+            self.vlm_adapter.set_allowed_object_names(self.task_categories)
         return self.vlm_adapter
 
     def _ensure_mask_generator(self):
@@ -1943,7 +2070,6 @@ class SAMJAMSAM2Backend:
             obj
             for obj in scene_graph.get("objects", [])
             if _canonical_object_name(obj.get("name")) in self.task_categories
-            or _canonical_object_name(obj.get("name")) in {"table", "kitchen_counter", "sink", "cabinet", "microwave", "clothes_dryer"}
         ]
         object_ids = {obj.get("id") for obj in objects}
         return {

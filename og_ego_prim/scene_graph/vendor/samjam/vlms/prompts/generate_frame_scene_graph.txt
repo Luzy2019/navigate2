@@ -31,8 +31,9 @@ Strictly adhere to the following JSON structure:
       "id": 1,
       "name": "object_name",
       "bbox": [y_min, x_min, y_max, x_max],
-      "is_hand": False,
-      "is_moving": True
+      "is_hand": false,
+      "is_moving": false,
+      "is_vis": true
     }
   ],
   "relationships": [

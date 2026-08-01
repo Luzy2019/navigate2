@@ -1,6 +1,10 @@
+import pytest
+
+from og_ego_prim.prompting import PromptContext
 from og_ego_prim.task_planner.adapters import (
     AgentPlannerAdapter,
     VLMClosedLoopPlannerAdapter,
+    _PREFLIGHT_PROMPT,
     _SAFETY_PROMPT,
 )
 
@@ -41,3 +45,33 @@ def test_safety_replan_raw_output_is_retained():
 
     assert adapter.last_safety_plan_raw_output == "raw response"
     assert adapter.last_safety_plan_payload == {"status": "SAFETY_PLAN"}
+
+
+def test_preflight_prompt_forbids_observation_layer_entity_ids():
+    assert "INPUT.allowed_entities" in _PREFLIGHT_PROMPT
+    assert "obj_0001" in _PREFLIGHT_PROMPT
+    assert "observation-layer references" in _PREFLIGHT_PROMPT
+
+
+def test_preflight_rejects_scene_graph_entity_ids():
+    adapter = object.__new__(VLMClosedLoopPlannerAdapter)
+    adapter._preflight_done = False
+    adapter.allowed_entity_ids = (
+        "tablespoon.n.02_1",
+        "rag.n.01_1",
+        "peach.n.03_1",
+        "carton.n.02_1",
+    )
+    adapter.valid_primitives = {"PLACE_INSIDE": 1}
+    adapter._request = lambda context, instruction: (
+        {
+            "status": "MONITOR",
+            "ordered_objects": ["obj_0002", "obj_0003", "obj_0001"],
+            "destination_role": "carton",
+            "destination_relation": "PLACE_INSIDE",
+        },
+        "raw output",
+    )
+
+    with pytest.raises(ValueError, match="allowed task entity IDs"):
+        adapter._run_preflight(PromptContext())

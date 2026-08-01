@@ -13,6 +13,20 @@ from og_ego_prim.models.image_utils import (
 )
 from og_ego_prim.models.openai_config import get_openai_request_kwargs
 
+
+def _openai_request_timeout_seconds() -> float:
+    raw_value = os.environ.get("ISBENCH_OPENAI_REQUEST_TIMEOUT_SECONDS", "180")
+    try:
+        timeout = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            "ISBENCH_OPENAI_REQUEST_TIMEOUT_SECONDS must be a positive number"
+        ) from exc
+    if timeout <= 0:
+        raise ValueError("ISBENCH_OPENAI_REQUEST_TIMEOUT_SECONDS must be a positive number")
+    return timeout
+
+
 def read_image(image_path: str):
   with open(image_path, "rb") as f:
      return f.read()
@@ -51,7 +65,12 @@ class ServerClient(BaseClient):
                 )],
             )
         else:
-            self.client = OpenAI(api_key=api_key, base_url=api_base)
+            self.client = OpenAI(
+                api_key=api_key,
+                base_url=api_base,
+                timeout=_openai_request_timeout_seconds(),
+                max_retries=0,
+            )
         
         if model_name == "local":
             model_name = self.client.models.list().data[0].id

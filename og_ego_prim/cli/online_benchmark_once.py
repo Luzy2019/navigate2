@@ -92,6 +92,27 @@ parser.add_argument(
     action='store_true',
     help='Keep the viewer open after the run instead of clearing the stage immediately.',
 )
+parser.add_argument(
+    '--physical-checkpoint-mode',
+    choices=('off', 'save', 'restore'),
+    default='off',
+    help=(
+        'off runs without checkpoint overhead; save writes a physical frame after '
+        'each successful action; restore resumes from --restore-physical-checkpoint '
+        'and keeps saving later successful actions.'
+    ),
+)
+parser.add_argument(
+    '--restore-physical-checkpoint',
+    default=None,
+    help='Immutable checkpoint/frame_NNNNNN.pt used only with --physical-checkpoint-mode restore.',
+)
+parser.add_argument(
+    '--physical-checkpoint-settle-steps',
+    type=int,
+    default=30,
+    help='Real hold frames before writing a successful physical checkpoint.',
+)
 
 parser.add_argument('--not_eval_process_safety', action='store_true')
 parser.add_argument('--not_eval_termination_safety', action='store_true')
@@ -415,6 +436,9 @@ def _online_benchmark_once(
     show_robot: bool,
     capture_observations: bool,
     keep_open_after_done: bool,
+    physical_checkpoint_mode: str,
+    restore_physical_checkpoint: str | None,
+    physical_checkpoint_settle_steps: int,
     runtime_config: RuntimeConfig,
     *,
     benchmark_holder: list,
@@ -557,6 +581,42 @@ def _online_benchmark_once(
             emit_proposals=True,
         )
         benchmark.tracker.model = 'example'
+
+    checkpoint_manager = None
+    if physical_checkpoint_mode != 'off':
+        from og_ego_prim.cli.online_physical_checkpoint import (
+            OnlinePhysicalCheckpointManager,
+        )
+
+        if agent is None:
+            raise ValueError(
+                'physical checkpoints require the model planner, not example planning'
+            )
+        checkpoint_manager = OnlinePhysicalCheckpointManager(
+            benchmark,
+            output_dir,
+            task=task,
+            scene=scene,
+            agent=agent,
+            planner_adapter=planner_adapter,
+            post_action_settle_steps=physical_checkpoint_settle_steps,
+        )
+        if physical_checkpoint_mode == 'restore':
+            if not restore_physical_checkpoint:
+                raise ValueError(
+                    '--restore-physical-checkpoint is required when '
+                    '--physical-checkpoint-mode restore is selected'
+                )
+            restore_validation = checkpoint_manager.restore(restore_physical_checkpoint)
+            replay_session.emit(
+                'checkpoint',
+                'physical_checkpoint_restored',
+                {
+                    'source_checkpoint': str(restore_physical_checkpoint),
+                    'validation': restore_validation,
+                },
+                sim_step=getattr(benchmark.executor, 'global_step_index', None),
+            )
     planner = benchmark.runtime_controller.iter_actions()
     planner = track_planning_latency(planner, benchmark.tracker)
 
@@ -596,6 +656,18 @@ def _online_benchmark_once(
         action_text = (
             plan.to_legacy_plan() if hasattr(plan, 'to_legacy_plan') else plan['action']
         )
+        if execution_ok and checkpoint_manager is not None:
+            checkpoint_path = checkpoint_manager.save_after_success(action_text)
+            replay_session.emit(
+                "checkpoint",
+                "physical_checkpoint_saved",
+                {
+                    "path": str(checkpoint_path.relative_to(output_dir)),
+                    "successful_action_count": checkpoint_manager.successful_action_count,
+                    "action": action_text,
+                },
+                sim_step=getattr(benchmark.executor, "global_step_index", None),
+            )
         if replay_media is not None:
             replay_media.capture(
                 global_step=getattr(benchmark.executor, "global_step_index", None),
@@ -708,6 +780,18 @@ if __name__ == "__main__":
         parser.error("--task is required, or set task.name in the YAML config")
     if not args.scene:
         parser.error("--scene is required, or set task.scene in the YAML config")
+    if args.physical_checkpoint_mode == 'restore' and not args.restore_physical_checkpoint:
+        parser.error(
+            '--restore-physical-checkpoint is required with '
+            '--physical-checkpoint-mode restore'
+        )
+    if args.physical_checkpoint_mode != 'restore' and args.restore_physical_checkpoint:
+        parser.error(
+            '--restore-physical-checkpoint requires '
+            '--physical-checkpoint-mode restore'
+        )
+    if args.physical_checkpoint_settle_steps < 0:
+        parser.error('--physical-checkpoint-settle-steps must be non-negative')
     print(f'args: {args}')
     sys.stdout.flush()
 
@@ -737,5 +821,8 @@ if __name__ == "__main__":
         show_robot=args.show_robot,
         capture_observations=args.capture_observations,
         keep_open_after_done=args.keep_open_after_done,
+        physical_checkpoint_mode=args.physical_checkpoint_mode,
+        restore_physical_checkpoint=args.restore_physical_checkpoint,
+        physical_checkpoint_settle_steps=args.physical_checkpoint_settle_steps,
         runtime_config=runtime_config,
     )
