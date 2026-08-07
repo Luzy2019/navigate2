@@ -2233,10 +2233,10 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
     ):
         """Center and level an operation target in Fetch's native first view.
 
-        After navigation or checkpoint restore, a bounded in-place base turn
-        faces the target before pan / tilt performs precise centering. Image
-        roll is validated against the native sensor mount rather than corrected
-        by treating base yaw as a nonexistent roll axis.
+        After navigation, a bounded in-place base turn faces the target before
+        pan / tilt performs precise centering. Image roll is validated against
+        the native sensor mount rather than corrected by treating base yaw as a
+        nonexistent roll axis.
         """
 
         if not self.first_view_targeting:
@@ -2271,10 +2271,7 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             T.quat2euler(self.robot.get_position_orientation()[1])[2].item()
         )
         base_alignment_steps = 0
-        if self.first_view_targeting_align_base and phase in {
-            "post_navigation",
-            "checkpoint_restore",
-        }:
+        if self.first_view_targeting_align_base and phase == "post_navigation":
             robot_position = self.robot.get_position_orientation()[0]
             target_delta = target_point[:2] - robot_position[:2]
             if float(torch.linalg.vector_norm(target_delta).item()) > 1e-6:
@@ -2311,10 +2308,7 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         stable_count = 0
         joint_limit_diagnostic = None
         frustum_diagnostic = None
-        allow_visible_at_joint_limit = (
-            phase in {"post_navigation", "checkpoint_restore"}
-            and require_success
-        )
+        allow_visible_at_joint_limit = phase == "post_navigation" and require_success
         required_stable_count = max(1, self.first_view_targeting_settle_steps)
         while step_count < self.first_view_targeting_max_steps:
             sensor_position, sensor_orientation = sensor.get_position_orientation(
@@ -2482,9 +2476,6 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
                 "Could not center the manipulation target in the native first view.",
                 diagnostic,
             )
-
-    def first_view_focus_checkpoint(self):
-        return None if self._first_view_focus is None else dict(self._first_view_focus)
 
     def _with_navigation_hand_actions_suppressed(self, generator):
         """Run a navigation generator without letting OG drive arm/gripper.

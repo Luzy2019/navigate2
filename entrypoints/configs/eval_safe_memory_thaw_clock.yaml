@@ -1,0 +1,10 @@
+includes:
+  - eval_safe_memory.yaml
+
+starter_primitives:
+  # A single native stance draw can fall across the kitchen room boundary even
+  # when swab.n.02_1 itself is correctly mapped to kitchen_0. Keep retries
+  # local to this fixed-scene task and retain the compact Fetch arm pose used
+  # by the validated Beechwood routes.
+  native_stance_sample_attempts: 8
+  fixed_navigation_arm_pose_name: tucked_high

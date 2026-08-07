@@ -1,6 +1,11 @@
 includes:
   - eval_safe_memory.yaml
 
+task:
+  # This lifelong task has several unrelated destinations across subtasks.
+  # Do not let the optional shared-destination monitor merge them into one plan.
+  enable_loading_preflight: false
+
 navigation:
   # Preserve the A* corners through the narrow kitchen / living-room route.
   clearance_aware_simplify: false
@@ -9,6 +14,9 @@ starter_primitives:
   # The corridor carton sits below the camera's upward pitch limit during T4.
   # Keep the native first-view gate while accepting the measured visible pose.
   first_view_targeting_angular_tolerance: 0.05
+  # The native camera has no roll command. Accept the measured 0.053 rad
+  # placement view without weakening the shared starter default.
+  first_view_targeting_roll_tolerance: 0.06
   # The kitchen table approach is sensitive to the sampled side after its
   # surrounding chairs are removed. Keep a bounded set of native retries and
   # the compact arm pose used by the validated Beechwood routes.

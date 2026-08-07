@@ -679,11 +679,7 @@ def _run(
         draw_bbox_2d=args.draw_bbox_2d,
         primitive_type=None if args.primitive_type == "auto" else args.primitive_type,
         scene_graph_step_interval=args.scene_graph_step_interval,
-        scene_graph_backend=(
-            "samjam_unigoal"
-            if args.memory_mode == "with_memory"
-            else "disabled"
-        ),
+        scene_graph_backend=runtime_config.scene_graph.backend,
         use_initial_setup=args.use_initial_setup,
         use_self_caption=args.use_self_caption,
         online_object_sampling=args.online_object_sampling,
@@ -928,15 +924,12 @@ def _run(
 
         result = evaluator.finish_subtask(
             subtask_index=index,
-            action_start_index=action_start,
-            action_end_index=action_end,
             termination_reason=termination_reason,
             instruction=instruction,
             h_limit=h_limit,
         )
         result_dict = result.to_dict()
         result_dict["actions"] = plan_report_slice(benchmark.tracker.plans, action_start, action_end)
-        result_dict["action_count"] = len(result_dict["actions"])
         subtask_reports.append(result_dict)
         replay_session.emit(
             "evaluator",

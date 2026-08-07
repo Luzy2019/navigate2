@@ -1281,7 +1281,6 @@ class OnlineBenchmark(Benchmark):
                 ),
             }
 
-        self.evaluator.record_action(evaluation_plan["action"])
         self._evaluate_lifelong_process_safety(evaluation_plan, "before")
         self.evaluator.evaluate_process_safety_goal_condition(evaluation_plan, 'before')
 
@@ -1319,8 +1318,9 @@ class OnlineBenchmark(Benchmark):
         )
 
         if execution_succeeded:
+            self.evaluator.record_action(evaluation_plan["action"])
             self._evaluate_lifelong_process_safety(evaluation_plan, "after")
-        self.evaluator.evaluate_process_safety_goal_condition(evaluation_plan, 'after')
+            self.evaluator.evaluate_process_safety_goal_condition(evaluation_plan, 'after')
         if self.primitive_type == "starter" and execution_succeeded:
             self._sync_starter_grasped_object()
         if self.scene_graph_step_interval <= 0:

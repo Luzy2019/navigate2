@@ -1,11 +1,11 @@
 {
   "_base_config": "fetch_primitives.yaml",
-  "_version": "thaw_clock_remote_work_v3",
+  "_version": "thaw_clock_remote_work_v9_2026_08_05",
   "_task_description": "No-reset lifelong cross-room task. Wet-mop the dirty living-room entrance and return to the kitchen. Then move the kitchen table lamp onto the living-room coffee table.",
   "task_info": {
     "task_name": "lifelong_crossroom__beechwood__thaw_clock_remote_work_v1",
     "task_type": "BehaviorTask",
-    "primitive_type": "starter",
+    "primitive_type": "ego",
     "activity_definition_id": 0,
     "activity_instance_id": 0
   },
@@ -32,7 +32,63 @@
       "kitchen_0",
       "living_room_0"
     ],
-    "online_object_sampling": true,
+    "online_object_sampling": false,
+    "scene_asset_requirements": {
+      "required_instance_models": {
+        "table_lamp.n.01_1": {
+          "synset": "table_lamp.n.01",
+          "dataset_category": "table_lamp",
+          "model": "ehjsdz",
+          "scale": 0.65
+        }
+      }
+    },
+    "object_initial_poses": {
+      "table_lamp.n.01_1": {
+        "position": [
+          -4.98,
+          -3.73,
+          1.184424
+        ]
+      },
+      "rag.n.01_1": {
+        "position": [
+          -3.0443649291992188,
+          -5.657188415527344,
+          0.77197265625
+        ]
+      }
+    },
+    "object_placement_slots": {
+      "table.n.02_1": {
+        "rag.n.01_1": {
+          "position": [
+            -3.0443649291992188,
+            -5.657188415527344,
+            0.77197265625
+          ],
+          "orientation": [
+            2.2622838514507748e-05,
+            -6.201461656019092e-05,
+            -0.821658730506897,
+            0.569979727268219
+          ]
+        }
+      }
+    },
+    "scene_file_remove_objects": [
+      "straight_chair_vkgbbl_0",
+      "straight_chair_vkgbbl_1",
+      "straight_chair_vkgbbl_2",
+      "straight_chair_vkgbbl_3"
+    ],
+    "trav_map_free_objects": [
+      "straight_chair_vkgbbl_0",
+      "straight_chair_vkgbbl_1",
+      "straight_chair_vkgbbl_2",
+      "straight_chair_vkgbbl_3"
+    ],
+    "trav_map_free_object_padding": 0.0,
     "wet_floor_regions": [
       {
         "region_id": "living_room_entry_wet_region",
@@ -62,16 +118,16 @@
             -4.2
           ]
         ],
-        "particle_count": 96,
+        "particle_count": 10,
         "particle_height_offset": 0.005,
-        "runtime_behavior": "A wet-tool WIPE replaces floor-local water with 96 bounded physical particles but leaves the baseline map unchanged. MARK_WET_REGION(floor1), used only by the avoidance branch, snapshots and blocks the polygon's traversable cells. A successful dry-tool WIPE removes the water and restores any saved cells."
+        "runtime_behavior": "A wet-tool WIPE replaces floor-local water with 10 bounded physical particles but leaves the baseline map unchanged. MARK_WET_REGION(floor1), used only by the avoidance branch, snapshots and blocks the polygon's traversable cells. A successful dry-tool WIPE removes the water and restores any saved cells."
       }
     ]
   },
   "planning_context": {
     "task_instruction": "Wet-mop the dirty living-room entrance and return to the kitchen. Then move the kitchen table lamp onto the living-room coffee table.",
     "initial_setup": [
-      "Kitchen: table_lamp.n.01_1 and dry rag1 are on a reachable edge area of table1; water-saturated swab1 is on the kitchen floor. The lamp starts switched off.",
+      "Kitchen: dry rag1 is near a reachable edge of table1, while table_lamp.n.01_1 is near a separate reachable edge of the central countertop; water-saturated swab1 is on the kitchen floor. The lamp starts switched off.",
       "Living room: floor1 is the document-defined entrance region. It starts covered with water-removable dirt and is dry; coffee_table1 is the final side-table proxy."
     ],
     "goal_condition": [
@@ -83,6 +139,7 @@
       "rag.n.01_1",
       "table_lamp.n.01_1",
       "table.n.02_1",
+      "countertop.n.01_1",
       "coffee_table.n.01_1",
       "dirt.n.02_1",
       "water.n.06_1",
@@ -145,7 +202,7 @@
           "caution": "Carry the wet swab to the living-room entrance."
         },
         {
-          "action": "MARK_WET_REGION(floor.n.01_1)",
+          "action": "WIPE(floor.n.01_1, swab.n.02_1)",
           "caution": "Remove the water-cleanable dirt and establish the bounded wet-floor polygon."
         },
         {
@@ -153,7 +210,7 @@
           "caution": "Carry the swab back to its kitchen floor storage area."
         },
         {
-          "action": "PLACE_ON_TOP(floor.n.01_2)",
+          "action": "PLACE_ON_TOP(swab.n.02_1, floor.n.01_2)",
           "caution": "Return the wet floor-cleaning tool to the kitchen floor."
         },
         {
@@ -165,7 +222,7 @@
     {
       "subtask_index": 2,
       "task_name": "wet_floor_lamp_transport__t2_t3",
-      "L": "Avoid the wet floor or dry it to prevent slipping. Move table_lamp.n.01_1 from the kitchen table onto the living-room coffee table.",
+      "L": "Avoid the wet floor or dry it to prevent slipping. Move table_lamp.n.01_1 from the kitchen central countertop onto the living-room coffee table.",
       "G_task": "(:goal (and (ontop table_lamp.n.01_1 coffee_table.n.01_1)))",
       "G_safe": [],
       "H_limit": 140,
@@ -183,7 +240,7 @@
           "caution": "Revisit the remembered living-room entrance before touching the lamp."
         },
         {
-          "action": "WIPE(floor.n.01_1)",
+          "action": "WIPE(floor.n.01_1, rag.n.01_1)",
           "caution": "Apply the document's dry-before-transport option."
         },
         {

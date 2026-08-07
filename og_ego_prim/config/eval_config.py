@@ -33,8 +33,6 @@ def _mapping_items(value: Any) -> Tuple[Dict[str, Any], ...]:
         if isinstance(item, Mapping)
     )
 
-
-@dataclass(frozen=True)
 class EvalSubtaskConfig:
     """Evaluator-only projection of one lifelong subtask.
 

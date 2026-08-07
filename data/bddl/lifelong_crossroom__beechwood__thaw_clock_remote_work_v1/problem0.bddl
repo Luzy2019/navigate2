@@ -6,6 +6,7 @@
         rag.n.01_1 - rag.n.01
         table_lamp.n.01_1 - table_lamp.n.01
         table.n.02_1 - table.n.02
+        countertop.n.01_1 - countertop.n.01
         coffee_table.n.01_1 - coffee_table.n.01
         dirt.n.02_1 - dirt.n.02
         water.n.06_1 - water.n.06
@@ -19,8 +20,9 @@
         (ontop swab.n.02_1 floor.n.01_2)
         (saturated swab.n.02_1 water.n.06_1)
         (inroom table.n.02_1 kitchen_0)
-        (ontop table_lamp.n.01_1 table.n.02_1)
         (ontop rag.n.01_1 table.n.02_1)
+        (inroom countertop.n.01_1 kitchen_0)
+        (ontop table_lamp.n.01_1 countertop.n.01_1)
         (not (toggled_on table_lamp.n.01_1))
 
         (inroom coffee_table.n.01_1 living_room_0)

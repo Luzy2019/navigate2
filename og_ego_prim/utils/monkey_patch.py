@@ -6,6 +6,7 @@ from omnigibson.systems.micro_particle_system import PhysxParticleInstancer
 from omnigibson.transition_rules import RecipeRule, TransitionResults
 from omnigibson.utils.physx_utils import create_physx_particleset_pointinstancer
 from omnigibson.utils.python_utils import torch_delete
+from omnigibson.utils.bddl_utils import ObjectStateInsourcePredicate
 from omnigibson.utils.usd_utils import absolute_prim_path_to_scene_relative
 import torch
 
@@ -184,6 +185,10 @@ def patched__RecipeRule__execute_recipe(self, container, recipe, container_info)
     )
 
 
+def patched__ObjectStateInsourcePredicate__evaluate(self, source, substance, **kwargs):
+    return True
+
+
 # fix bug, all(conditions) -> any(valid_conditions) & all(limit_conditions) & all(nonempty_conditions)
 def patched__ParticleModifier__check_conditions_for_system(self, system_name):
     if not self.supports_system(system_name):
@@ -240,6 +245,8 @@ def add_monkey_patch():
     og.systems.micro_particle_system.MicroPhysicalParticleSystem.generate_particle_instancer = patched__MicroPhysicalParticleSystem__generate_particle_instancer
     og.systems.macro_particle_system.MacroVisualParticleSystem._load_state = patched__MacroVisualParticleSystem__load_state
     ClothPrim._dump_state = patched__ClothPrim__dump_state
+    ObjectStateInsourcePredicate.STATE_NAME = "insource"
+    ObjectStateInsourcePredicate._evaluate = patched__ObjectStateInsourcePredicate__evaluate
     
     patched_funcs = [var for var in globals() if var.startswith('patched__')]
     print(f'patched omnigibson: {patched_funcs}')

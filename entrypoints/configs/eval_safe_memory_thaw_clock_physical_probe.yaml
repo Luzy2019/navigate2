@@ -1,0 +1,8 @@
+includes:
+  - eval_safe_memory_thaw_clock.yaml
+
+# Physical no-reset diagnostic only. The formal perception-backed run retains
+# eval_safe_memory_thaw_clock.yaml and SAMJAM/UniGoal as its configured backend.
+scene_graph:
+  backend: disabled
+  step_interval: 0

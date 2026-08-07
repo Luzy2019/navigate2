@@ -98,6 +98,8 @@ V5 then preserved both native `OnTop(floor2)` atoms at the T1 check and eliminat
 
 CUDA was hidden from sandboxed probes while the host GPU was usable, so host `nvidia-smi` was the authoritative availability check. A competing dryer run appeared during V5 and was not killed; the office-strip run completed normally. Resource contention must be handled by waiting, re-probing, and retrying in a fresh process, not by editing task semantics or terminating another job.
 
+`nvidia-smi` success alone does not prove that the benchmark process can initialize CUDA. A restricted context can communicate with NVML while lacking `/dev/nvidia0`, `/dev/nvidiactl`, or `/dev/nvidia-uvm`; in that state PyTorch can still report `torch.cuda.is_available() == false`. Check both the device nodes and a fresh-process PyTorch probe before classifying the driver as usable for OmniGibson.
+
 V5 also printed two Isaac UI/widget tracebacks (`CacheStateMenu` and property-window scroll state). They were non-blocking: all 47 actions completed and `report.json` contains `error_stack=[]`. Do not classify unrelated UI callbacks as primitive failures unless they enter the benchmark error stack or stop action progress.
 
 ## V1-V5 evidence progression
@@ -142,6 +144,7 @@ The final focused suite passed 22 tests. JSON parsing, `py_compile`, `scripts/te
 - Recheck native support relations at each subtask boundary. A placement action return and a visually plausible pose are not persistence proof.
 - Keep task-local runtime changes in the task JSON/config. Do not broaden shared defaults to make one sampled route pass.
 - Separate resource failures, UI callback noise, primitive failures, goal failures, and physical-media failures. Only task logic should drive task-definition edits.
+- When `nvidia-smi` and PyTorch disagree, check `/dev/nvidia0`, `/dev/nvidiactl`, and `/dev/nvidia-uvm` in the exact execution context; retry the GPU step outside a restricted context rather than treating NVML output alone as CUDA proof.
 - Validate in layers: parse and focused tests, contract validation, init, uninterrupted full run, report atom audit, numeric-state audit, collision-filter audit, full video decode, and key-frame review.
 - Set `physical_validation_complete=true` only after the final files, not an earlier variant, pass the uninterrupted physical gate.
 

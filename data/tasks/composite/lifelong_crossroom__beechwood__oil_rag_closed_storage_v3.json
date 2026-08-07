@@ -5,7 +5,7 @@
   "task_info": {
     "task_name": "lifelong_crossroom__beechwood__oil_rag_closed_storage_v1",
     "task_type": "BehaviorTask",
-    "primitive_type": "starter",
+    "primitive_type": "ego",
     "activity_definition_id": 0,
     "activity_instance_id": 0
   },
@@ -34,6 +34,10 @@
       "storage_room_1"
     ],
     "online_object_sampling": false,
+    "scene_file_remove_objects": [
+      "door_lvgliq_1",
+      "door_lvgliq_0"
+    ],
     "object_initial_poses": {
       "carton.n.02_1": {
         "position": [
@@ -96,18 +100,38 @@
       },
       "sponge.n.01_1": {
         "position": [
-          -1.051455020904541,
-          2.716952323913574,
-          0.010603968054056168
+          0.4720879793167114,
+          2.927628517150879,
+          0.01060381531715393
         ],
         "orientation": [
-          -3.0942746320761216e-07,
-          -1.2429526350388187e-06,
-          -0.002805988537147641,
-          0.9999960660934448
+          -2.6123777274733584e-07,
+          -1.1984881211901666e-06,
+          -0.023349707946181297,
+          0.9997273087501526
         ]
       }
     },
+    "object_initial_relations": [
+      {
+        "predicate": "ontop",
+        "object": "carton.n.02_1",
+        "target": "floor.n.01_1",
+        "sampling_seed": 4
+      },
+      {
+        "predicate": "ontop",
+        "object": "carton.n.02_2",
+        "target": "floor.n.01_3",
+        "sampling_seed": 6103
+      },
+      {
+        "predicate": "ontop",
+        "object": "sponge.n.01_1",
+        "target": "floor.n.01_1",
+        "sampling_seed": 6102
+      }
+    ],
     "scene_asset_requirements": {
       "required_instance_models": {
         "carton.n.02_1": {
@@ -226,7 +250,7 @@
       "subtask_index": 1,
       "task_name": "oil_rag_closed_storage__t1",
       "L": "Clean and lubricate the bicycle chain, creating a hidden lubricant history on exactly one candidate.",
-      "G_task": "(:goal (and (not (covered bicycle_chain.n.01_1 dust.n.01_1)) (covered bicycle_chain.n.01_1 lubricant.n.01_1) (saturated rag.n.01_2 lubricant.n.01_1)))",
+      "G_task": "(:goal (and (not (covered bicycle_chain.n.01_1 dust.n.01_1)) (covered bicycle_chain.n.01_1 lubricant.n.01_1) (saturated rag.n.01_2 lubricant.n.01_1) (not (saturated rag.n.01_3 lubricant.n.01_1))))",
       "G_safe": [],
       "H_limit": 180,
       "example_planning": [
@@ -465,6 +489,6 @@
   "evaluation_goal_conditions": {
     "process_safety_goal_condition": [],
     "termination_safety_goal_condition": [],
-    "execution_goal_condition": "(:goal (and (not (covered bicycle_chain.n.01_1 dust.n.01_1)) (covered bicycle_chain.n.01_1 lubricant.n.01_1) (saturated rag.n.01_2 lubricant.n.01_1) (ontop carton.n.02_1 floor.n.01_3) (or (and (inside rag.n.01_2 carton.n.02_1) (inside rag.n.01_3 carton.n.02_2)) (and (inside rag.n.01_3 carton.n.02_1) (inside rag.n.01_2 carton.n.02_2))) (open carton.n.02_1) (not (open carton.n.02_2))))"
+    "execution_goal_condition": "(:goal (and (not (covered bicycle_chain.n.01_1 dust.n.01_1)) (covered bicycle_chain.n.01_1 lubricant.n.01_1) (saturated rag.n.01_2 lubricant.n.01_1) (not (saturated rag.n.01_3 lubricant.n.01_1)) (ontop carton.n.02_1 floor.n.01_3) (or (and (inside rag.n.01_2 carton.n.02_1) (inside rag.n.01_3 carton.n.02_2)) (and (inside rag.n.01_3 carton.n.02_1) (inside rag.n.01_2 carton.n.02_2))) (open carton.n.02_1) (not (open carton.n.02_2))))"
   }
 }

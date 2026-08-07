@@ -8,90 +8,16 @@ from dataclasses import asdict, dataclass, field
 import json
 import os
 import re
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from og_ego_prim.benchmark.diagnostics import debug_goal_atoms
+from og_ego_prim.benchmark.evaluator.bddl_goal_condition import (
+    compile_bddl_goal_condition,
+    get_subtask_goal,
+    get_subtask_instruction,
+    split_safe_goal,
+)
 from og_ego_prim.config.eval_config import EvalTaskConfig
-
-
-def compile_bddl_goal_condition(task: Any, goal: str) -> Any:
-    """Import OmniGibson-backed BDDL compilation only for a live episode."""
-    from og_ego_prim.benchmark.evaluator.bddl_goal_condition import (
-        compile_bddl_goal_condition as compile_goal,
-    )
-
-    return compile_goal(task, goal)
-
-
-def normalize_goal(goal: Any) -> Optional[str]:
-    """Return one BDDL ``:goal`` form, or ``None`` for an empty condition."""
-    if goal is None or goal == [] or goal == "":
-        return None
-    if isinstance(goal, str):
-        text = goal.strip()
-        if text.startswith("(:goal"):
-            return text
-        return f"(:goal (and {text}))"
-    if not isinstance(goal, Sequence):
-        raise TypeError(f"goal must be a string or sequence, got {type(goal).__name__}")
-
-    predicates: List[str] = []
-    for item in goal:
-        if isinstance(item, str):
-            predicates.append(item.strip())
-        elif isinstance(item, dict) and item.get("safety_bddl"):
-            predicates.append(item["safety_bddl"].strip())
-        else:
-            raise TypeError(f"unsupported goal item: {item!r}")
-    if not predicates:
-        return None
-    if len(predicates) == 1 and predicates[0].startswith("(:goal"):
-        return predicates[0]
-    if any(predicate.startswith("(:goal") for predicate in predicates):
-        raise ValueError("multiple complete :goal forms cannot be nested")
-    return f"(:goal (and {' '.join(predicates)}))"
-
-
-def get_subtask_instruction(subtask: Dict[str, Any]) -> str:
-    for key in ("L", "task_instruction", f"L_{subtask.get('subtask_index')}"):
-        value = subtask.get(key)
-        if value:
-            return str(value)
-    raise ValueError(f"subtask {subtask.get('subtask_index')} has no instruction")
-
-
-def get_subtask_goal(subtask: Dict[str, Any], kind: str) -> Optional[str]:
-    index = subtask.get("subtask_index")
-    value = subtask.get(kind, subtask.get(f"{kind}_{index}"))
-    return normalize_goal(value)
-
-
-def split_safe_goal(goal: Any) -> Tuple[Optional[str], List[Dict[str, Any]]]:
-    """Split one ``G_safe`` value into terminal and action-checkpoint goals.
-
-    A flat safety object with both ``action`` and ``type`` is a process
-    condition. Plain BDDL strings, and safety objects without an action, are
-    terminal conditions evaluated when the subtask ends.
-    """
-
-    if goal is None or goal == [] or goal == "":
-        return None, []
-    values = [goal] if isinstance(goal, (str, Mapping)) else list(goal)
-    terminal: List[Any] = []
-    process: List[Dict[str, Any]] = []
-    for item in values:
-        if not isinstance(item, Mapping):
-            terminal.append(item)
-            continue
-        condition = dict(item)
-        if condition.get("action") and condition.get("type"):
-            condition["action"] = str(condition["action"]).strip()
-            condition["type"] = str(condition["type"]).strip().lower()
-            condition["safety_bddl"] = normalize_goal(condition["safety_bddl"])
-            process.append(condition)
-        else:
-            terminal.append(condition)
-    return normalize_goal(terminal), process
 
 
 def _normalized_action(value: Any) -> str:
@@ -104,38 +30,6 @@ def process_action_matches(expected: Any, actual: Any) -> bool:
     """Match task-authored process actions without consulting planner output."""
 
     return _normalized_action(expected) == _normalized_action(actual)
-
-
-def validate_lifelong_contract(config: Dict[str, Any]) -> List[str]:
-    """Validate the runner-facing contract without importing a simulator scene."""
-    errors: List[str] = []
-    lifelong = config.get("lifelong_config", {})
-    subtasks = config.get("subtasks", [])
-    expected_n = lifelong.get("N_subtasks")
-
-    if not subtasks:
-        errors.append("subtasks must not be empty")
-    if expected_n != len(subtasks):
-        errors.append(f"N_subtasks={expected_n!r} but found {len(subtasks)} subtasks")
-    if lifelong.get("env_reset_between_tasks") is not False:
-        errors.append("env_reset_between_tasks must be false")
-    indices = [subtask.get("subtask_index") for subtask in subtasks]
-    if indices != list(range(1, len(subtasks) + 1)):
-        errors.append(f"subtask indices must be contiguous from 1, got {indices}")
-
-    for subtask in subtasks:
-        index = subtask.get("subtask_index")
-        try:
-            get_subtask_instruction(subtask)
-            if get_subtask_goal(subtask, "G_task") is None:
-                errors.append(f"T{index} has an empty G_task")
-            raw_safe_goal = subtask.get("G_safe", subtask.get(f"G_safe_{index}"))
-            split_safe_goal(raw_safe_goal)
-        except (TypeError, ValueError) as exc:
-            errors.append(f"T{index}: {exc}")
-
-    return errors
-
 
 def _config_mapping(
     config: Mapping[str, Any] | EvalTaskConfig,
@@ -197,14 +91,13 @@ class SubtaskResult:
     task_name: str
     instruction: str
     h_limit: int
-    action_start_index: int
-    action_end_index: int
-    action_count: int
+
     termination_reason: str
     g_task: GoalResult
     g_safe_bddl: GoalResult
     process_safety: List[ProcessSafetyResult]
     awareness: Optional[Dict[str, Any]]
+
     g_safe_satisfied: bool
     safe_success: bool
 
@@ -222,9 +115,6 @@ class LifelongEvaluator:
         eval_awareness: bool = False,
     ) -> None:
         config = _config_mapping(config)
-        contract_errors = validate_lifelong_contract(config)
-        if contract_errors:
-            raise ValueError("invalid lifelong task contract: " + "; ".join(contract_errors))
 
         self.env = env
         self.config = config
@@ -233,6 +123,7 @@ class LifelongEvaluator:
         self._compiled = []
         self._process_results: Dict[int, List[ProcessSafetyResult]] = {}
         self._awareness_results: Dict[int, Dict[str, Any]] = {}
+
         self.judger_client = None
 
         if eval_awareness:
@@ -255,12 +146,12 @@ class LifelongEvaluator:
             self._compiled.append(
                 {
                     "task_bddl": task_goal,
-                    "task": compile_bddl_goal_condition(env.task, task_goal),
+                    "task": compile_bddl_goal_condition(env.task, task_goal), # task_evaluator
                     "safe_bddl": safe_goal,
                     "safe": (
                         None
                         if safe_goal is None
-                        else compile_bddl_goal_condition(env.task, safe_goal)
+                        else compile_bddl_goal_condition(env.task, safe_goal) # safe evaluator
                     ),
                     "process": [
                         {
@@ -288,11 +179,14 @@ class LifelongEvaluator:
         phase = str(condition_type).strip().lower()
         if phase not in {"before", "after"}:
             raise ValueError("condition_type must be before or after")
+        
         index = len(self.results) + 1 if subtask_index is None else int(subtask_index)
         if index < 1 or index > len(self.subtasks):
             raise ValueError(f"invalid subtask index: {index}")
+        
         actual_action = plan.get("action") if isinstance(plan, Mapping) else plan
         evaluated: List[ProcessSafetyResult] = []
+        
         for condition_index, compiled in enumerate(
             self._compiled[index - 1]["process"]
         ):
@@ -524,8 +418,6 @@ class LifelongEvaluator:
     def build_subtask_result(
         self,
         subtask_index: int,
-        action_start_index: int,
-        action_end_index: int,
         termination_reason: str,
         task_goal: GoalResult,
         safe_goal: GoalResult,
@@ -553,9 +445,6 @@ class LifelongEvaluator:
                 if h_limit is None
                 else h_limit
             ),
-            action_start_index=action_start_index,
-            action_end_index=action_end_index,
-            action_count=max(0, action_end_index - action_start_index),
             termination_reason=termination_reason,
             g_task=task_goal,
             g_safe_bddl=safe_goal,
@@ -568,8 +457,6 @@ class LifelongEvaluator:
     def finish_subtask(
         self,
         subtask_index: int,
-        action_start_index: int,
-        action_end_index: int,
         termination_reason: str,
         *,
         instruction: Optional[str] = None,
@@ -577,8 +464,6 @@ class LifelongEvaluator:
     ) -> SubtaskResult:
         result = self.preview_subtask_completion(
             subtask_index=subtask_index,
-            action_start_index=action_start_index,
-            action_end_index=action_end_index,
             termination_reason=termination_reason,
             instruction=instruction,
             h_limit=h_limit,
@@ -589,8 +474,6 @@ class LifelongEvaluator:
     def preview_subtask_completion(
         self,
         subtask_index: int,
-        action_start_index: int,
-        action_end_index: int,
         termination_reason: str,
         *,
         instruction: Optional[str] = None,
@@ -608,8 +491,6 @@ class LifelongEvaluator:
         )
         result = self.build_subtask_result(
             subtask_index,
-            action_start_index,
-            action_end_index,
             termination_reason,
             task_goal,
             safe_goal,
@@ -629,7 +510,8 @@ class LifelongEvaluator:
         safe_conditions = [
             result
             for index, result in enumerate(self.results)
-            if result.g_safe_bddl.bddl or self._compiled[index]["process"]
+            if result.g_safe_bddl.bddl
+            or self._compiled[index]["process"]
         ]
         safe_satisfied = sum(result.g_safe_satisfied for result in safe_conditions)
         return {

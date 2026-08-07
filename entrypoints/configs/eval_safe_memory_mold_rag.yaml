@@ -2,6 +2,12 @@ navigation:
   # Preserve the raw A* bend around the dining-room floor lamp. The simplified
   # doorway segment passed inside Fetch's effective collision radius.
   clearance_aware_simplify: false
+  # At the dining-room bend, Fetch can stop about 0.43 m short of the next
+  # discretized waypoint while remaining on the validated route. Match the
+  # existing starter-rag task-local tolerance instead of changing the shared
+  # navigation default.
+  stuck_waypoint_tolerance: 0.45
+  stuck_final_waypoint_tolerance: 0.45
 
 starter_primitives:
   # A center-biased native stance sample can still land behind table geometry.

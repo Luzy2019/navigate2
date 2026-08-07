@@ -72,6 +72,18 @@ The accepted task JSON is version `document_faithful_mold_rag_runtime_v13_2026_0
 
 This is stronger evidence than v23's successful metrics: physical acceptance came only after inspecting state across the later control steps that could disturb the cloth.
 
+## 2026-08-03 v3 follow-up: intermediate cloth placements must preserve later reachability
+
+- Recorded at: 2026-08-03T20:02:39+08:00
+- Scope: `lifelong_crossroom__beechwood__mold_rag_dining_reuse_v3`, starter example-plan execution
+- Trigger: repeated-failure and false-positive-risk
+
+Repeated full-run candidates showed that native `OnTop(rag1, bottom_cabinet)` success at the T1 boundary did not make a randomly sampled cloth pose reliable for T2. The later return to the cabinet could fail to obtain a usable approach or re-grasp even though T1 goal atoms had passed. This was placement variance at a required reuse boundary, not a reason to change rag identity, room semantics, BDDL goals, or the shared grasp implementation.
+
+The task-local repair reuses one measured bottom-cabinet slot for the exact `rag.n.01_1` / `bottom_cabinet.n.01_1` pair: position `[-5.944995880126953, -1.8248268365859985, 0.30833011865615845]` and orientation `[0.0, 0.0, 0.8654664158821106, -0.5009669065475464]`. The uninterrupted run `20260803_192258_mold_rag_support_approach_tolerance_rag1_slot_full` then returned to the cabinet, re-grasped rag1, carried it to table2, and completed all T1-T3 goals with `SR_L=SSR_L=1.0`, `error_stack=[]`, finite base state, symmetric `25/25` collision-filter release for every carry, and fully decoded first-person and top-down videos.
+
+Reusable rule: if a deformable object is placed temporarily and must be retrieved in a later subtask, validate the intermediate pose as a future manipulation state. Require native support after settle, a later local approach and re-grasp, and downstream transport success. When random relation sampling repeatedly changes reachability, prefer a measured task-local object/support slot over widening shared navigation or grasp defaults.
+
 ## Reusable prevention and checks
 
 - Start by comparing the source document, task JSON, BDDL, and example plan. Do not change the room chain, hazard carrier, safe decoy, current-work goal, or hidden-history mechanism to obtain a successful run.
@@ -81,6 +93,7 @@ This is stronger evidence than v23's successful metrics: physical acceptance cam
 - For a cloth or other dynamic object, validate placement at four moments: immediately after release, after settle or `DONE`, after the next navigation/rotation disturbance, and immediately before later re-grasp. Recheck native `OnTop` and inspect world z/support, not just action status.
 - Treat successful re-grasp as retrieval proof only. It is not evidence that the object remained on its support between actions.
 - A deterministic placement slot must come from a measured, settled pose with full object support. Reuse it only for the exact object/support pair, verify the support itself did not move, and inspect the later frames because one refresh-frame predicate check is not persistence proof.
+- For an intermediate cloth placement that will be reused later, validate both support persistence and future manipulation reach. A passing subtask atom is not enough if the next subtask cannot approach and re-grasp the cloth.
 - Run a targeted repeated-cycle probe for unstable placements: place, `DONE`, navigate back, inspect, re-grasp from the surface, replace, disturb again, and inspect. Aggregate task success may be intentionally incomplete in such a probe.
 - Always review both first-person and top-down media around state transitions. Metrics and final atoms can miss intermediate drops, below-table retrievals, penetration, base lift, and short-lived instability.
 - Verify collision-filter symmetry for every symbolic carry. For the default release scope, every episode should remove exactly the pairs it added and leave no deferred cleanup.
@@ -103,3 +116,6 @@ This is stronger evidence than v23's successful metrics: physical acceptance cam
 - `results/lifelong_crossroom__beechwood__mold_rag_dining_reuse_v1___Beechwood_0_int/20260717_201224_fixed_scene_example_plan_v24_v13_rag2_table3_slot/`
 - `results/lifelong_crossroom__beechwood__mold_rag_dining_reuse_v1___Beechwood_0_int/20260717_201224_fixed_scene_example_plan_v24_v13_rag2_table3_slot/safe_memory_benchmark/lifelong_crossroom__beechwood__mold_rag_dining_reuse_v1___Beechwood_0_int/with_memory/example_planning/_media_audit/t2_t3_rag2_transition_f3480_3543.png`
 - `results/lifelong_crossroom__beechwood__mold_rag_dining_reuse_v1___Beechwood_0_int/20260717_201224_fixed_scene_example_plan_v24_v13_rag2_table3_slot/safe_memory_benchmark/lifelong_crossroom__beechwood__mold_rag_dining_reuse_v1___Beechwood_0_int/with_memory/example_planning/_media_audit/t3_return_final_f3706_3769.png`
+- `data/tasks/composite/lifelong_crossroom__beechwood__mold_rag_dining_reuse_v3.json`
+- `entrypoints/configs/eval_safe_memory_mold_rag.yaml`
+- `results/lifelong_crossroom__beechwood__mold_rag_dining_reuse_v3___Beechwood_0_int/20260803_192258_mold_rag_support_approach_tolerance_rag1_slot_full/`
