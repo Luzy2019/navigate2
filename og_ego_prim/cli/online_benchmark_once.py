@@ -7,6 +7,7 @@ add_monkey_patch()
 
 import argparse
 import os
+from pathlib import Path
 import sys
 
 import omnigibson as og
@@ -36,6 +37,7 @@ from og_ego_prim.task_planner import (
 from og_ego_prim.utils.cli_parsing import parse_optional_bool
 from og_ego_prim.utils.constants import SCENES
 from og_ego_prim.utils.metric import track_planning_latency
+from og_ego_prim.utils.topdown_capture import save_topdown_assets
 from og_ego_prim.utils.topdown_trace_video import save_replay_topdown_video
 
 # Don't use GPU dynamics and use flatcache for performance boost
@@ -197,6 +199,38 @@ def _trace_planner_adapter(
     return traced
 
 
+def _ensure_online_topdown_assets(
+    benchmark,
+    output_dir: str,
+    *,
+    runtime_config: RuntimeConfig,
+) -> dict:
+    cached = getattr(benchmark, "_online_topdown_assets", None)
+    if isinstance(cached, dict):
+        occupancy_metadata = cached.get("occupancy_metadata")
+        if occupancy_metadata and Path(occupancy_metadata).exists():
+            return cached
+
+    tracker = getattr(benchmark, "tracker", None)
+    snapshot = getattr(tracker, "latest_scene_graph", None)
+    if not isinstance(snapshot, dict):
+        snapshot = None
+    assets = save_topdown_assets(
+        benchmark.env,
+        Path(output_dir) / "topdown_assets",
+        world_bounds=getattr(runtime_config.artifacts, "topdown_world_bounds", None),
+        snapshot=snapshot,
+        execution_diagnostics=list(
+            getattr(tracker, "execution_diagnostics", None) or []
+        ),
+        output_size=(
+            runtime_config.artifacts.topdown_output_size or (1920, 1080)
+        ),
+    )
+    benchmark._online_topdown_assets = assets
+    return assets
+
+
 def _finish_replay(
     benchmark,
     *,
@@ -287,10 +321,16 @@ def _finish_replay(
                 status="failed",
             )
         try:
+            topdown_assets = _ensure_online_topdown_assets(
+                benchmark,
+                output_dir,
+                runtime_config=runtime_config,
+            )
             topdown_info = save_replay_topdown_video(
                 scene=benchmark.scene_name,
                 frame_records=session.frames,
                 output_dir=output_dir,
+                topdown_assets_dir=topdown_assets["asset_dir"],
                 output_size=(
                     runtime_config.artifacts.topdown_output_size or (1920, 1080)
                 ),

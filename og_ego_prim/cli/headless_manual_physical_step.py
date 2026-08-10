@@ -1,8 +1,8 @@
 """Advance one physical-starter action from a human-confirmed RGB frame.
 
 Human annotation replaces only SAMJAM / SAM2 / UniGoal recognition.  The
-normal canonical scene-graph, state-diff, ObjectRegistry, Scheduler, GPT-4o
-risk assessment, GPT-4o task planner, and physical-starter execution remain in
+normal canonical scene-graph, state-diff, ObjectRegistry, Scheduler, gpt-4o-mini
+risk assessment, gpt-4o-mini task planner, and physical-starter execution remain in
 the runtime path.  Each invocation starts one headless simulator, replays the
 committed action prefix, executes at most one new planner action, and exits.
 """
@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-dir", required=True)
     parser.add_argument("--perception-json")
     parser.add_argument("--config")
-    parser.add_argument("--model", default="gpt-4o")
+    parser.add_argument("--model", default="gpt-4o-mini")
     parser.add_argument("--local-llm-serve", action="store_true")
     parser.add_argument("--local-serve-ip", default="")
     parser.add_argument("--local-serve-key", default="sk-123456")

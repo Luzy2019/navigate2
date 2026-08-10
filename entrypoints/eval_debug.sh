@@ -18,7 +18,7 @@ Usage:
 
 Examples:
   bash entrypoints/eval_debug.sh store_apple_and_tissue_box_in_bottom_cabinet Wainscott_0_int "" entrypoints/configs/eval_debug.yaml
-  bash entrypoints/eval_debug.sh store_apple_and_tissue_box_in_bottom_cabinet Wainscott_0_int gpt-4o entrypoints/configs/eval_debug.yaml --plan-max-steps 30
+  bash entrypoints/eval_debug.sh store_apple_and_tissue_box_in_bottom_cabinet Wainscott_0_int gpt-4o-mini entrypoints/configs/eval_debug.yaml --plan-max-steps 30
 USAGE
     exit 2
 fi

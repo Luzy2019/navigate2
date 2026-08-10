@@ -250,6 +250,56 @@ def save_topdown_occupancy_map(
     return metadata
 
 
+def save_topdown_assets(
+    env: Any,
+    output_dir: Path,
+    *,
+    world_bounds: Optional[Sequence[float]] = None,
+    snapshot: Optional[dict[str, Any]] = None,
+    execution_diagnostics: Optional[list[dict[str, Any]]] = None,
+    output_size: tuple[int, int] = (1920, 1080),
+    margin: float = 1.0,
+) -> dict[str, Any]:
+    """Save the top-down image and matching occupancy metadata for one run."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    topdown_image_path = output_dir / "topdown_scene.png"
+    topdown_metadata_path = output_dir / "topdown_scene.json"
+    occupancy_image_path = output_dir / "occupancy_map.png"
+    occupancy_metadata_path = output_dir / "occupancy_map.json"
+
+    topdown_metadata = capture_topdown_scene(
+        env,
+        topdown_image_path,
+        world_bounds=world_bounds,
+        snapshot=snapshot,
+        execution_diagnostics=execution_diagnostics,
+        output_size=output_size,
+        margin=margin,
+        metadata_path=topdown_metadata_path,
+    )
+    resolved_bounds = topdown_metadata["world_bounds"]
+    occupancy_metadata = save_topdown_occupancy_map(
+        env,
+        occupancy_image_path,
+        world_bounds=resolved_bounds,
+        snapshot=snapshot,
+        execution_diagnostics=execution_diagnostics,
+        output_size=output_size,
+        margin=margin,
+        metadata_path=occupancy_metadata_path,
+    )
+    return {
+        "asset_dir": str(output_dir),
+        "topdown_image": str(topdown_image_path),
+        "topdown_metadata": str(topdown_metadata_path),
+        "occupancy_image": str(occupancy_image_path),
+        "occupancy_metadata": str(occupancy_metadata_path),
+        "world_bounds": list(resolved_bounds),
+        "output_size": list(occupancy_metadata["output_size"]),
+    }
+
+
 def _resize_map_with_aspect_padding(
     image_np: np.ndarray,
     *,

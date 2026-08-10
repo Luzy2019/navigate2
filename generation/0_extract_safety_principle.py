@@ -153,6 +153,6 @@ if __name__ == "__main__":
                 object_list = json.load(f).keys()
             scene_image_path = f'../data/metas/scene_images/{scene_name}.png'
             base64_image = encode_image(scene_image_path)
-            safe_risk_list[scene_name] = risk_generation(base64_image, object_list, task_list, 'gpt-4o')
+            safe_risk_list[scene_name] = risk_generation(base64_image, object_list, task_list, 'gpt-4o-mini')
     with open('behavior_safety_principle.json', 'w') as f:
         json.dump(safe_risk_list, f, indent=2)

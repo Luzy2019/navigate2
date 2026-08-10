@@ -92,9 +92,9 @@ def generate_frame_scene_graph(image_path):
 
     message = completion.choices[0].message
     if message.refusal:
-        raise RuntimeError(f"GPT-4o refused the scene graph request: {message.refusal}")
+        raise RuntimeError(f"gpt-4o-mini refused the scene graph request: {message.refusal}")
     if message.parsed is None:
-        raise RuntimeError("GPT-4o returned no structured scene graph.")
+        raise RuntimeError("gpt-4o-mini returned no structured scene graph.")
 
     scene_graph = message.parsed.model_dump()
     print(scene_graph)

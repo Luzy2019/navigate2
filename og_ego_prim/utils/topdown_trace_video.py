@@ -22,6 +22,7 @@ def save_replay_topdown_video(
     frame_records: Sequence[dict[str, Any]],
     output_dir: Path | str,
     repository_root: Optional[Path | str] = None,
+    topdown_assets_dir: Optional[Path | str] = None,
     output_name: str = "replay_topdown.mp4",
     output_size: Optional[tuple[int, int]] = (1920, 1080),
     fps: float = 10.0,
@@ -36,7 +37,11 @@ def save_replay_topdown_video(
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / output_name
     repo = Path(repository_root) if repository_root is not None else Path(__file__).resolve().parents[2]
-    topdown_image_path, occupancy_metadata_path = _resolve_topdown_assets(repo, scene)
+    topdown_image_path, occupancy_metadata_path = _resolve_topdown_assets(
+        repo,
+        scene,
+        topdown_assets_dir=topdown_assets_dir,
+    )
     metadata = json.loads(occupancy_metadata_path.read_text(encoding="utf-8"))
     # Keep replay generation usable with legacy/partial runtime configs that
     # leave the optional artifact size unset.
@@ -89,6 +94,7 @@ def save_topdown_trace_video(
     execution_diagnostics: Sequence[dict[str, Any]],
     output_dir: Path | str,
     repository_root: Optional[Path | str] = None,
+    topdown_assets_dir: Optional[Path | str] = None,
     output_name: str = "topdown.mp4",
     output_size: tuple[int, int] = (1920, 1080),
     fps: float = 12.0,
@@ -103,7 +109,11 @@ def save_topdown_trace_video(
     output_path = output_dir / output_name
     repo = Path(repository_root) if repository_root is not None else Path(__file__).resolve().parents[2]
 
-    topdown_image_path, occupancy_metadata_path = _resolve_topdown_assets(repo, scene)
+    topdown_image_path, occupancy_metadata_path = _resolve_topdown_assets(
+        repo,
+        scene,
+        topdown_assets_dir=topdown_assets_dir,
+    )
     metadata = json.loads(occupancy_metadata_path.read_text(encoding="utf-8"))
     width, height = int(output_size[0]), int(output_size[1])
     if width <= 0 or height <= 0:
@@ -216,12 +226,19 @@ class _WorldProjector:
         return px, py
 
 
-def _resolve_topdown_assets(repository_root: Path, scene: str) -> tuple[Path, Path]:
-    scene_topdown_dir = repository_root / "outputs" / "all_scene_topdowns" / scene
+def _resolve_topdown_assets(
+    repository_root: Path,
+    scene: str,
+    *,
+    topdown_assets_dir: Optional[Path | str] = None,
+) -> tuple[Path, Path]:
+    scene_topdown_dir = (
+        Path(topdown_assets_dir)
+        if topdown_assets_dir is not None
+        else repository_root / "outputs" / "all_scene_topdowns" / scene
+    )
     scene_metadata = scene_topdown_dir / "topdown_scene.json"
     occupancy_metadata = scene_topdown_dir / "occupancy_map.json"
-    if not occupancy_metadata.exists():
-        raise FileNotFoundError(f"topdown occupancy metadata not found: {occupancy_metadata}")
 
     candidates: list[Path] = []
     if scene_metadata.exists():
@@ -229,12 +246,25 @@ def _resolve_topdown_assets(repository_root: Path, scene: str) -> tuple[Path, Pa
             scene_payload = json.loads(scene_metadata.read_text(encoding="utf-8"))
             image_path = scene_payload.get("image")
             if image_path:
-                candidates.append(Path(image_path))
+                image_path = Path(image_path)
+                candidates.append(
+                    image_path
+                    if image_path.is_absolute()
+                    else scene_topdown_dir / image_path
+                )
             occupancy_payload = scene_payload.get("occupancy_metadata")
             if occupancy_payload:
-                occupancy_metadata = Path(occupancy_payload)
+                occupancy_path = Path(occupancy_payload)
+                occupancy_metadata = (
+                    occupancy_path
+                    if occupancy_path.is_absolute()
+                    else scene_topdown_dir / occupancy_path
+                )
         except Exception:
             pass
+
+    if not occupancy_metadata.exists():
+        raise FileNotFoundError(f"topdown occupancy metadata not found: {occupancy_metadata}")
 
     candidates.extend(
         [

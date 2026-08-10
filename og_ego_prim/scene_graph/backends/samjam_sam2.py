@@ -294,6 +294,15 @@ def _task_category_name(value: Optional[str]) -> str:
 CLOSED_RELATIONSHIPS = frozenset({"on", "in", "above", "attach to", "near"})
 
 
+def _normalize_vlm_predicate(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[_\-]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return {
+        "attached to": "attach to",
+    }.get(text, text)
+
+
 def _extract_json_object(text: str) -> Dict[str, Any]:
     try:
         parsed = json.loads(text)
@@ -839,7 +848,7 @@ class SAMJAMVLMAdapter:
             kwargs["base_url"] = base_url
         client = OpenAI(**kwargs)
         model = str(
-            self.scene_graph_config.option("scene_graph_vlm_model", "gpt-4o")
+            self.scene_graph_config.option("scene_graph_vlm_model", "gpt-4o-mini")
         ).strip()
         self._print_request_config(base_url, model, api_key)
 
@@ -999,7 +1008,7 @@ class SAMJAMVLMAdapter:
                 obj_id = int(rel.get("obj_id"))
             except (TypeError, ValueError):
                 continue
-            predicate = str(rel.get("predicate") or "").strip()
+            predicate = _normalize_vlm_predicate(rel.get("predicate"))
             if not predicate:
                 continue
             if predicate not in CLOSED_RELATIONSHIPS:

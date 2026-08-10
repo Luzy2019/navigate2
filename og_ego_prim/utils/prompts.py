@@ -1,3 +1,34 @@
+_PLACEMENT_RELATION_RULES = """Placement relation selection is semantic and mandatory:
+- Identify the held source object A and the destination B before choosing the
+  placement relation. If the instruction or formal goal says A is inside, in,
+  into, within, contained by, loaded into, stored in, packed in, or placed in
+  container B, use PLACE_INSIDE(B). The held object A is implicit.
+- A covering phrase does not change containment into surface support. For
+  example, "put the battery into the hamper, then cover it with the sweatshirt"
+  means GRASP(sweatshirt) followed by PLACE_INSIDE(hamper): the sweatshirt is
+  the held object and remains inside the hamper above the battery.
+- The formal goal overrides colloquial wording such as "cover", "load", or
+  "put" whenever it contains inside(A, B). Treat "cover A with ordinary object C" as
+  PLACE_INSIDE(B) for C when B is the container holding A.
+- Use PLACE_ON_TOP(B) only when the requested final relation is explicitly
+  on, onto, on top of, resting on, or on the surface of B, or the formal goal
+  is ontop(A, B). Never use PLACE_ON_TOP as a fallback for an inside relation.
+- DUMP_INTO(B) is only for emptying the contents of the held source container
+  into a real destination container or receptacle. Never use DUMP_INTO for a
+  floor, table, countertop, shelf, staging area, or any other support surface.
+  If the task says to carry a loaded container and leave the container and its
+  contents on a floor or other support surface, use PLACE_ON_TOP(B): DUMP_INTO
+  would remove the contents and is not a placement of the source container.
+- For example, "carry the loaded carton to the corridor floor and leave its
+  contents inside" requires PLACE_ON_TOP(floor.n.01_1), not
+  DUMP_INTO(floor.n.01_1). Use DUMP_INTO(compost_bin.n.01_1) only when the task
+  explicitly requires emptying the carton into that disposal container.
+- Do not infer a placement relation from B's category. A hamper, bin, carton,
+  cabinet, or washer is not a surface merely because it is a named object.
+  Use PLACE_ON_TOP for a cover only when the instruction explicitly calls for a
+  lid, a top, a rim, or surface support."""
+
+
 def build_task_specific_sequence_prompt(task_instruction):
     instruction = task_instruction.lower()
     cross_room_transfer = (
@@ -94,6 +125,8 @@ For those operations, propose GRASP, PLACE, POUR, or DUMP directly; NAVIGATE_TO 
 not a separate workflow phase. Use explicit NAVIGATE_TO only to reach a target for
 OPEN, CLOSE, TOGGLE, or WIPE. After one such navigation succeeds, propose that
 semantic operation next instead of navigating to the same target again.
+
+{_PLACEMENT_RELATION_RULES}
 
 When a proposal is rejected or execution fails, the failed action changed nothing.
 Complete the missing earlier precondition named by the feedback; do not retry the
@@ -204,7 +237,7 @@ Physical-action rules:
 - Before PLACE_ON_TOP or PLACE_INSIDE, the object to move must already be grasped.
 - PLACE_ON_TOP and PLACE_INSIDE take only the destination as their single argument.
 - POUR_INTO takes only the fill destination as its single argument; the currently grasped container is the source.
-- DUMP_INTO takes only the destination as its single argument; the currently grasped container is the source.
+- DUMP_INTO takes only the destination as its single argument; the currently grasped container is the source. The destination must be a real container or receptacle, never a floor or support surface.
 - Propose PLACE_ON_TOP, PLACE_INSIDE, POUR_INTO, or DUMP_INTO directly. The runtime inserts NAVIGATE_TO(destination) when needed and then executes the preserved operation.
 - Use NAVIGATE_TO explicitly before OPEN, CLOSE, TOGGLE_ON, TOGGLE_OFF, or WIPE when its target is not currently near and reachable or is absent from the current observation.
 - Open an openable DUMP_INTO destination before grasping the source container. After DUMP_INTO, place or release the still-grasped empty source container.

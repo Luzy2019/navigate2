@@ -9,8 +9,8 @@ task:
 
 scene_graph:
   backend: samjam_unigoal
-  step_interval: 30
-  history_interval: 30
+  step_interval: 50
+  history_interval: 50
 
 navigation:
   stuck_waypoint_tolerance: 0.25

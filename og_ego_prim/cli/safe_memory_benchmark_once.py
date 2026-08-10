@@ -37,14 +37,65 @@ from og_ego_prim.observability.media import (
 from og_ego_prim.primitives.specs import expand_legacy_plan_for_starter
 from og_ego_prim.utils.cli_parsing import parse_optional_size
 from og_ego_prim.utils.task_registry import get_task_config_path
+from og_ego_prim.utils.topdown_capture import save_topdown_assets
 from og_ego_prim.utils.topdown_trace_video import save_replay_topdown_video
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_SAFE_MEMORY_CONFIG = REPOSITORY_ROOT / "entrypoints" / "configs" / "eval_safe_memory.yaml"
+
+# These are the canonical, non-experiment safe-memory profiles for the current
+# task files. Experimental variants (manual, cooling-timer, and A* trials) stay
+# explicit so an ordinary task run cannot select a diagnostic profile by name.
+TASK_SAFE_MEMORY_CONFIGS = {
+    "lifelong_crossroom__beechwood__cleaner_food_cabinet_location_v3": (
+        "eval_safe_memory_cleaner_food.yaml"
+    ),
+    "lifelong_crossroom__beechwood__dryer_wet_lint_interlock_v3": (
+        "eval_safe_memory_dryer_wet_lint.yaml"
+    ),
+    "lifelong_crossroom__beechwood__hot_water_container_fragile_vase_v3": (
+        "eval_safe_memory_hot_water.yaml"
+    ),
+    "lifelong_crossroom__beechwood__jar_seal_status_after_canning_v3": (
+        "eval_safe_memory_jar_seal.yaml"
+    ),
+    "lifelong_crossroom__beechwood__knife_hidden_in_hamper_v3": (
+        "eval_safe_memory_knife_hidden_hamper.yaml"
+    ),
+    "lifelong_crossroom__beechwood__mold_rag_dining_reuse_v3": (
+        "eval_safe_memory_mold_rag.yaml"
+    ),
+    "lifelong_crossroom__beechwood__office_strip_wet_lamp_v3": (
+        "eval_safe_memory_office_strip.yaml"
+    ),
+    "lifelong_crossroom__beechwood__oil_rag_closed_storage_v3": (
+        "eval_safe_memory_oil_rag.yaml"
+    ),
+    "lifelong_crossroom__beechwood__quiche_wrap_identity_v3": (
+        "eval_safe_memory_quiche_wrap.yaml"
+    ),
+    "lifelong_crossroom__beechwood__raw_board_ready_plate_v3": (
+        "eval_safe_memory_raw_board_ready_plate.yaml"
+    ),
+    "lifelong_crossroom__beechwood__thaw_clock_remote_work_v3": (
+        "eval_safe_memory_thaw_clock.yaml"
+    ),
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Evaluate one lifelong cross-room task without resetting the environment."
     )
-    parser.add_argument("--config", default="entrypoints/configs/eval_safe_memory.yaml")
+    parser.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "Runtime YAML. When omitted, select the canonical task-specific "
+            "safe-memory profile, falling back to eval_safe_memory.yaml."
+        ),
+    )
     parser.add_argument("--task")
     parser.add_argument("--scene")
     parser.add_argument("--model")
@@ -76,7 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt-setting", choices=("v0", "v1", "v2", "v3"), default="v1")
     parser.add_argument("--primitive-type", choices=("auto", "ego", "starter", "symbolic"), default="auto")
     parser.add_argument("--scene-graph-step-interval", type=int, default=0)
-    parser.add_argument("--online-object-sampling", action="store_true")
+    parser.add_argument(
+        "--online-object-sampling",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     parser.add_argument("--use-initial-setup", action="store_true")
     parser.add_argument("--use-self-caption", action="store_true")
     parser.add_argument("--show-robot", action="store_true")
@@ -148,8 +203,48 @@ def _flag_present(*flags: str) -> bool:
     )
 
 
+def resolve_safe_memory_config(
+    task_spec: Optional[str],
+    config_spec: Optional[str],
+) -> tuple[Path, dict[str, Any]]:
+    """Resolve explicit or canonical task-local runtime settings.
+
+    The task JSON remains the source of scene initialization settings. This
+    resolver only selects the runtime profile layered on top of those settings.
+    """
+
+    if config_spec:
+        path = Path(config_spec).expanduser()
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"safe-memory config not found: {path}")
+        return path, {"source": "explicit", "task_config": None}
+
+    task_path = None
+    if task_spec:
+        task_path = get_task_config_path(task_spec)
+        task_stem = task_path.stem
+        filename = TASK_SAFE_MEMORY_CONFIGS.get(task_stem)
+        if filename:
+            path = REPOSITORY_ROOT / "entrypoints" / "configs" / filename
+            if path.is_file():
+                return path.resolve(), {
+                    "source": "task_specific",
+                    "task_config": str(task_path),
+                }
+
+    return DEFAULT_SAFE_MEMORY_CONFIG.resolve(), {
+        "source": "generic_fallback",
+        "task_config": None if task_path is None else str(task_path),
+    }
+
+
 def apply_config(args: argparse.Namespace) -> tuple[argparse.Namespace, RuntimeConfig]:
-    config_dict = load_runtime_config_dict(args.config)
+    config_path, config_resolution = resolve_safe_memory_config(args.task, args.config)
+    args.config = str(config_path)
+    args.config_resolution = config_resolution
+    config_dict = load_runtime_config_dict(config_path)
     runtime_config = RuntimeConfig.from_mapping(config_dict)
     task_config = runtime_config.task
     if not _flag_present("--task") and args.task is None:
@@ -168,8 +263,11 @@ def apply_config(args: argparse.Namespace) -> tuple[argparse.Namespace, RuntimeC
         args.primitive_type = task_config.primitive_type
     if not _flag_present("--scene-graph-step-interval"):
         args.scene_graph_step_interval = runtime_config.scene_graph.step_interval
-    if not _flag_present("--online-object-sampling") and task_config.online_object_sampling:
-        args.online_object_sampling = True
+    if (
+        not _flag_present("--online-object-sampling", "--no-online-object-sampling")
+        and task_config.online_object_sampling is not None
+    ):
+        args.online_object_sampling = bool(task_config.online_object_sampling)
     if not _flag_present("--use-initial-setup") and task_config.use_initial_setup:
         args.use_initial_setup = True
     if not _flag_present("--use-self-caption") and task_config.use_self_caption:
@@ -193,6 +291,54 @@ def apply_config(args: argparse.Namespace) -> tuple[argparse.Namespace, RuntimeC
         args.headless = runtime_config.runtime.headless
     args.runtime_config = runtime_config
     return args, runtime_config
+
+
+def configure_safe_memory_mode(
+    args: argparse.Namespace,
+    runtime_config: RuntimeConfig,
+) -> None:
+    """Apply the paired safe-memory ablation before simulator construction."""
+
+    if args.memory_mode != "without_memory":
+        return
+
+    # The baseline exposes only the v1 task-planner prompt.  A disabled
+    # perception backend still provides the controller's empty-snapshot
+    # contract, but it does not construct or run SAMJAM-UniGoal.
+    args.prompt_setting = "v1"
+    args.scene_graph_step_interval = 0
+    runtime_config.scene_graph.backend = "disabled"
+    runtime_config.scene_graph.step_interval = 0
+
+
+def configure_benchmark_memory_mode(
+    benchmark: Any,
+    args: argparse.Namespace,
+    runtime_config: RuntimeConfig,
+) -> None:
+    """Finalize runtime components and metadata for one memory ablation."""
+
+    modules = benchmark.tracker.runtime_modules
+    modules["scene_graph_backend"] = runtime_config.scene_graph.backend
+    modules["scene_graph_construction_enabled"] = args.memory_mode == "with_memory"
+
+    risk_predictor = benchmark.runtime_controller.components.risk_predictor
+    if args.memory_mode == "without_memory":
+        # A disabled provider would still execute RiskPredictor.predict().
+        # Removing the component makes review_action use its direct ALLOW path.
+        benchmark.runtime_controller.components.risk_predictor = None
+        modules["risk_predictor"] = None
+        modules["risk_provider"] = None
+        modules["risk_predictor_enabled"] = False
+        benchmark.tracker.risk_predictor = {
+            "enabled": False,
+            "type": None,
+            "provider": None,
+            "task_json_rule_count": 0,
+        }
+    else:
+        modules["risk_predictor_enabled"] = risk_predictor is not None
+        benchmark.tracker.risk_predictor["enabled"] = risk_predictor is not None
 
 
 class TeeTextStream:
@@ -240,8 +386,13 @@ def timestamped_work_dir(
 def install_run_log(work_dir: Path) -> Path:
     log_path = work_dir / "console.log"
     log_stream = log_path.open("a", encoding="utf-8", buffering=1)
-    sys.stdout = TeeTextStream(sys.stdout, log_stream)
-    sys.stderr = TeeTextStream(sys.stderr, log_stream)
+    if os.environ.get("ISBENCH_LOG_FILE_ONLY") == "1":
+        # The shell entrypoint redirects native and child-process output here too.
+        sys.stdout = log_stream
+        sys.stderr = log_stream
+    else:
+        sys.stdout = TeeTextStream(sys.stdout, log_stream)
+        sys.stderr = TeeTextStream(sys.stderr, log_stream)
     return log_path
 
 
@@ -310,6 +461,41 @@ def _attach_safe_replay(
     return session, restore_tracker
 
 
+def _ensure_safe_topdown_assets(
+    benchmark: Any,
+    output_dir: Path,
+    *,
+    runtime_config: RuntimeConfig,
+    output_size: Optional[tuple[int, int]] = None,
+) -> dict[str, Any]:
+    cached = getattr(benchmark, "_safe_topdown_assets", None)
+    if isinstance(cached, dict):
+        occupancy_metadata = cached.get("occupancy_metadata")
+        if occupancy_metadata and Path(occupancy_metadata).exists():
+            return cached
+
+    tracker = getattr(benchmark, "tracker", None)
+    snapshot = getattr(tracker, "latest_scene_graph", None)
+    if not isinstance(snapshot, dict):
+        snapshot = None
+    assets = save_topdown_assets(
+        benchmark.env,
+        output_dir / "topdown_assets",
+        world_bounds=getattr(runtime_config.artifacts, "topdown_world_bounds", None),
+        snapshot=snapshot,
+        execution_diagnostics=list(
+            getattr(tracker, "execution_diagnostics", None) or []
+        ),
+        output_size=(
+            output_size
+            or runtime_config.artifacts.topdown_output_size
+            or (1920, 1080)
+        ),
+    )
+    benchmark._safe_topdown_assets = assets
+    return assets
+
+
 def _finish_safe_replay(
     benchmark: Any,
     *,
@@ -352,10 +538,16 @@ def _finish_safe_replay(
                     status="failed",
                 )
     try:
+        topdown_assets = _ensure_safe_topdown_assets(
+            benchmark,
+            output_dir,
+            runtime_config=runtime_config,
+        )
         topdown_info = save_replay_topdown_video(
             scene=scene,
             frame_records=session.frames,
             output_dir=output_dir,
+            topdown_assets_dir=topdown_assets["asset_dir"],
             output_size=runtime_config.artifacts.topdown_output_size,
             fps=float(runtime_config.artifacts.video_fps),
             output_name="replay_topdown.mp4",
@@ -402,6 +594,45 @@ def _finish_safe_replay(
 def load_task_config(task_name: str) -> Dict[str, Any]:
     with open(get_task_config_path(task_name), "r", encoding="utf-8") as file:
         return json.load(file)
+
+
+def write_safe_memory_settings(
+    work_dir: Path,
+    *,
+    task_spec: str,
+    scene: str,
+    task_config_path: Path,
+    task_config: Dict[str, Any],
+    runtime_config: RuntimeConfig,
+    config_path: str,
+    config_resolution: Dict[str, Any],
+    online_object_sampling: bool,
+    online_object_sampling_source: str,
+) -> Path:
+    """Persist the exact task and runtime settings used by this run."""
+
+    settings_path = work_dir / "benchmark" / "safe_memory_settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": "isbench.safe_memory_settings.v1",
+        "task_spec": task_spec,
+        "task_config_path": str(task_config_path.resolve()),
+        "task_info": task_config.get("task_info", {}),
+        "scene": scene,
+        "scene_info": task_config.get("scene_info", {}),
+        "runtime_config_path": str(Path(config_path).resolve()),
+        "runtime_config_resolution": config_resolution,
+        "runtime_config": runtime_config.to_dict(),
+        "online_object_sampling": {
+            "value": bool(online_object_sampling),
+            "source": online_object_sampling_source,
+        },
+    }
+    settings_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return settings_path
 
 
 def load_scripted_actions(path: Optional[str], n_subtasks: int) -> Optional[List[List[Any]]]:
@@ -611,9 +842,21 @@ def _run(
         raise ValueError("--video-fps must be greater than 0")
 
     runtime_config = args.runtime_config
+    configure_safe_memory_mode(args, runtime_config)
     config = load_task_config(args.task)
+    task_config_path = get_task_config_path(args.task)
     canonical_task_name = str(config.get("task_info", {}).get("task_name") or args.task)
     scene = args.scene or config["scene_info"]["default_scene_model"]
+    if _flag_present("--online-object-sampling", "--no-online-object-sampling"):
+        online_object_sampling_source = "cli"
+    elif runtime_config.task.online_object_sampling is not None:
+        online_object_sampling_source = "runtime_yaml.task.online_object_sampling"
+    else:
+        online_object_sampling_source = "task_json.scene_info.online_object_sampling"
+    if args.online_object_sampling is None:
+        args.online_object_sampling = bool(
+            config.get("scene_info", {}).get("online_object_sampling", False)
+        )
     if not args.online_object_sampling:
         repository_root = Path(__file__).resolve().parents[2]
         sampled_scene = (
@@ -655,6 +898,32 @@ def _run(
         runtime_config.scene_graph.debug_log_path = str(
             output_dir / "samjam_outputs" / "scene_graph_debug.log"
         )
+    settings_path = write_safe_memory_settings(
+        work_dir,
+        task_spec=args.task,
+        scene=scene,
+        task_config_path=task_config_path,
+        task_config=config,
+        runtime_config=runtime_config,
+        config_path=args.config,
+        config_resolution=args.config_resolution,
+        online_object_sampling=args.online_object_sampling,
+        online_object_sampling_source=online_object_sampling_source,
+    )
+    print(f"safe-memory settings: {settings_path.resolve()}", flush=True)
+    print(
+        "safe-memory runtime config: "
+        f"{Path(args.config).resolve()} "
+        f"source={args.config_resolution.get('source')}",
+        flush=True,
+    )
+    print(
+        "safe-memory scene settings: "
+        f"removed={len(config.get('scene_info', {}).get('scene_file_remove_objects', []))} "
+        f"initial_pose_overrides={len(config.get('scene_info', {}).get('object_initial_poses', {}))} "
+        f"online_object_sampling={args.online_object_sampling}",
+        flush=True,
+    )
     log_path = install_run_log(work_dir)
     print(f"run directory: {work_dir.resolve()}", flush=True)
     print(f"console log: {log_path.resolve()}", flush=True)
@@ -690,6 +959,7 @@ def _run(
         eval_execution=False,
         runtime_config=args.runtime_config,
     )
+    configure_benchmark_memory_mode(benchmark, args, runtime_config)
     benchmark_holder.append(benchmark)
     replay_session, _restore_tracker = _attach_safe_replay(
         benchmark,
@@ -808,6 +1078,9 @@ def _run(
                 use_obs=use_obs,
                 max_step=h_limit,
                 held_object_getter=benchmark._current_grasped_object_id,
+                enable_loading_preflight=(
+                    runtime_config.task.enable_loading_preflight
+                ),
             )
             planner_adapter = TracingPlannerAdapter(
                 planner_adapter,
@@ -950,12 +1223,19 @@ def _run(
         "benchmark": "safe_memory_lifelong",
         "task": args.task,
         "scene": scene,
+        "settings_path": str(settings_path.resolve()),
+        "runtime_config_path": str(Path(args.config).resolve()),
+        "runtime_config_resolution": args.config_resolution,
         "model": args.model if planner_source == "model" else planner_source,
         "planner_source": planner_source,
         "primitive_type": benchmark.primitive_type,
         "memory_mode": args.memory_mode,
         "runtime_ablation": {
             "scene_graph_memory_enabled": args.memory_mode == "with_memory",
+            "scene_graph_construction_enabled": (
+                args.memory_mode == "with_memory"
+            ),
+            "risk_predictor_enabled": args.memory_mode == "with_memory",
             "use_initial_setup": args.use_initial_setup,
             "use_self_caption": args.use_self_caption,
             "prompt_setting": args.prompt_setting,
@@ -1011,10 +1291,18 @@ def _run(
                 args.topdown_video_output_size
                 or runtime_config.artifacts.topdown_output_size
             )
+            topdown_assets = _ensure_safe_topdown_assets(
+                benchmark,
+                output_dir,
+                runtime_config=runtime_config,
+                output_size=topdown_output_size,
+            )
+            report["topdown_assets"] = topdown_assets
             topdown_info = save_topdown_trace_video(
                 scene=scene,
                 execution_diagnostics=benchmark.tracker.execution_diagnostics,
                 output_dir=output_dir,
+                topdown_assets_dir=topdown_assets["asset_dir"],
                 output_name="topdown.mp4",
                 output_size=topdown_output_size,
                 fps=args.topdown_video_fps,

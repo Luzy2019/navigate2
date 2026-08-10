@@ -537,6 +537,7 @@ def _parse_expected_relations(bddl_path: Path) -> dict[str, Any]:
         "inside": [],
         "inroom": [],
         "particle_relations": [],
+        "particle_source_relations": [],
         "states": [],
     }
     problem = scan_tokens(string=bddl_path.read_text(encoding="utf-8"))
@@ -565,6 +566,10 @@ def _parse_expected_relations(bddl_path: Path) -> dict[str, Any]:
         arguments = [str(item) for item in atom[1:]]
         if value and predicate in {"ontop", "inside", "inroom"} and len(arguments) == 2:
             expected[predicate].append(arguments)
+        elif value and predicate == "insource" and len(arguments) == 2:
+            expected["particle_source_relations"].append(
+                {"predicate": predicate, "arguments": arguments, "declarative": True}
+            )
         elif value and predicate in {"filled", "covered", "saturated", "contains"} and len(arguments) == 2:
             expected["particle_relations"].append(
                 {"predicate": predicate, "arguments": arguments, "value": value}
@@ -1297,8 +1302,9 @@ def main() -> int:
             for subject, target in expected[predicate]:
                 expected_object_names.update((str(subject), str(target)))
         expected_object_names.update(str(subject) for subject, _ in expected["inroom"])
-        for relation in expected["particle_relations"]:
-            expected_object_names.update(str(value) for value in relation["arguments"])
+        for relation_key in ("particle_relations", "particle_source_relations"):
+            for relation in expected[relation_key]:
+                expected_object_names.update(str(value) for value in relation["arguments"])
         expected_object_names.update(str(item["object"]) for item in expected["states"])
         expected_scene_object_names = {
             name for name in expected_object_names if not name.startswith("agent.")

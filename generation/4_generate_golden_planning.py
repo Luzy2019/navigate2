@@ -347,5 +347,5 @@ if __name__ == "__main__":
         for config_file in os.listdir(root_path):
             executor.submit(
                 generate_golden_planning,
-                config_file, 'gpt-4o'
+                config_file, 'gpt-4o-mini'
             )

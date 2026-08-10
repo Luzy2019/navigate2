@@ -20,10 +20,12 @@ data/models/
 
 output*/
 tests**
-!tests/
-!tests/test_planning_memory_risk_latency.py
+
 talk/
 lifelong_graph/
 docs/
 !docs/share
 data/tasks/**
+tests/**
+share/**
+scripts/**

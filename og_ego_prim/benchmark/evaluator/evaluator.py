@@ -280,7 +280,7 @@ class Evaluator:
         )
         
         completion = self.judger_client.chat.completions.create(
-            model=os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o"),
+            model=os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o-mini"),
             messages=[{'role': 'user', 'content': prompt}],
             temperature=0.0,
             **get_openai_request_kwargs(),
@@ -299,7 +299,7 @@ class Evaluator:
         )
         
         completion = self.judger_client.chat.completions.create(
-            model=os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o"),
+            model=os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o-mini"),
             messages=[{'role': 'user', 'content': prompt}],
             temperature=0.6,
             **get_openai_request_kwargs(),

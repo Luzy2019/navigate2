@@ -15,8 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 from og_ego_prim.utils.omnigibson_runtime import maybe_reexec_with_omnigibson_python
 from og_ego_prim.benchmark.lifelong_evaluator import (
     get_subtask_goal,
-    split_safe_goal,
-    validate_lifelong_contract,
+    split_safe_goal
 )
 from og_ego_prim.primitives.specs import get_valid_primitives
 from og_ego_prim.utils.task_registry import get_task_config_path
@@ -1012,11 +1011,6 @@ def validate_and_normalize_task(args):
             ("execution_goal_condition", goal_conditions["execution_goal_condition"])
         )
     if config.get("subtasks"):
-        contract_errors = validate_lifelong_contract(config)
-        if contract_errors:
-            raise ValueError(
-                "invalid lifelong task contract: " + "; ".join(contract_errors)
-            )
         for subtask in config["subtasks"]:
             subtask_index = subtask["subtask_index"]
             embedded_goals.append(

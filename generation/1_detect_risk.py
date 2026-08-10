@@ -192,7 +192,7 @@ if __name__ == "__main__":
         for activity_name, activity_info in activity_dict.items():
             executor.submit(
                 risk_generation,
-                new_task_dict, activity_name, activity_info['task_instruction'], activity_info['object_list'], activity_info['initial_setup'], 'gpt-4o'
+                new_task_dict, activity_name, activity_info['task_instruction'], activity_info['object_list'], activity_info['initial_setup'], 'gpt-4o-mini'
             )
             
     with open('behavior_safety_tip.json', 'w') as f:

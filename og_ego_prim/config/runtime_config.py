@@ -831,6 +831,7 @@ class TaskConfig:
     use_self_caption: bool = False
     planner_use_obs: bool = True
     online_object_sampling: Optional[bool] = None
+    enable_loading_preflight: bool = True
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any]) -> "TaskConfig":
@@ -851,6 +852,9 @@ class TaskConfig:
             ),
             planner_use_obs=_to_bool(_pop(mapping, "planner_use_obs", cls.planner_use_obs)),
             online_object_sampling=mapping.get("online_object_sampling"),
+            enable_loading_preflight=_to_bool(
+                _pop(mapping, "enable_loading_preflight", cls.enable_loading_preflight)
+            ),
         )
 
 

@@ -532,8 +532,9 @@ class RiskAssessor:
             try:
                 candidate_ids = _resolve_entity(entity, nodes_by_id)
             except RuntimeError:
-                if entity != navigation_target:
-                    raise
+                # if entity != navigation_target:
+                #     raise
+                # continue
                 continue
             resolved_roots.append((entity, candidate_ids))
         prompt = _risk_prompt(

@@ -45,9 +45,19 @@ invalid. Order eligible movable task entities by loading safety."""
 
 _LOADING_PROMPT = """Generate all remaining operations in the complete
 shared-destination loading plan from the current RGB and held_object. Choose
-one allowed destination and use it for every placement. Include required
-operation preparation, but never include NAVIGATE_TO. Return {"status":"LOADING_PLAN",
-"destination":"entity","steps":["atomic action"]}."""
+one allowed destination and use it for every placement. The supplied
+pending_objects list is authoritative: only those objects remain to be loaded.
+Treat INPUT.held_object as the current gripper state. If held_object is null,
+the first step must be GRASP(pending_objects[0]); if held_object is not null,
+the first step must place that held object with the required destination
+relation from INPUT.destination_relation. In particular, when that value is
+PLACE_INSIDE, every loading placement must be PLACE_INSIDE(destination), never
+PLACE_ON_TOP(destination). After every placement the gripper is empty, so each
+next pending object must be GRASPed before its placement. Every pending object
+must appear
+in exactly this order, with one matching placement before moving to the next.
+Do not repeat a completed OPEN or CLOSE, and never include NAVIGATE_TO.
+Return {"status":"LOADING_PLAN","destination":"entity","steps":["atomic action"]}."""
 
 _SAFETY_PROMPT = """Generate an operation-only safety plan for failed_action
 within the current task_instruction. goal_description may contain later subtasks
@@ -91,7 +101,17 @@ of intended_operation) when navigation is required. Never substitute another
 operation, argument, or fallback surface. For unary held-object placement, pour,
 or dump operations, the sole argument is the destination. Return one JSON object
 with status ACTION and action set to that exact operation. Never return placeholder
-text such as "atomic action"."""
+text such as "atomic action".
+Placement relations for ACTION or LOADING_PLAN operations are semantic: when the
+held object goes inside, in, into, within, or is contained by a container, use
+PLACE_INSIDE(container), with the destination as the sole argument. A phrase
+such as "cover the contents with an ordinary object" still means
+PLACE_INSIDE(container) for that object; it does not mean PLACE_ON_TOP(container).
+Use PLACE_ON_TOP only for an explicit on, onto, on-top-of, rim, lid, or
+surface-support relation, or a formal ontop goal. This rule does not define
+TASK_RISK_PREFLIGHT fields: ordered_objects must contain only movable source
+entities, and must never contain the destination, a category name, or an
+observation-layer ID."""
 
 
 @runtime_checkable
@@ -171,6 +191,7 @@ class VLMClosedLoopPlannerAdapter:
         use_obs: bool = True,
         max_step: Optional[int] = None,
         held_object_getter: Optional[Callable[[], Optional[str]]] = None,
+        enable_loading_preflight: bool = True,
     ) -> None:
         self.agent = agent
         self.base = AgentPlannerAdapter(agent, use_obs=use_obs, max_step=max_step)
@@ -178,6 +199,7 @@ class VLMClosedLoopPlannerAdapter:
         self.max_step = max_step
         self.held_object_getter = held_object_getter or (lambda: None)
         self.agent.held_object_getter = self.held_object_getter
+        self.enable_loading_preflight = bool(enable_loading_preflight)
         self.valid_primitives = dict(get_valid_primitives(agent.primitive_type))
         self.allowed_entity_ids = tuple(getattr(agent, "allowed_entity_ids", ()))
         self._start_step = int(agent.current_step)
@@ -225,6 +247,12 @@ class VLMClosedLoopPlannerAdapter:
             "Each available_actions value is the exact required argument count. "
             "When a placement, pour, or dump action has arity 1, its only argument is "
             "the destination and the source object is current held_object. "
+            "For ACTION or LOADING_PLAN outputs, when the held object must go "
+            "inside a container, use PLACE_INSIDE(destination) with the sole "
+            "destination argument; use PLACE_ON_TOP only for an explicit top or "
+            "surface relation. This rule does not define TASK_RISK_PREFLIGHT: "
+            "ordered_objects lists only movable source entities, never the "
+            "destination, a category, or an observation-layer ID. "
             "Every action string must use canonical NAME(arg1, arg2) syntax, "
             "including empty parentheses for zero-argument actions. "
             "Return one strict JSON object without markdown.\n\n"
@@ -250,6 +278,8 @@ class VLMClosedLoopPlannerAdapter:
 
     def _run_preflight(self, context: PromptContext) -> None:
         self._preflight_done = True
+        if not getattr(self, "enable_loading_preflight", True):
+            return
         payload, _ = self._request(
             context,
             _PREFLIGHT_PROMPT,
@@ -450,6 +480,35 @@ class VLMClosedLoopPlannerAdapter:
         }
         return issued
 
+    def _starter_navigation_target(self, intended: Action) -> Optional[str]:
+        if (
+            self.agent.primitive_type != "starter"
+            or not getattr(self.agent, "starter_manipulation_navigation_guard", True)
+            or intended.name
+            not in {"GRASP", "PLACE_ON_TOP", "PLACE_INSIDE", "POUR_INTO", "DUMP_INTO"}
+        ):
+            return None
+        return intended.object_id
+
+    def _last_successful_navigation_to(self, target: str) -> bool:
+        controller = getattr(self.agent, "runtime_controller", None)
+        previous = getattr(controller, "last_outcome", None)
+        if not (
+            previous is not None
+            and getattr(previous, "executed", False)
+            and getattr(previous, "succeeded", False)
+        ):
+            return False
+        review_action = getattr(getattr(previous, "review", None), "action", None)
+        if review_action is None:
+            return False
+        try:
+            previous_action = self._planner_action(review_action)
+            navigation = self._action(f"NAVIGATE_TO({target})")
+        except (TypeError, ValueError):
+            return False
+        return self._same_action(previous_action, navigation)
+
     def _next_step(self, context: PromptContext) -> Optional[Action]:
         intended = self._steps[0]
         if (
@@ -459,6 +518,31 @@ class VLMClosedLoopPlannerAdapter:
             and self._held_object() is None
         ):
             raise ValueError("starter placement requires a held object")
+
+        navigation_target = self._starter_navigation_target(intended)
+        if navigation_target is not None and not self._last_successful_navigation_to(
+            navigation_target
+        ):
+            return self._issue(
+                self._action(f"NAVIGATE_TO({navigation_target})"),
+                operation=False,
+                raw_output=(
+                    "[planner_guard] inserted NAVIGATE_TO before "
+                    f"{intended.to_legacy_plan()}"
+                ),
+            )
+
+        # The first action that triggered loading was already selected by the
+        # base planner. Preserve it until the real gripper state is updated;
+        # asking the loading model to reconstruct it can drop a required GRASP.
+        loading = getattr(self, "_loading", None)
+        if loading is not None and loading["destination"] is None:
+            return self._issue(
+                intended,
+                operation=True,
+                raw_output="[loading] executing the planner-selected seed operation",
+            )
+
         payload, output = self._request(
             context,
             _EXECUTE_PROMPT,
@@ -521,17 +605,34 @@ class VLMClosedLoopPlannerAdapter:
         if outcome.executed and outcome.succeeded:
             if inflight["operation"]:
                 completed = self._steps.pop(0)
+                loading = self._loading
+                if (
+                    loading is not None
+                    and loading["destination"] is None
+                    and completed.name == loading["relation"]
+                ):
+                    _, destination = self._loading_placement(
+                        completed,
+                        inflight["held_object"],
+                    )
+                    loading["destination"] = destination
+                    self._safety_goal = (
+                        f"load {', '.join(loading['order'])} into or onto "
+                        f"{destination}"
+                    )
                 loading_active = (
-                    self._loading is not None
-                    and self._loading["destination"] is not None
+                    loading is not None and loading["destination"] is not None
                 )
                 if loading_active:
                     self._advance_loading(completed, inflight["held_object"])
                 if not self._steps:
-                    if loading_active:
+                    if loading is not None and loading["pending"]:
+                        pass
+                    elif loading_active:
                         self._loading = None
-                    self._root_action = None
-                    self._safety_goal = None
+                    if self._loading is None:
+                        self._root_action = None
+                        self._safety_goal = None
             return "success"
         if not outcome.executed:
             return "risk" if self._risk_blocked(outcome.review) else "scheduler"
@@ -574,6 +675,10 @@ class VLMClosedLoopPlannerAdapter:
 
         if self._steps:
             return self._next_step(context)
+        loading = getattr(self, "_loading", None)
+        if loading is not None and not self._steps and loading["pending"]:
+            self._start_loading_plan(context)
+            return self._next_step(context)
         candidate = self.base.propose(context)
         if candidate is None or not self._starts_loading(candidate):
             return candidate
@@ -584,7 +689,7 @@ class VLMClosedLoopPlannerAdapter:
             blocked_reason="multi_object_loading_order",
         )
         self._root_action = candidate
-        self._start_loading_plan(context)
+        self._steps = [candidate]
         return self._next_step(context)
 
 

@@ -289,7 +289,7 @@ if __name__ == "__main__":
         with open(f'../data/metas/bddl/{activity_name}/problem0.bddl') as f:
             pddl_text = f.read()
         for risk in info['risk_list']:
-            goal_condition_generation(risk, info['task_instruction'], risk['safety_tip'], risk['objects_with_risk'], pddl_text, 'gpt-4o')
+            goal_condition_generation(risk, info['task_instruction'], risk['safety_tip'], risk['objects_with_risk'], pddl_text, 'gpt-4o-mini')
         
     with open('behavior_task_safety_conditions.json', 'w') as f:
         json.dump([activity_dict], f, indent=2)

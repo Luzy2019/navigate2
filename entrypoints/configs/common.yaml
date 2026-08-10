@@ -7,9 +7,9 @@ runtime:
 
 scene_graph:
   backend: samjam_unigoal
-  step_interval: 30
+  step_interval: 50
   update_every: 1
-  history_interval: 30
+  history_interval: 50
   image_size: 256x256
   sensor_name: null
   hfov: 90.0
@@ -73,8 +73,8 @@ scene_graph:
     scene_graph_task_scene_bev_max_side: 4096
     scene_graph_task_scene_bev_max_scale: 48.0
     scene_graph_bev_video_fps: 2.0
-    scene_graph_llm_model: gpt-4o
-    scene_graph_vlm_model: gpt-4o
+    scene_graph_llm_model: gpt-4o-mini
+    scene_graph_vlm_model: gpt-4o-mini
     unigoal_node_space: null
     unigoal_extra_node_space: null
     unigoal_grounded_sam_device: null

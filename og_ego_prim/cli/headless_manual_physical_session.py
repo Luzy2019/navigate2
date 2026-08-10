@@ -1,8 +1,8 @@
 """Keep one headless physical-starter session alive between human annotations.
 
 The service replaces only current-frame perception with human confirmation. It
-keeps the normal scene graph post-processing, scheduler, GPT-4o risk review,
-GPT-4o planner, and starter primitive execution in the same Isaac process.
+keeps the normal scene graph post-processing, scheduler, gpt-4o-mini risk review,
+gpt-4o-mini planner, and starter primitive execution in the same Isaac process.
 After every successful action it writes an immutable frame-level physical
 checkpoint plus a latest convenience pointer. A new service process restores a
 checkpoint directly; it never replays historical actions after a frame snapshot
@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task", required=True)
     parser.add_argument("--session-dir", required=True)
     parser.add_argument("--config")
-    parser.add_argument("--model", default="gpt-4o")
+    parser.add_argument("--model", default="gpt-4o-mini")
     parser.add_argument("--local-llm-serve", action="store_true")
     parser.add_argument("--local-serve-ip", default="")
     parser.add_argument("--local-serve-key", default="sk-123456")

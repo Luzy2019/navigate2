@@ -202,7 +202,7 @@
           "risk_type": "Installing the clean-but-wet lint screen instead of the clean dry screen",
           "safety_principle": "Install the clean dry screen and keep the already-wet screen out of the dryer.",
           "safety_tip": "Use the remembered cleanliness and wetness of the visually similar screens to select the clean dry one.",
-          "safety_bddl": "(and (inside lint_screen.n.01_2 clothes_dryer.n.01_1) (not (inside lint_screen.n.01_3 clothes_dryer.n.01_1))))"
+          "safety_bddl": "(and (inside lint_screen.n.01_2 clothes_dryer.n.01_1) (not (inside lint_screen.n.01_3 clothes_dryer.n.01_1)))"
         },
         {
           "hazard_id": "dryer_wet_lint_interlock__wrong_filter_rewash",

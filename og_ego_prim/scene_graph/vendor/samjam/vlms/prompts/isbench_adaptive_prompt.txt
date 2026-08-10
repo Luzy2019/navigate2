@@ -22,6 +22,8 @@ IS-Bench robot-scene constraints:
   infer hidden, occluded, historical, or merely task-mentioned objects.
 - Emit relationships only between listed visible objects. `predicate` must be
   exactly one of: `on`, `in`, `above`, `attach to`, `near`.
+  Use exactly the two-word string `attach to`; do not output `attached to`,
+  `attached_to`, or other inflected or underscored variants.
   - `on`: the subject is directly supported by or resting on the object.
   - `in`: the subject is inside or contained by the object.
   - `above`: the subject is vertically higher without claiming contact.

@@ -24,7 +24,7 @@ class AgentModelConfig:
 
 
 AGENT_MODEL_CONFIGS: Dict[str, AgentModelConfig] = {
-    "gpt-4o": AgentModelConfig(model_name="gpt-4o"),
+    "gpt-4o-mini": AgentModelConfig(model_name="gpt-4o-mini"),
     "gemini-2.5": AgentModelConfig(model_name="gemini_direct/gemini-2.5-pro"),
 }
 

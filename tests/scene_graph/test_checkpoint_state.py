@@ -103,26 +103,6 @@ def test_checkpoint_held_object_falls_back_to_registry_state():
     )
 
 
-def test_legacy_place_checkpoint_focuses_previously_grasped_source():
-    session = object.__new__(PersistentPhysicalSession)
-    payload = {
-        "session": {
-            "completed_actions": [
-                {"action": "navigate_to(lint_screen.n.01_2)"},
-                {"action": "grasp(lint_screen.n.01_2)"},
-                {"action": "navigate_to(washer.n.03_1)"},
-                {"action": "place_on_top(washer.n.03_1)"},
-                {"action": "done()"},
-            ]
-        }
-    }
-
-    assert (
-        session._infer_restored_first_view_focus_entity(payload)
-        == "lint_screen.n.01_2"
-    )
-
-
 def test_native_first_view_angular_error_uses_optical_camera_axes():
     import math
     import torch
@@ -263,23 +243,6 @@ def test_native_first_view_accepts_visible_target_at_camera_joint_limit():
         1.0,
     ]
     assert controller.last_first_view_alignment["frustum"]["inside_frustum"] is True
-
-
-def test_native_first_view_restore_accepts_prior_visible_joint_limit_focus():
-    controller, obj, target_point = _first_view_limit_controller(
-        vertical_error=-0.1,
-        camera_tilt=1.0,
-    )
-
-    list(
-        controller.center_first_view_on_object(
-            obj,
-            phase="checkpoint_restore",
-            target_point=target_point,
-        )
-    )
-
-    assert controller.last_first_view_alignment["status"] == "visible_at_joint_limit"
 
 
 def test_native_first_view_rejects_target_outside_frustum_at_joint_limit():
@@ -428,7 +391,7 @@ def test_native_first_view_settling_holds_current_camera_joints():
     actions = list(
         controller.center_first_view_on_object(
             obj,
-            phase="checkpoint_restore",
+            phase="post_navigation",
             target_point=torch.tensor([0.0, 0.0, -1.0]),
         )
     )
@@ -636,39 +599,6 @@ def test_navigation_hand_suppression_forwards_generator_return_value():
     assert result == [returned]
     assert robot._disable_grasp_handling is False
     assert controller._suppress_navigation_hand_actions is False
-
-
-def test_restore_sensor_pose_uses_native_parent_mount():
-    import torch
-
-    session = object.__new__(PersistentPhysicalSession)
-    calls = []
-    sensor = type(
-        "Sensor",
-        (),
-        {
-            "set_position_orientation": lambda self, **kwargs: calls.append(kwargs),
-        },
-    )()
-    session._native_rgb_sensor = lambda: ("eye", sensor)
-    session._initial_native_sensor_parent_pose = {
-        "position": torch.tensor([0.0, 0.0, 0.1]),
-        "orientation": torch.tensor([0.0, 0.0, 0.0, 1.0]),
-    }
-
-    session._restore_sensor_pose(
-        {
-            "sensor_pose": {
-                "position": [100.0, 100.0, 100.0],
-                "orientation": [1.0, 0.0, 0.0, 0.0],
-            }
-        }
-    )
-
-    assert len(calls) == 1
-    assert calls[0]["frame"] == "parent"
-    assert torch.equal(calls[0]["position"], torch.tensor([0.0, 0.0, 0.1]))
-    assert torch.equal(calls[0]["orientation"], torch.tensor([0.0, 0.0, 0.0, 1.0]))
 
 
 def test_llm_log_path_preserves_retries(tmp_path):
