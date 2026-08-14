@@ -213,34 +213,6 @@ class OnlineEvalTracker(EvalTracker):
             frame = np.clip(frame, 0, 255).astype(np.uint8)
         self.video_cache.append(np.ascontiguousarray(frame[:, :, :3]))
 
-    def track_video_observations(self, observations, label=None, columns=3, frame_width=1920):
-        if not observations:
-            return
-
-        images = [Image.fromarray(np.asarray(obs)[:, :, :3]).convert('RGB') for obs in observations]
-        columns = min(columns, len(images))
-        rows = (len(images) + columns - 1) // columns
-        tile_width = frame_width // columns
-        tile_height = round(tile_width * images[0].height / images[0].width)
-        header_height = 40 if label else 0
-        frame = Image.new(
-            'RGB',
-            (tile_width * columns, tile_height * rows + header_height),
-            color='black',
-        )
-
-        for i, image in enumerate(images):
-            image = image.resize((tile_width, tile_height), Image.Resampling.LANCZOS)
-            frame.paste(
-                image,
-                ((i % columns) * tile_width, (i // columns) * tile_height + header_height),
-            )
-
-        if label:
-            ImageDraw.Draw(frame).text((12, 12), str(label), fill='white')
-
-        self.track_video_rgb(np.asarray(frame))
-
     def save_video(self, save_path: str):
         if not self.video_cache:
             return None

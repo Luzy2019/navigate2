@@ -86,7 +86,7 @@ class AgentPlanner:
         verbose: bool = True,
         debug: bool = False,
         observation_dir: Optional[str] = None,
-        starter_manipulation_navigation_guard: bool = True,
+        starter_manipulation_navigation_guard: bool = False,
     ) -> None:
         if work_dir is None:
             work_dir = WORK_DIR

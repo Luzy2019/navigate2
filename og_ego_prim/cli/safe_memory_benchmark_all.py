@@ -1,4 +1,4 @@
-"""Batch launcher for paired with-memory / without-memory evaluation."""
+"""Batch launcher for safe-memory ablation evaluation."""
 
 from __future__ import annotations
 
@@ -87,13 +87,13 @@ def planner_tag(args: argparse.Namespace) -> str:
     return args.model
 
 
-def report_path(work_dir: Path, task: str, mode: str, model: str) -> Path:
+def report_path(work_dir: Path, task: str, tag: str, model: str) -> Path:
     scene = scene_for_task(task)
     return (
         work_dir
         / "safe_memory_benchmark"
         / f"{task}___{scene}"
-        / mode
+        / tag
         / model.replace("/", "__")
         / "report.json"
     )
@@ -159,14 +159,30 @@ def summarize_log_error(log_path: Path) -> str:
     return "log file contains only blank lines"
 
 
-def run_one(args: argparse.Namespace, task: str, mode: str) -> Tuple[str, str, int, Path]:
+def _ablation_tag(enable_sg: bool, enable_rp: bool) -> str:
+    """Return a short tag identifying the ablation profile."""
+    parts = []
+    if enable_sg:
+        parts.append("sg")
+    if enable_rp:
+        parts.append("rp")
+    return "_".join(parts) if parts else "baseline"
+
+
+def run_one(
+    args: argparse.Namespace,
+    task: str,
+    ablation_profile: Tuple[bool, bool],
+) -> Tuple[str, str, int, Path]:
+    enable_sg, enable_rp = ablation_profile
+    ablation_tag = _ablation_tag(enable_sg, enable_rp)
     work_dir = task_work_dir(args, task)
     log_dir = work_dir / "safe_memory_logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{task}__{mode}.log"
-    existing_report = report_path(work_dir, task, mode, planner_tag(args))
+    log_path = log_dir / f"{task}__{ablation_tag}.log"
+    existing_report = report_path(work_dir, task, ablation_tag, planner_tag(args))
     if args.resume and existing_report.exists():
-        return task, mode, 0, log_path
+        return task, ablation_tag, 0, log_path
 
     command = [
         sys.executable,
@@ -176,11 +192,11 @@ def run_one(args: argparse.Namespace, task: str, mode: str) -> Tuple[str, str, i
         args.config,
         "--task",
         task,
-        "--memory-mode",
-        mode,
         "--work-dir",
         str(work_dir),
         "--no-timestamp-work-dir",
+        "--enable-scene-graph" if enable_sg else "--no-enable-scene-graph",
+        "--enable-risk-predictor" if enable_rp else "--no-enable-risk-predictor",
         "--prompt-setting",
         args.prompt_setting,
         "--primitive-type",
@@ -236,11 +252,11 @@ def run_one(args: argparse.Namespace, task: str, mode: str) -> Tuple[str, str, i
         except subprocess.TimeoutExpired:
             log_file.write(f"\nTimed out after {args.timeout_seconds} seconds\n")
             return_code = 124
-    return task, mode, return_code, log_path
+    return task, ablation_tag, return_code, log_path
 
 
-def jobs(tasks: Iterable[str], modes: Iterable[str]) -> List[Tuple[str, str]]:
-    return [(task, mode) for task in tasks for mode in modes]
+def jobs(tasks: Iterable[str], ablation_profiles: Iterable[Tuple[bool, bool]]) -> List[Tuple[str, Tuple[bool, bool]]]:
+    return [(task, profile) for task in tasks for profile in ablation_profiles]
 
 
 def _flag_present(*flags: str) -> bool:
@@ -278,7 +294,16 @@ def main() -> None:
         help="Optional task name or JSON path. Can be passed multiple times.",
     )
     parser.add_argument("--task-list")
-    parser.add_argument("--memory-modes", nargs="+", choices=("with_memory", "without_memory"), default=("with_memory", "without_memory"))
+    parser.add_argument(
+        "--disable-scene-graph",
+        action="store_true",
+        help="Only run the baseline profile with scene graph disabled.",
+    )
+    parser.add_argument(
+        "--disable-risk-predictor",
+        action="store_true",
+        help="Only run the baseline profile with risk predictor disabled.",
+    )
     parser.add_argument("--data-parallel", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=float, default=7200)
     parser.add_argument("--resume", action="store_true")
@@ -346,8 +371,6 @@ def main() -> None:
         args.actions_file = safe_memory_config["actions_file"]
     if not _flag_present("--use-example-planning") and safe_memory_config.get("use_example_planning"):
         args.use_example_planning = True
-    if not _flag_present("--memory-modes") and safe_memory_config.get("memory_modes"):
-        args.memory_modes = tuple(safe_memory_config["memory_modes"])
     if args.data_parallel < 1:
         parser.error("--data-parallel must be at least 1")
     if args.video_capture_interval < 1:
@@ -369,14 +392,14 @@ def main() -> None:
             task: str(timestamped_work_dir(args.work_dir, task, run_timestamp))
             for task in selected_tasks
         }
-
     print(
         json.dumps(
             {
                 "selected_task_count": len(selected_tasks),
                 "scene": args.scene,
                 "tasks": selected_tasks,
-                "memory_modes": list(args.memory_modes),
+                "enable_scene_graph": args.enable_scene_graph,
+                "enable_risk_predictor": args.enable_risk_predictor,
                 "planner_source": planner_tag(args) if args.actions_file or args.use_example_planning else "model",
                 "timestamp_work_dir": args.timestamp_work_dir,
                 "work_dirs": args.task_work_dirs or {"shared": args.work_dir},
@@ -391,17 +414,18 @@ def main() -> None:
         flush=True,
     )
 
-    work = jobs(selected_tasks, args.memory_modes)
+    work = jobs(selected_tasks, [(args.enable_scene_graph, args.enable_risk_predictor)])
     failures: List[Dict[str, object]] = []
     with ThreadPoolExecutor(max_workers=args.data_parallel) as executor:
         futures = {
-            executor.submit(run_one, args, task, mode): (task, mode)
-            for task, mode in work
+            executor.submit(run_one, args, task, profile): (task, profile)
+            for task, profile in work
         }
         for completed, future in enumerate(as_completed(futures), 1):
-            task, mode, return_code, log_path = future.result()
+            task, ablation_profile, return_code, log_path = future.result()
+            ablation_tag = "ablation_tag"
             status = "pass" if return_code == 0 else f"FAIL({format_return_code(return_code)})"
-            print(f"[{completed:03d}/{len(work):03d}] {status} {task} {mode}", flush=True)
+            print(f"[{completed:03d}/{len(work):03d}] {status} {task} {ablation_tag}", flush=True)
             if return_code != 0:
                 error_summary = summarize_log_error(log_path)
                 print(f"          log={log_path}", flush=True)
@@ -409,7 +433,7 @@ def main() -> None:
                 failures.append(
                     {
                         "task": task,
-                        "memory_mode": mode,
+                        "ablation_tag": ablation_tag,
                         "return_code": return_code,
                         "return_code_label": format_return_code(return_code),
                         "log": str(log_path),

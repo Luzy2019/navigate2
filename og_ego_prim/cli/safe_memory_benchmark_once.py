@@ -11,7 +11,7 @@ import re
 import sys
 import time
 import traceback
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from og_ego_prim.utils.omnigibson_runtime import maybe_reexec_with_omnigibson_python
 
@@ -23,22 +23,10 @@ from og_ego_prim.benchmark.lifelong_evaluator import (
     get_subtask_instruction,
 )
 from og_ego_prim.config import RuntimeConfig, load_runtime_config_dict
-from og_ego_prim.events import CompositeEventSink
-from og_ego_prim.observability import (
-    ReplaySession,
-    TracingEvaluatorProxy,
-    TracingModelClient,
-    TracingPlannerAdapter,
-)
-from og_ego_prim.observability.media import (
-    install_executor_trace,
-    observe_tracker_frames,
-)
 from og_ego_prim.primitives.specs import expand_legacy_plan_for_starter
 from og_ego_prim.utils.cli_parsing import parse_optional_size
 from og_ego_prim.utils.task_registry import get_task_config_path
 from og_ego_prim.utils.topdown_capture import save_topdown_assets
-from og_ego_prim.utils.topdown_trace_video import save_replay_topdown_video
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -99,8 +87,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task")
     parser.add_argument("--scene")
     parser.add_argument("--model")
-    parser.add_argument("--memory-mode", choices=("with_memory", "without_memory"), required=True)
+    parser.add_argument(
+        "--enable-scene-graph",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable scene graph perception backend. Disable to skip SAMJAM-UniGoal.",
+    )
+    parser.add_argument(
+        "--enable-risk-predictor",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable runtime risk predictor for action review. Disable to bypass risk checks.",
+    )
     parser.add_argument("--work-dir", default="results")
+
+    # 给你的任务运行一个简短的标签，包含在时间戳运行目录和 README 中。
     parser.add_argument(
         "--run-purpose",
         default="benchmark",
@@ -115,7 +116,6 @@ def build_parser() -> argparse.ArgumentParser:
             "Defaults to runtime.timestamp_output from the config."
         ),
     )
-    parser.add_argument("--actions-file", help="Optional scripted per-subtask actions for deterministic testing")
     parser.add_argument(
         "--use-example-planning",
         action="store_true",
@@ -126,13 +126,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-serve-key", default="EMPTY")
     parser.add_argument("--prompt-setting", choices=("v0", "v1", "v2", "v3"), default="v1")
     parser.add_argument("--primitive-type", choices=("auto", "ego", "starter", "symbolic"), default="auto")
-    parser.add_argument("--scene-graph-step-interval", type=int, default=0)
+    parser.add_argument("--scene-graph-step-interval", type=int, default=30)
     parser.add_argument(
         "--online-object-sampling",
         action=argparse.BooleanOptionalAction,
         default=None,
     )
+    # 初始化布置开关。启用后，会在任务开始前使用任务 JSON 中预定义的 scene_file_remove_objects 和 object_initial_poses 对场景进行预布置（移除指定物体、覆盖物体初始位姿），而不是使用随机采样或默认场景布局。
     parser.add_argument("--use-initial-setup", action="store_true")
+    # 自描述（caption）开关。启用后，在任务执行前会让 VLM 模型对当前场景生成一段自然语言描述（caption），并记录到 tracker 中。这段描述会作为额外上下文信息提供给后续的规划推理，帮助模型更好地理解当前环境状态。
     parser.add_argument("--use-self-caption", action="store_true")
     parser.add_argument("--show-robot", action="store_true")
     parser.add_argument("--draw-bbox-2d", action="store_true")
@@ -240,7 +242,7 @@ def resolve_safe_memory_config(
     }
 
 
-def apply_config(args: argparse.Namespace) -> tuple[argparse.Namespace, RuntimeConfig]:
+def _apply_config(args: argparse.Namespace) -> tuple[argparse.Namespace, RuntimeConfig]:
     config_path, config_resolution = resolve_safe_memory_config(args.task, args.config)
     args.config = str(config_path)
     args.config_resolution = config_resolution
@@ -291,54 +293,6 @@ def apply_config(args: argparse.Namespace) -> tuple[argparse.Namespace, RuntimeC
         args.headless = runtime_config.runtime.headless
     args.runtime_config = runtime_config
     return args, runtime_config
-
-
-def configure_safe_memory_mode(
-    args: argparse.Namespace,
-    runtime_config: RuntimeConfig,
-) -> None:
-    """Apply the paired safe-memory ablation before simulator construction."""
-
-    if args.memory_mode != "without_memory":
-        return
-
-    # The baseline exposes only the v1 task-planner prompt.  A disabled
-    # perception backend still provides the controller's empty-snapshot
-    # contract, but it does not construct or run SAMJAM-UniGoal.
-    args.prompt_setting = "v1"
-    args.scene_graph_step_interval = 0
-    runtime_config.scene_graph.backend = "disabled"
-    runtime_config.scene_graph.step_interval = 0
-
-
-def configure_benchmark_memory_mode(
-    benchmark: Any,
-    args: argparse.Namespace,
-    runtime_config: RuntimeConfig,
-) -> None:
-    """Finalize runtime components and metadata for one memory ablation."""
-
-    modules = benchmark.tracker.runtime_modules
-    modules["scene_graph_backend"] = runtime_config.scene_graph.backend
-    modules["scene_graph_construction_enabled"] = args.memory_mode == "with_memory"
-
-    risk_predictor = benchmark.runtime_controller.components.risk_predictor
-    if args.memory_mode == "without_memory":
-        # A disabled provider would still execute RiskPredictor.predict().
-        # Removing the component makes review_action use its direct ALLOW path.
-        benchmark.runtime_controller.components.risk_predictor = None
-        modules["risk_predictor"] = None
-        modules["risk_provider"] = None
-        modules["risk_predictor_enabled"] = False
-        benchmark.tracker.risk_predictor = {
-            "enabled": False,
-            "type": None,
-            "provider": None,
-            "task_json_rule_count": 0,
-        }
-    else:
-        modules["risk_predictor_enabled"] = risk_predictor is not None
-        benchmark.tracker.risk_predictor["enabled"] = risk_predictor is not None
 
 
 class TeeTextStream:
@@ -396,71 +350,6 @@ def install_run_log(work_dir: Path) -> Path:
     return log_path
 
 
-def _attach_safe_replay(
-    benchmark: Any,
-    output_dir: Path,
-    *,
-    task: str,
-    scene: str,
-    memory_mode: str,
-    runtime_config: RuntimeConfig,
-) -> tuple[ReplaySession, Any]:
-    session = ReplaySession(
-        output_dir,
-        task_id=task,
-        runner="safe_memory_benchmark_once",
-        metadata={
-            "scene": scene,
-            "memory_mode": memory_mode,
-            "primitive_type": benchmark.primitive_type,
-            "headless": bool(getattr(runtime_config.runtime, "headless", True)),
-        },
-    )
-    controller = benchmark.runtime_controller
-    existing_sink = getattr(controller, "event_sink", None)
-    controller.event_sink = CompositeEventSink(
-        tuple(sink for sink in (session.event_sink, existing_sink) if sink is not None)
-    )
-    controller.components.event_sink = controller.event_sink
-    legacy_evaluator = getattr(benchmark, "evaluator", None)
-    if legacy_evaluator is not None:
-        legacy_evaluator = TracingEvaluatorProxy(
-            legacy_evaluator,
-            session,
-            sim_step=lambda: controller.step,
-        )
-        benchmark.evaluator = legacy_evaluator
-        controller.components.evaluator = legacy_evaluator
-        benchmark._replay_legacy_evaluator = legacy_evaluator
-    benchmark._replay_restore_executor = install_executor_trace(
-        benchmark.executor, session
-    )
-    robots = getattr(getattr(benchmark, "env", None), "robots", None) or ()
-    restore_tracker = lambda: None
-    if robots:
-        restore_tracker = observe_tracker_frames(
-            benchmark.tracker,
-            session,
-            robot=robots[0],
-            executor=benchmark.executor,
-        )
-    benchmark._replay_session = session
-    benchmark._replay_restore_tracker = restore_tracker
-    session.emit(
-        "runtime",
-        "run_started",
-        {
-            "task": task,
-            "scene": scene,
-            "memory_mode": memory_mode,
-            "runner": "safe_memory_benchmark_once",
-        },
-        status="started",
-        sim_step=getattr(benchmark.executor, "global_step_index", 0),
-    )
-    return session, restore_tracker
-
-
 def _ensure_safe_topdown_assets(
     benchmark: Any,
     output_dir: Path,
@@ -496,162 +385,9 @@ def _ensure_safe_topdown_assets(
     return assets
 
 
-def _finish_safe_replay(
-    benchmark: Any,
-    *,
-    output_dir: Path,
-    report_path: Path,
-    scene: str,
-    runtime_config: RuntimeConfig,
-    status: str = "completed",
-    report: Optional[dict[str, Any]] = None,
-) -> None:
-    session = getattr(benchmark, "_replay_session", None)
-    if session is None or session.finalized:
-        return
-    media_info: dict[str, Any] = {}
-    if report and isinstance(report.get("video"), dict):
-        media_info["camera"] = dict(report["video"])
-    # A simulator/primitive exception can happen before the normal report is
-    # assembled.  The legacy tracker may still have a complete (or partial)
-    # RGB cache in that case, so persist it before finalizing the replay
-    # manifest.  This keeps failed runs inspectable without adding a step or
-    # changing the benchmark result.
-    if "camera" not in media_info:
-        tracker = getattr(benchmark, "tracker", None)
-        video_cache = getattr(tracker, "video_cache", None)
-        save_video = getattr(tracker, "save_video", None)
-        try:
-            has_video_cache = video_cache is not None and len(video_cache) > 0
-        except (TypeError, ValueError):
-            has_video_cache = bool(video_cache)
-        if callable(save_video) and has_video_cache:
-            try:
-                video_info = save_video(str(output_dir))
-                if video_info is not None:
-                    media_info["camera"] = dict(video_info) if isinstance(video_info, dict) else video_info
-            except Exception as error:
-                session.emit(
-                    "media",
-                    "replay_camera_failed",
-                    {"error": {"type": type(error).__name__, "message": str(error)}},
-                    status="failed",
-                )
-    try:
-        topdown_assets = _ensure_safe_topdown_assets(
-            benchmark,
-            output_dir,
-            runtime_config=runtime_config,
-        )
-        topdown_info = save_replay_topdown_video(
-            scene=scene,
-            frame_records=session.frames,
-            output_dir=output_dir,
-            topdown_assets_dir=topdown_assets["asset_dir"],
-            output_size=runtime_config.artifacts.topdown_output_size,
-            fps=float(runtime_config.artifacts.video_fps),
-            output_name="replay_topdown.mp4",
-        )
-        if topdown_info is not None:
-            media_info["topdown"] = topdown_info
-    except Exception as error:
-        session.emit(
-            "media",
-            "replay_topdown_failed",
-            {"error": {"type": type(error).__name__, "message": str(error)}},
-            status="failed",
-        )
-    if report and isinstance(report.get("topdown_video"), dict):
-        media_info["legacy_topdown"] = dict(report["topdown_video"])
-    session.emit(
-        "evaluator",
-        "run_evaluated",
-        {
-            "metrics": None if report is None else report.get("metrics"),
-            "subtask_results": None if report is None else report.get("subtask_results"),
-        },
-        status="completed" if status == "completed" else status,
-    )
-    for attribute in ("_replay_restore_tracker", "_replay_restore_executor"):
-        restore = getattr(benchmark, attribute, None)
-        if callable(restore):
-            try:
-                restore()
-            except Exception as error:
-                session._note_recording_error("replay_restore", error)
-    session.finalize(
-        media=media_info,
-        report_path=report_path,
-        status=status,
-        extra={
-            "task": benchmark.task_name,
-            "scene": scene,
-            "memory_mode": None if report is None else report.get("memory_mode"),
-        },
-    )
-
-
 def load_task_config(task_name: str) -> Dict[str, Any]:
     with open(get_task_config_path(task_name), "r", encoding="utf-8") as file:
         return json.load(file)
-
-
-def write_safe_memory_settings(
-    work_dir: Path,
-    *,
-    task_spec: str,
-    scene: str,
-    task_config_path: Path,
-    task_config: Dict[str, Any],
-    runtime_config: RuntimeConfig,
-    config_path: str,
-    config_resolution: Dict[str, Any],
-    online_object_sampling: bool,
-    online_object_sampling_source: str,
-) -> Path:
-    """Persist the exact task and runtime settings used by this run."""
-
-    settings_path = work_dir / "benchmark" / "safe_memory_settings.json"
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "schema_version": "isbench.safe_memory_settings.v1",
-        "task_spec": task_spec,
-        "task_config_path": str(task_config_path.resolve()),
-        "task_info": task_config.get("task_info", {}),
-        "scene": scene,
-        "scene_info": task_config.get("scene_info", {}),
-        "runtime_config_path": str(Path(config_path).resolve()),
-        "runtime_config_resolution": config_resolution,
-        "runtime_config": runtime_config.to_dict(),
-        "online_object_sampling": {
-            "value": bool(online_object_sampling),
-            "source": online_object_sampling_source,
-        },
-    }
-    settings_path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    return settings_path
-
-
-def load_scripted_actions(path: Optional[str], n_subtasks: int) -> Optional[List[List[Any]]]:
-    if path is None:
-        return None
-    with open(path, "r", encoding="utf-8") as file:
-        payload = json.load(file)
-    if isinstance(payload, dict):
-        payload = payload.get("subtasks")
-    if not isinstance(payload, list) or len(payload) != n_subtasks:
-        raise ValueError(f"actions file must contain exactly {n_subtasks} subtask action lists")
-    normalized = []
-    for index, item in enumerate(payload, 1):
-        if isinstance(item, dict):
-            item = item.get("actions")
-        if not isinstance(item, list):
-            raise ValueError(f"scripted subtask {index} actions must be a list")
-        normalized.append(item)
-    return normalized
 
 
 def load_example_planning(config: Dict[str, Any]) -> List[List[Any]]:
@@ -662,7 +398,7 @@ def load_example_planning(config: Dict[str, Any]) -> List[List[Any]]:
         if not isinstance(plans, list) or not plans:
             raise ValueError(
                 f"subtask {index} is missing non-empty example_planning; "
-                "add per-subtask example_planning or pass --actions-file"
+                "add per-subtask example_planning"
             )
         scripted.append(plans)
     return scripted
@@ -776,32 +512,6 @@ def install_video_step_callback(benchmark: Any, args: argparse.Namespace) -> Non
 
     benchmark.executor.step_callback = wrapped_step_callback
 
-
-def scripted_plans(
-    actions: Iterable[Any],
-    benchmark: Any,
-    h_limit: int,
-) -> Iterable[Dict[str, Any]]:
-    for local_step, raw_action in enumerate(actions, 1):
-        if local_step > h_limit:
-            benchmark.tracker.track_termination(
-                reason="exceeding_max_steps",
-                type="ScriptedPlanError",
-                msg=f"exceeding max steps {h_limit}",
-            )
-            return
-        plan = as_plan(raw_action)
-        global_step = len(benchmark.tracker.plans) + 1
-        benchmark.tracker.track_plan(
-            step=global_step,
-            plan=plan,
-            history_text=f"{global_step}. {plan['action'].upper()}",
-        )
-        yield plan
-        if plan["action"].strip().lower().startswith("done"):
-            return
-
-
 def plan_report_slice(plans: List[Dict[str, Any]], start: int, end: int) -> List[Dict[str, Any]]:
     return [
         {
@@ -814,49 +524,36 @@ def plan_report_slice(plans: List[Dict[str, Any]], start: int, end: int) -> List
     ]
 
 
-def preflight_scripted_inputs(args: argparse.Namespace) -> None:
-    if args.actions_file and args.use_example_planning:
-        raise ValueError("use either --actions-file or --use-example-planning, not both")
-    if not args.actions_file and not args.use_example_planning:
-        return
-
-    config = load_task_config(args.task)
-    if args.actions_file:
-        load_scripted_actions(args.actions_file, len(config["subtasks"]))
-    else:
-        load_example_planning(config)
-
-
 def _run(
     args: argparse.Namespace,
     *,
     benchmark_holder: list,
 ) -> Path:
-    if args.actions_file and args.use_example_planning:
-        raise ValueError("use either --actions-file or --use-example-planning, not both")
-    if args.model is None and args.actions_file is None and not args.use_example_planning:
-        raise ValueError("provide --model, --actions-file, or --use-example-planning")
+    if args.model is None and not args.use_example_planning:
+        raise ValueError("provide --model or --use-example-planning")
     if args.video_capture_interval < 1:
         raise ValueError("--video-capture-interval must be at least 1")
     if args.video_fps <= 0:
         raise ValueError("--video-fps must be greater than 0")
 
     runtime_config = args.runtime_config
-    configure_safe_memory_mode(args, runtime_config)
+
+    # Apply pre-build ablation settings based on CLI flags.
+    if not args.enable_scene_graph:
+        args.scene_graph_step_interval = 0
+        runtime_config.scene_graph.backend = "disabled"
+    if not args.enable_risk_predictor:
+        args.prompt_setting = "v1"
+
     config = load_task_config(args.task)
-    task_config_path = get_task_config_path(args.task)
     canonical_task_name = str(config.get("task_info", {}).get("task_name") or args.task)
     scene = args.scene or config["scene_info"]["default_scene_model"]
-    if _flag_present("--online-object-sampling", "--no-online-object-sampling"):
-        online_object_sampling_source = "cli"
-    elif runtime_config.task.online_object_sampling is not None:
-        online_object_sampling_source = "runtime_yaml.task.online_object_sampling"
-    else:
-        online_object_sampling_source = "task_json.scene_info.online_object_sampling"
+        
     if args.online_object_sampling is None:
         args.online_object_sampling = bool(
             config.get("scene_info", {}).get("online_object_sampling", False)
         )
+
     if not args.online_object_sampling:
         repository_root = Path(__file__).resolve().parents[2]
         sampled_scene = (
@@ -872,12 +569,12 @@ def _run(
                 f"sampled scene not found: {sampled_scene}; generate scenes or pass "
                 "--online-object-sampling"
             )
-    if args.actions_file:
-        planner_source = "actions_file"
-    elif args.use_example_planning:
+        
+    if args.use_example_planning:
         planner_source = "example_planning"
     else:
         planner_source = "model"
+
     model_tag = (args.model if planner_source == "model" else planner_source).replace("/", "__")
     work_dir = (
         timestamped_work_dir(args.work_dir, args.task, scene, args.run_purpose)
@@ -888,29 +585,16 @@ def _run(
         work_dir
         / "safe_memory_benchmark"
         / f"{args.task}___{scene}"
-        / args.memory_mode
         / model_tag
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     (work_dir / "benchmark").mkdir(parents=True, exist_ok=True)
-    if args.memory_mode == "with_memory":
+    if args.enable_scene_graph:
         runtime_config.scene_graph.output_dir = str(output_dir / "samjam_outputs")
         runtime_config.scene_graph.debug_log_path = str(
             output_dir / "samjam_outputs" / "scene_graph_debug.log"
         )
-    settings_path = write_safe_memory_settings(
-        work_dir,
-        task_spec=args.task,
-        scene=scene,
-        task_config_path=task_config_path,
-        task_config=config,
-        runtime_config=runtime_config,
-        config_path=args.config,
-        config_resolution=args.config_resolution,
-        online_object_sampling=args.online_object_sampling,
-        online_object_sampling_source=online_object_sampling_source,
-    )
-    print(f"safe-memory settings: {settings_path.resolve()}", flush=True)
+
     print(
         "safe-memory runtime config: "
         f"{Path(args.config).resolve()} "
@@ -928,9 +612,7 @@ def _run(
     print(f"run directory: {work_dir.resolve()}", flush=True)
     print(f"console log: {log_path.resolve()}", flush=True)
 
-    if args.actions_file:
-        scripted = load_scripted_actions(args.actions_file, len(config["subtasks"]))
-    elif args.use_example_planning:
+    if args.use_example_planning:
         scripted = load_example_planning(config)
     else:
         scripted = None
@@ -946,9 +628,10 @@ def _run(
         scene=scene,
         ego_view=not args.show_robot,
         draw_bbox_2d=args.draw_bbox_2d,
-        primitive_type=None if args.primitive_type == "auto" else args.primitive_type,
+        primitive_type=args.primitive_type,
         scene_graph_step_interval=args.scene_graph_step_interval,
         scene_graph_backend=runtime_config.scene_graph.backend,
+        enable_risk_predictor=args.enable_risk_predictor,
         use_initial_setup=args.use_initial_setup,
         use_self_caption=args.use_self_caption,
         online_object_sampling=args.online_object_sampling,
@@ -959,16 +642,7 @@ def _run(
         eval_execution=False,
         runtime_config=args.runtime_config,
     )
-    configure_benchmark_memory_mode(benchmark, args, runtime_config)
     benchmark_holder.append(benchmark)
-    replay_session, _restore_tracker = _attach_safe_replay(
-        benchmark,
-        output_dir,
-        task=args.task,
-        scene=scene,
-        memory_mode=args.memory_mode,
-        runtime_config=runtime_config,
-    )
     if scripted is not None and benchmark.primitive_type == "starter":
         scripted = expand_scripted_actions_for_starter(scripted)
     from og_ego_prim.scene_graph.observation_adapter import ISBenchObservationAdapter
@@ -980,13 +654,9 @@ def _run(
         benchmark.eval_task_config,
         eval_awareness=scripted is None and args.prompt_setting == "v2",
     )
-    evaluator = TracingEvaluatorProxy(
-        evaluator,
-        replay_session,
-        sim_step=lambda: benchmark.runtime_controller.step,
-    )
-    benchmark._replay_lifelong_evaluator = evaluator
+    benchmark._lifelong_evaluator = evaluator
     benchmark.tracker.runtime_modules["evaluator"] = type(evaluator).__name__
+
     install_video_step_callback(benchmark, args)
     agent = None
     if scripted is None:
@@ -1008,8 +678,7 @@ def _run(
             debug=args.debug,
             observation_dir=str(output_dir),
         )
-        agent.client = TracingModelClient(agent.client, replay_session)
-        if args.memory_mode == "with_memory":
+        if args.enable_risk_predictor:
             install_vlm_risk_provider(benchmark, agent.client)
         agent.set_tracker(benchmark.tracker)
         agent.set_runtime_controller(benchmark.runtime_controller)
@@ -1040,18 +709,6 @@ def _run(
         instruction = get_subtask_instruction(subtask)
         h_limit = int(subtask.get("H_limit", config["lifelong_config"]["H_per_task"]))
         action_start = len(benchmark.tracker.plans)
-        replay_session.set_subtask(index)
-        replay_session.emit(
-            "runtime",
-            "subtask_started",
-            {
-                "subtask_id": index,
-                "instruction": instruction,
-            },
-            status="started",
-            subtask_id=str(index),
-            sim_step=getattr(benchmark.executor, "global_step_index", None),
-        )
 
         if agent is not None:
             agent.begin_lifelong_subtask(
@@ -1082,14 +739,6 @@ def _run(
                     runtime_config.task.enable_loading_preflight
                 ),
             )
-            planner_adapter = TracingPlannerAdapter(
-                planner_adapter,
-                replay_session,
-                emit_proposals=True,
-                model_applicable=True,
-                subtask_id=lambda: benchmark.runtime_controller.active_subtask_id,
-                sim_step=lambda: benchmark.runtime_controller.step,
-            )
             benchmark.bind_planner_adapter(
                 planner_adapter,
                 source=type(agent).__name__,
@@ -1106,14 +755,6 @@ def _run(
                     for raw_action in scripted[index - 1][:h_limit]
                 ),
             )
-            planner_adapter = TracingPlannerAdapter(
-                planner_adapter,
-                replay_session,
-                emit_proposals=False,
-                model_applicable=False,
-                subtask_id=lambda: benchmark.runtime_controller.active_subtask_id,
-                sim_step=lambda: benchmark.runtime_controller.step,
-            )
             benchmark.bind_planner_adapter(
                 planner_adapter,
                 source="ScriptedPlanner",
@@ -1129,12 +770,7 @@ def _run(
         execution_failed = False
         blocked_reason = None
         for plan in plans:
-            execution_succeeded = replay_session.execute_plan(
-                benchmark,
-                plan,
-                subtask_id=str(index),
-                emit_executor_events=False,
-            )
+            execution_succeeded = benchmark.execute_plan(plan)
             retry_after_execution_failure = False
             if not execution_succeeded:
                 review = benchmark.runtime_controller.last_review
@@ -1204,18 +840,6 @@ def _run(
         result_dict = result.to_dict()
         result_dict["actions"] = plan_report_slice(benchmark.tracker.plans, action_start, action_end)
         subtask_reports.append(result_dict)
-        replay_session.emit(
-            "evaluator",
-            "subtask_finished",
-            {
-                "subtask_id": index,
-                "termination_reason": termination_reason,
-                "result": result,
-            },
-            status="completed" if result_dict.get("safe_success", True) else "failed",
-            subtask_id=str(index),
-            sim_step=getattr(benchmark.executor, "global_step_index", None),
-        )
 
     benchmark.tracker.finalize_latency()
     report = {
@@ -1223,19 +847,14 @@ def _run(
         "benchmark": "safe_memory_lifelong",
         "task": args.task,
         "scene": scene,
-        "settings_path": str(settings_path.resolve()),
         "runtime_config_path": str(Path(args.config).resolve()),
         "runtime_config_resolution": args.config_resolution,
         "model": args.model if planner_source == "model" else planner_source,
         "planner_source": planner_source,
         "primitive_type": benchmark.primitive_type,
-        "memory_mode": args.memory_mode,
         "runtime_ablation": {
-            "scene_graph_memory_enabled": args.memory_mode == "with_memory",
-            "scene_graph_construction_enabled": (
-                args.memory_mode == "with_memory"
-            ),
-            "risk_predictor_enabled": args.memory_mode == "with_memory",
+            "scene_graph_enabled": args.enable_scene_graph,
+            "risk_predictor_enabled": args.enable_risk_predictor,
             "use_initial_setup": args.use_initial_setup,
             "use_self_caption": args.use_self_caption,
             "prompt_setting": args.prompt_setting,
@@ -1318,14 +937,6 @@ def _run(
     report_path = output_dir / "report.json"
     with report_path.open("w", encoding="utf-8") as file:
         json.dump(report, file, indent=2, ensure_ascii=False)
-    _finish_safe_replay(
-        benchmark,
-        output_dir=output_dir,
-        report_path=report_path,
-        scene=scene,
-        runtime_config=runtime_config,
-        report=report,
-    )
     print(json.dumps(report["metrics"], indent=2), flush=True)
     print(f"safe-memory report: {report_path}", flush=True)
     return report_path
@@ -1337,25 +948,6 @@ def run(args: argparse.Namespace) -> Path:
         return _run(args, benchmark_holder=benchmarks)
     finally:
         for benchmark in reversed(benchmarks):
-            session = getattr(benchmark, "_replay_session", None)
-            runtime_config = getattr(args, "runtime_config", None)
-            if session is not None and not session.finalized and runtime_config is not None:
-                try:
-                    _finish_safe_replay(
-                        benchmark,
-                        output_dir=Path(session.output_dir),
-                        report_path=Path(session.output_dir) / "report.json",
-                        scene=str(getattr(benchmark, "scene_name", "unknown")),
-                        runtime_config=runtime_config,
-                        status="failed",
-                    )
-                except Exception as exc:
-                    print(
-                        "[safe-memory][replay-finalize] "
-                        f"{exc.__class__.__name__}: {exc}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
             try:
                 benchmark.close()
             except Exception as exc:
@@ -1369,16 +961,15 @@ def run(args: argparse.Namespace) -> Path:
 
 def main() -> None:
     args = build_parser().parse_args()
-    args, _runtime_config = apply_config(args)
-    if not args.task:
-        raise SystemExit("--task is required, or set task.name in the YAML config")
+    args, _runtime_config = _apply_config(args)
+
     if args.headless:
         os.environ["OMNIGIBSON_HEADLESS"] = "1"
+
     maybe_reexec_with_omnigibson_python()
     # Isaac Sim should not receive this benchmark CLI's arguments.
     sys.argv = [sys.argv[0]]
     try:
-        preflight_scripted_inputs(args)
         from og_ego_prim.utils.monkey_patch import add_monkey_patch
 
         add_monkey_patch()

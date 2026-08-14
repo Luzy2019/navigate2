@@ -25,9 +25,9 @@ artifacts:
   save_surrounding_observations: true
 
 safe_memory:
-  memory_modes:
-    - with_memory
-    - without_memory
+  # Default ablation profiles: (scene_graph, risk_predictor)
+  # When neither --disable-scene-graph nor --disable-risk-predictor is passed
+  # to the batch runner, it auto-generates both "full" and "baseline" profiles.
   timeout_seconds: 7200
   resume: false
   use_example_planning: false

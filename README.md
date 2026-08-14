@@ -144,9 +144,10 @@ bash entrypoints/eval_open.sh $MODEL_NAME_OR_PATH $SERVER_IP $DATA_PARALLEL
 ### Evaluate Safe Memory
 
 The lifelong safe-memory suite runs each three-instruction episode in one
-persistent OmniGibson environment. It evaluates paired `with_memory` and
-`without_memory` conditions and reports `SR_L`, `SSR_L`, episode safe success,
-and the paired memory gain.
+persistent OmniGibson environment. By default it evaluates paired ablation
+profiles — full (scene graph + risk predictor enabled) and baseline (both
+disabled) — and reports `SR_L`, `SSR_L`, episode safe success, and the paired
+ablation delta.
 
 ```bash
 bash entrypoints/eval_safe_memory.sh $MODEL_NAME 1

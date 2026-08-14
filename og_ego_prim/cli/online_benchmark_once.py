@@ -7,7 +7,6 @@ add_monkey_patch()
 
 import argparse
 import os
-from pathlib import Path
 import sys
 
 import omnigibson as og
@@ -18,17 +17,6 @@ import torch
 
 from og_ego_prim.benchmark import build_benchmark
 from og_ego_prim.config import RuntimeConfig, load_runtime_config_dict
-from og_ego_prim.events import CompositeEventSink
-from og_ego_prim.observability import (
-    ReplaySession,
-    TracingEvaluatorProxy,
-    TracingModelClient,
-    TracingPlannerAdapter,
-)
-from og_ego_prim.observability.media import (
-    ReplayMediaRecorder,
-    install_executor_trace,
-)
 from og_ego_prim.risk_predictor.utils import install_vlm_risk_provider
 from og_ego_prim.task_planner import (
     AgentPlanner,
@@ -37,8 +25,6 @@ from og_ego_prim.task_planner import (
 from og_ego_prim.utils.cli_parsing import parse_optional_bool
 from og_ego_prim.utils.constants import SCENES
 from og_ego_prim.utils.metric import track_planning_latency
-from og_ego_prim.utils.topdown_capture import save_topdown_assets
-from og_ego_prim.utils.topdown_trace_video import save_replay_topdown_video
 
 # Don't use GPU dynamics and use flatcache for performance boost
 gm.USE_GPU_DYNAMICS = True
@@ -110,268 +96,6 @@ parser.add_argument(
     ),
 )
 
-
-def _attach_replay_session(
-    benchmark,
-    output_dir: str,
-    *,
-    task: str,
-    scene: str,
-    runtime_config: RuntimeConfig,
-) -> tuple[ReplaySession, ReplayMediaRecorder | None]:
-    """Attach replay-only observers after the benchmark output directory exists."""
-
-    session = ReplaySession(
-        output_dir,
-        task_id=task,
-        runner="online_benchmark_once",
-        metadata={
-            "scene": scene,
-            "primitive_type": benchmark.primitive_type,
-            "headless": bool(getattr(runtime_config.runtime, "headless", True)),
-        },
-    )
-    controller = benchmark.runtime_controller
-    existing_sink = getattr(controller, "event_sink", None)
-    controller.event_sink = CompositeEventSink(
-        tuple(sink for sink in (session.event_sink, existing_sink) if sink is not None)
-    )
-    controller.components.event_sink = controller.event_sink
-    benchmark._replay_restore_executor = install_executor_trace(
-        benchmark.executor, session
-    )
-    evaluator = getattr(benchmark, "evaluator", None)
-    if evaluator is not None:
-        evaluator_proxy = TracingEvaluatorProxy(
-            evaluator,
-            session,
-            sim_step=lambda: controller.step,
-        )
-        benchmark.evaluator = evaluator_proxy
-        controller.components.evaluator = evaluator_proxy
-    session.emit(
-        "runtime",
-        "run_started",
-        {"task": task, "scene": scene, "runner": "online_benchmark_once"},
-        status="started",
-        sim_step=getattr(benchmark.executor, "global_step_index", 0),
-    )
-    media = None
-    robots = getattr(getattr(benchmark, "env", None), "robots", None) or ()
-    if robots:
-        media = ReplayMediaRecorder(
-            session,
-            robot=robots[0],
-            executor=benchmark.executor,
-            fps=float(runtime_config.artifacts.video_fps),
-            capture_interval=max(
-                int(runtime_config.artifacts.video_capture_interval), 1
-            ),
-            output_size=runtime_config.artifacts.output_size,
-        )
-        media.install()
-        benchmark._replay_restore_media = media.restore
-        media.capture(
-            global_step=getattr(benchmark.executor, "global_step_index", 0),
-            metadata={"phase": "initial"},
-        )
-    benchmark._replay_session = session
-    benchmark._replay_media = media
-    return session, media
-
-
-def _trace_planner_adapter(
-    adapter,
-    session: ReplaySession,
-    controller,
-    *,
-    model_applicable: bool,
-    controller_emits_proposals: bool,
-):
-    traced = TracingPlannerAdapter(
-        adapter,
-        session,
-        emit_proposals=not controller_emits_proposals,
-        model_applicable=model_applicable,
-        subtask_id=lambda: controller.active_subtask_id,
-        sim_step=lambda: controller.step,
-    )
-    return traced
-
-
-def _ensure_online_topdown_assets(
-    benchmark,
-    output_dir: str,
-    *,
-    runtime_config: RuntimeConfig,
-) -> dict:
-    cached = getattr(benchmark, "_online_topdown_assets", None)
-    if isinstance(cached, dict):
-        occupancy_metadata = cached.get("occupancy_metadata")
-        if occupancy_metadata and Path(occupancy_metadata).exists():
-            return cached
-
-    tracker = getattr(benchmark, "tracker", None)
-    snapshot = getattr(tracker, "latest_scene_graph", None)
-    if not isinstance(snapshot, dict):
-        snapshot = None
-    assets = save_topdown_assets(
-        benchmark.env,
-        Path(output_dir) / "topdown_assets",
-        world_bounds=getattr(runtime_config.artifacts, "topdown_world_bounds", None),
-        snapshot=snapshot,
-        execution_diagnostics=list(
-            getattr(tracker, "execution_diagnostics", None) or []
-        ),
-        output_size=(
-            runtime_config.artifacts.topdown_output_size or (1920, 1080)
-        ),
-    )
-    benchmark._online_topdown_assets = assets
-    return assets
-
-
-def _finish_replay(
-    benchmark,
-    *,
-    output_dir: str,
-    report_path: str,
-    runtime_config: RuntimeConfig,
-    status: str = "completed",
-) -> None:
-    session = getattr(benchmark, "_replay_session", None)
-    if session is None or session.finalized:
-        return
-    media = getattr(benchmark, "_replay_media", None)
-    media_info = {}
-    if media is not None:
-        try:
-            camera_info = media.save_camera(os.path.join(output_dir, "replay_camera.mp4"))
-            if camera_info is not None:
-                media_info["camera"] = camera_info
-                # Preserve the legacy online video when the benchmark tracker
-                # collected its surrounding-view frames.  Those frames have a
-                # different sampling contract from the continuous replay
-                # camera, so prefer the tracker artifact and only use a copy
-                # as a compatibility fallback when no legacy cache exists.
-                legacy_path = os.path.join(output_dir, "video.mp4")
-                if not os.path.exists(legacy_path):
-                    tracker = getattr(benchmark, "tracker", None)
-                    save_legacy_video = getattr(tracker, "save_video", None)
-                    video_cache = getattr(tracker, "video_cache", None)
-                    try:
-                        has_legacy_cache = video_cache is not None and len(video_cache) > 0
-                    except (TypeError, ValueError):
-                        has_legacy_cache = bool(video_cache)
-
-                    if callable(save_legacy_video) and has_legacy_cache:
-                        try:
-                            legacy_info = save_legacy_video(output_dir)
-                            if legacy_info is not None:
-                                legacy_info = dict(legacy_info)
-                                legacy_info["path"] = "video.mp4"
-                                legacy_info.setdefault("kind", "legacy_camera")
-                                legacy_info["abs_path"] = legacy_path
-                                media_info["legacy_camera"] = legacy_info
-                        except Exception as legacy_error:
-                            session.emit(
-                                "media",
-                                "legacy_camera_save_failed",
-                                {
-                                    "error": {
-                                        "type": type(legacy_error).__name__,
-                                        "message": str(legacy_error),
-                                    }
-                                },
-                                status="failed",
-                            )
-
-                    # Keep the legacy artifact name available even for runs
-                    # that did not collect surrounding-view frames.  This is
-                    # a file copy only; it never queries or steps the
-                    # simulator.  Never overwrite an explicit older artifact.
-                    if not os.path.exists(legacy_path):
-                        try:
-                            shutil.copyfile(
-                                os.path.join(output_dir, "replay_camera.mp4"),
-                                legacy_path,
-                            )
-                            legacy_info = dict(camera_info)
-                            legacy_info["path"] = "video.mp4"
-                            legacy_info["kind"] = "legacy_camera_fallback"
-                            legacy_info["abs_path"] = legacy_path
-                            media_info["legacy_camera"] = legacy_info
-                        except Exception as copy_error:
-                            session.emit(
-                                "media",
-                                "legacy_camera_copy_failed",
-                                {
-                                    "error": {
-                                        "type": type(copy_error).__name__,
-                                        "message": str(copy_error),
-                                    }
-                                },
-                                status="failed",
-                            )
-        except Exception as error:
-            session.emit(
-                "media",
-                "replay_camera_failed",
-                {"error": {"type": type(error).__name__, "message": str(error)}},
-                status="failed",
-            )
-        try:
-            topdown_assets = _ensure_online_topdown_assets(
-                benchmark,
-                output_dir,
-                runtime_config=runtime_config,
-            )
-            topdown_info = save_replay_topdown_video(
-                scene=benchmark.scene_name,
-                frame_records=session.frames,
-                output_dir=output_dir,
-                topdown_assets_dir=topdown_assets["asset_dir"],
-                output_size=(
-                    runtime_config.artifacts.topdown_output_size or (1920, 1080)
-                ),
-                fps=float(runtime_config.artifacts.video_fps),
-                output_name="replay_topdown.mp4",
-            )
-            if topdown_info is not None:
-                media_info["topdown"] = topdown_info
-        except Exception as error:
-            session.emit(
-                "media",
-                "replay_topdown_failed",
-                {"error": {"type": type(error).__name__, "message": str(error)}},
-                status="failed",
-            )
-    session.emit(
-        "evaluator",
-        "run_evaluated",
-        {
-            "termination": getattr(benchmark.tracker, "termination", None),
-            "goal_condition": getattr(benchmark.tracker, "goal_condition", None),
-        },
-        status="completed" if status == "completed" else status,
-    )
-    for attribute in ("_replay_restore_media", "_replay_restore_executor"):
-        restore = getattr(benchmark, attribute, None)
-        if callable(restore):
-            try:
-                restore()
-            except Exception as error:
-                session._note_recording_error("replay_restore", error)
-    session.finalize(
-        media=media_info,
-        report_path=report_path,
-        status=status,
-        extra={
-            "task": benchmark.task_name,
-            "scene": benchmark.scene_name,
-            "metrics": getattr(benchmark.tracker, "goal_condition", None),
-        },
-    )
 
 # 格式化输出 output_dir
 def _allocate_output_dir(
@@ -501,14 +225,6 @@ def _online_benchmark_once(
     output_dir = _allocate_output_dir(work_dir, benchmark_tag, model_tag, try_id)
     os.makedirs(output_dir, exist_ok=True)
 
-    replay_session, replay_media = _attach_replay_session(
-        benchmark,
-        output_dir,
-        task=task,
-        scene=scene,
-        runtime_config=runtime_config,
-    )
-
     def finish_run():
         if keep_open_after_done:
             print('[keep_open_after_done] Viewer is open. Press Ctrl+C in this terminal to exit.')
@@ -537,14 +253,6 @@ def _online_benchmark_once(
             shutil.copyfile(sampled_scene_file, normal_scene_file)
             sample_report_path = os.path.join(output_dir, 'report_sample_only.json')
             benchmark.tracker.save_tracking(sample_report_path)
-            # os._exit below bypasses the outer finally block, so persist the
-            # replay manifest and media before taking that intentional exit.
-            _finish_replay(
-                benchmark,
-                output_dir=output_dir,
-                report_path=sample_report_path,
-                runtime_config=runtime_config,
-            )
             print(f'[sample_only] saved sampled task scene to {normal_scene_file}', flush=True)
             if not keep_open_after_done:
                 benchmark.close()
@@ -571,7 +279,6 @@ def _online_benchmark_once(
             use_self_caption=use_self_caption,
             observation_dir=output_dir,
         )
-        agent.client = TracingModelClient(agent.client, replay_session)
         if not benchmark.scene_graph_updater.disabled:
             install_vlm_risk_provider(benchmark, agent.client)
         agent.set_tracker(benchmark.tracker)
@@ -590,27 +297,16 @@ def _online_benchmark_once(
                 runtime_config.task.enable_loading_preflight
             ),
         )
-        planner_adapter = _trace_planner_adapter(
+        benchmark.bind_planner_adapter(
             base_planner_adapter,
-            replay_session,
-            benchmark.runtime_controller,
-            model_applicable=True,
-            controller_emits_proposals=False,
+            source=type(agent).__name__,
         )
-        benchmark.bind_planner_adapter(planner_adapter, source=type(agent).__name__)
     else:
         base_planner_adapter = create_planner_adapter(
             'example', tuple(dict(plan) for plan in benchmark._example_planning)
         )
-        planner_adapter = _trace_planner_adapter(
-            base_planner_adapter,
-            replay_session,
-            benchmark.runtime_controller,
-            model_applicable=False,
-            controller_emits_proposals=True,
-        )
         benchmark.bind_planner_adapter(
-            planner_adapter,
+            base_planner_adapter,
             source='ExamplePlanner',
             emit_proposals=True,
         )
@@ -637,34 +333,14 @@ def _online_benchmark_once(
         )
     if not (eval_process_safety or eval_termination_safety or eval_execution):
         benchmark.tracker.save_tracking(os.path.join(output_dir, 'report_awareness.json'))
-        _finish_replay(
-            benchmark,
-            output_dir=output_dir,
-            report_path=os.path.join(output_dir, "report_awareness.json"),
-            runtime_config=runtime_config,
-        )
         finish_run()
         return
 
-    for i, plan in enumerate(planner):
-        execution_ok = replay_session.execute_plan(
-            benchmark,
-            plan,
-            emit_executor_events=False,
-        )
+    for plan in planner:
+        execution_ok = benchmark.execute_plan(plan)
         action_text = (
             plan.to_legacy_plan() if hasattr(plan, 'to_legacy_plan') else plan['action']
         )
-        if replay_media is not None:
-            replay_media.capture(
-                global_step=getattr(benchmark.executor, "global_step_index", None),
-                action=action_text,
-                metadata={
-                    "phase": "after_action",
-                    "plan_index": i + 1,
-                    "execution_ok": bool(execution_ok),
-                },
-            )
         if execution_ok is False:
             review = benchmark.runtime_controller.last_review
             outcome = benchmark.runtime_controller.last_outcome
@@ -688,22 +364,7 @@ def _online_benchmark_once(
             benchmark.get_surrounding_viewer_obs(save_img=os.path.join(output_dir, step_tag))
 
     benchmark.termination_evaluation()
-    replay_session.emit(
-        "evaluator",
-        "termination_evaluated",
-        {
-            "termination": benchmark.tracker.termination,
-            "goal_condition": benchmark.tracker.goal_condition,
-        },
-        sim_step=getattr(benchmark.executor, "global_step_index", None),
-    )
     benchmark.tracker.save_tracking(os.path.join(output_dir, 'report.json'))
-    _finish_replay(
-        benchmark,
-        output_dir=output_dir,
-        report_path=os.path.join(output_dir, "report.json"),
-        runtime_config=runtime_config,
-    )
     
     if online_object_sampling:
         if benchmark.tracker.termination['reason'] == 'done' and benchmark.tracker.goal_condition['execution_goal_condition']['eval']: 
@@ -725,39 +386,15 @@ def online_benchmark_once(*args, **kwargs):
         )
     finally:
         for benchmark in reversed(benchmarks):
-            replay_session = getattr(benchmark, "_replay_session", None)
             try:
-                if replay_session is not None and not replay_session.finalized:
-                    _finish_replay(
-                        benchmark,
-                        output_dir=str(replay_session.output_dir),
-                        report_path=str(replay_session.output_dir / "report.json"),
-                        runtime_config=getattr(
-                            benchmark,
-                            "runtime_config",
-                            RuntimeConfig.defaults(),
-                        ),
-                        status="failed",
-                    )
+                benchmark.close()
             except Exception as exc:
                 print(
-                    "[online-benchmark][replay-finalize] "
+                    "[online-benchmark][close] "
                     f"{exc.__class__.__name__}: {exc}",
                     file=sys.stderr,
                     flush=True,
                 )
-            finally:
-                # Replay I/O is best-effort.  Always release the simulator
-                # benchmark even if media/manifest finalization fails.
-                try:
-                    benchmark.close()
-                except Exception as exc:
-                    print(
-                        "[online-benchmark][close] "
-                        f"{exc.__class__.__name__}: {exc}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
 
 
 if __name__ == "__main__":

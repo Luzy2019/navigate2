@@ -12,6 +12,7 @@ import bddl
 import numpy as np
 from bddl.config import get_definition_filename as get_bddl_definition_filename
 from numpy.typing import ArrayLike as NumpyArrayLike
+from og_ego_prim.benchmark.custom_behavior_task import CustomBehaviorTask
 import omnigibson as og
 from omnigibson import object_states
 from omnigibson.tasks import BehaviorTask
@@ -70,7 +71,6 @@ class OnlineBenchmark(Benchmark):
     env: og.Environment
     ego_view: bool
     draw_bbox_2d: bool
-    surrounding_poses: List[PoseCoord]
 
     executor: Executor
     evaluator: Evaluator
@@ -88,6 +88,7 @@ class OnlineBenchmark(Benchmark):
         primitive_type: PrimitiveType,
         scene_graph_step_interval: int,
         scene_graph_backend: str,
+        enable_risk_predictor: bool,
         use_initial_setup: bool,
         use_self_caption: bool,
         eval_process_safety: bool,
@@ -118,22 +119,12 @@ class OnlineBenchmark(Benchmark):
         self.scene_graph_step_interval = scene_graph_step_interval
         self.use_initial_setup = use_initial_setup
         self.use_self_caption = use_self_caption
+        self._enable_risk_predictor = enable_risk_predictor
             
         camera_config = os.path.join(CAMERAS, 'camera.json')
         with open(camera_config, 'r') as f:
             camera_config = json.load(f)
         room = config['scene_info']['room']
-
-        self.surrounding_poses = None
-        if camera_config.get(f'{room}__{scene}', None):
-            camera_config = camera_config[f'{room}__{scene}']
-            
-            self.surrounding_poses = []
-            for pose_dict in camera_config:
-                self.surrounding_poses.append(
-                    (torch.tensor(pose_dict['pos']), torch.tensor(pose_dict['quat']))
-                )
-        self._add_task_specific_surrounding_poses()
 
         self.tracker = OnlineEvalTracker(
             scene_graph_history_interval=self.runtime_config.scene_graph.history_interval,
@@ -273,11 +264,13 @@ class OnlineBenchmark(Benchmark):
             state_adapter=ContextTemporalStateAdapter(),
         )
         prompt_builder = create_prompt_builder(self.runtime_config.prompting)
-        risk_config = self.runtime_config.risk.to_dict()
-        risk_predictor = create_risk_predictor(
-            risk_config,
-            task=definition.runtime,
-        )
+        risk_predictor = None
+        if self._enable_risk_predictor:
+            risk_config = self.runtime_config.risk.to_dict()
+            risk_predictor = create_risk_predictor(
+                risk_config,
+                task=definition.runtime,
+            )
         components = RuntimeComponents(
             perception=self.scene_graph_updater,
             objects=objects,
@@ -306,8 +299,8 @@ class OnlineBenchmark(Benchmark):
             'objects': type(objects).__name__,
             'object_lifecycle_policy': type(objects.lifecycle_policy).__name__,
             'scheduler': type(scheduler).__name__,
-            'risk_predictor': type(risk_predictor).__name__,
-            'risk_provider': type(risk_predictor.provider).__name__,
+            'risk_predictor': type(risk_predictor).__name__ if risk_predictor is not None else None,
+            'risk_provider': type(risk_predictor.provider).__name__ if risk_predictor is not None else None,
             'prompt_builder': type(prompt_builder).__name__,
             'executor': type(self.executor).__name__,
             'event_sink': type(components.event_sink).__name__,
@@ -329,13 +322,20 @@ class OnlineBenchmark(Benchmark):
                 self.runtime_config.scheduler.expose_cross_subtask_timers
             ),
         }
-        self.tracker.risk_predictor = {
-            'type': type(risk_predictor).__name__,
-            'provider': type(risk_predictor.provider).__name__,
-            'task_json_rule_count': len(
-                getattr(getattr(risk_predictor.provider, 'catalog', None), 'rules', ())
-            ),
-        }
+        if risk_predictor is not None:
+            self.tracker.risk_predictor = {
+                'type': type(risk_predictor).__name__,
+                'provider': type(risk_predictor.provider).__name__,
+                'task_json_rule_count': len(
+                    getattr(getattr(risk_predictor.provider, 'catalog', None), 'rules', ())
+                ),
+            }
+        else:
+            self.tracker.risk_predictor = {
+                'type': None,
+                'provider': None,
+                'task_json_rule_count': 0,
+            }
 
     def _has_pending_heating_process(self, target_obj: Any) -> bool:
         """Return whether the scheduler already owns this object's heating wait."""
@@ -1109,40 +1109,6 @@ class OnlineBenchmark(Benchmark):
 
         return find_task_related_object(self.env, object_name)
 
-    def _add_task_specific_surrounding_poses(self):
-        # 为少数任务补充额外的固定环视相机位姿。
-        # 这些位姿会和 data/cameras/camera.json 中的通用相机位姿一起使用，
-        # 用于保存多视角 observation，方便 planner、视频和调试报告查看场景。
-        extra_poses = {
-            ('store_apple_and_tissue_box_in_bottom_cabinet', 'Wainscott_0_int'): [
-                {
-                    'pos': [5.15, 8.95, 1.55],
-                    'quat': [
-                        0.6360543966293335,
-                        0.0,
-                        0.0,
-                        0.7716442346572876,
-                    ],
-                },
-            ],
-        }.get((self.task_name, self.scene_name), [])
-
-        # 当前任务没有专门补充的相机位姿时，直接沿用通用配置。
-        if not extra_poses:
-            return
-        if self.surrounding_poses is None:
-            self.surrounding_poses = []
-
-        # OnlineBenchmark 内部统一使用 (position_tensor, quaternion_tensor) 表示相机位姿。
-        # pos表示相机位置，quat表示相机四元数朝向。
-        for pose_dict in extra_poses:
-            self.surrounding_poses.append(
-                (
-                    torch.tensor(pose_dict['pos'], dtype=torch.float32),
-                    torch.tensor(pose_dict['quat'], dtype=torch.float32),
-                )
-            )
-
     def get_example_planning(self) -> Generator[str, None, None]:
         for i, plan in enumerate(self._example_planning):
             self.tracker.track_plan(step=i, plan=plan)
@@ -1319,6 +1285,7 @@ class OnlineBenchmark(Benchmark):
 
         if execution_succeeded:
             self.evaluator.record_action(evaluation_plan["action"])
+            self._record_lifelong_action(evaluation_plan["action"])
             self._evaluate_lifelong_process_safety(evaluation_plan, "after")
             self.evaluator.evaluate_process_safety_goal_condition(evaluation_plan, 'after')
         if self.primitive_type == "starter" and execution_succeeded:
@@ -1327,6 +1294,16 @@ class OnlineBenchmark(Benchmark):
             self._refresh_scene_graph(raw_plan=execution_plan['action'])
         return execution_succeeded
 
+    def _record_lifelong_action(self, action: str) -> None:
+        """Record one successfully executed action for lifelong termination gating."""
+
+        evaluator = getattr(self, "_lifelong_evaluator", None)
+        if evaluator is None:
+            return
+        record = getattr(evaluator, "record_action", None)
+        if callable(record):
+            record(action)
+
     def _evaluate_lifelong_process_safety(
         self,
         plan: StepwisePlan,
@@ -1334,7 +1311,7 @@ class OnlineBenchmark(Benchmark):
     ) -> None:
         """Record lifelong ``G_safe`` checkpoints without affecting execution."""
 
-        evaluator = getattr(self, "_replay_lifelong_evaluator", None)
+        evaluator = getattr(self, "_lifelong_evaluator", None)
         if evaluator is None:
             return
         callback = getattr(
@@ -1474,34 +1451,6 @@ class OnlineBenchmark(Benchmark):
 
         return obs
 
-    def get_surrounding_viewer_obs(
-        self, save_img: Optional[str] = None
-    ) -> Optional[List[NumpyArrayLike]]:
-        if self.surrounding_poses is None:
-            return None
-
-        passive_start_state = self.executor.snapshot_passive_motion_state()
-
-        if save_img is not None:
-            if not os.path.exists(save_img):
-                os.makedirs(save_img)
-            elif not os.path.isdir(save_img):
-                raise ValueError(f'surrounding_obs must be saved in a directory')
-            
-        surrounding_obs = []
-        for i, pose in enumerate(self.surrounding_poses):
-            save_img_i = None if save_img is None else os.path.join(save_img, f'obs_{i}.png')
-            obs_i = self.get_viewer_obs(pose, save_img_i)
-            surrounding_obs.append(obs_i)
-        video_label = None if save_img is None else os.path.basename(save_img)
-        self.tracker.track_video_observations(surrounding_obs, label=video_label)
-        self.executor.log_passive_motion_diagnostic(
-            phase=f"surrounding_view_capture:{video_label or 'unsaved'}",
-            start_state=passive_start_state,
-            simulation_steps=len(self.surrounding_poses) * 5,
-        )
-        return surrounding_obs
-
 
 class OnlineBehaviorBenchmark(OnlineBenchmark):
     
@@ -1513,13 +1462,12 @@ class OnlineBehaviorBenchmark(OnlineBenchmark):
         task_info = config['task_info']
         scene_info = config['scene_info']                
         
-        # task customization
+        # Get Task BDDL Definition
         task_name = task_info['task_name']
         assert task_name in BEHAVIOR_ACTIVITIES or task_name in CUSTOMIZED_BEHAVIOR_ACTIVITIES
         if task_name not in BEHAVIOR_ACTIVITIES:
             og.tasks.behavior_task.BEHAVIOR_ACTIVITIES.append(task_name)
             bddl.parsing.get_definition_filename = get_customized_definition_filename
-
         definition_path = (
             get_customized_definition_filename(
                 task_name,
@@ -1532,10 +1480,10 @@ class OnlineBehaviorBenchmark(OnlineBenchmark):
             )
         )
         with open(definition_path, 'r', encoding='utf-8') as file:
-            problem_text = file.read()
-        execution_goal = config['evaluation_goal_conditions'][
-            'execution_goal_condition'
-        ]
+            problem_text = file.read() # BDDL Definition
+
+        # 将json文件中的execution_goal_condition 动态替换 BDDL Definition (:goal
+        execution_goal = config['evaluation_goal_conditions']['execution_goal_condition']
         predefined_problem = (
             inject_execution_goal_into_bddl_problem(
                 problem_text,
@@ -1545,16 +1493,20 @@ class OnlineBehaviorBenchmark(OnlineBenchmark):
             else problem_text
         )
 
-        task_type = task_info['task_type'] if not scene_info['online_object_sampling'] \
-            else 'CustomBehaviorTask'
+        if scene_info['online_object_sampling']:
+            task_type = 'CustomBehaviorTask'
+        else:
+            task_type = task_info['task_type'] # default: BehaviorTask
         print(f'Using task type: {task_type}')
 
         env_config['task'] = {
-            'type': task_type,
+            'type': task_type, # BehaviorTask / CustomBehaviorTask
             'activity_name': task_name,
-            'activity_definition_id':  task_info['activity_definition_id'],
-            'activity_instance_id':  task_info['activity_instance_id'],
+            'activity_definition_id':  task_info['activity_definition_id'], # 0
+            'activity_instance_id':  task_info['activity_instance_id'], # 0
+            # bddl definition with manual execution_goal_condition
             'predefined_problem': predefined_problem,
+            # online_object_sampling: True / False
             'online_object_sampling': scene_info['online_object_sampling'],
         }
         required_models = scene_info.get('scene_asset_requirements', {}).get(
@@ -1572,9 +1524,9 @@ class OnlineBehaviorBenchmark(OnlineBenchmark):
         assert scene in scene_info['scene_models'], f'task "{task}" is not supported in scene "{scene}"'
 
         env_config['scene'].update({
-            'scene_model': scene,
-            'load_task_relevant_only': True if self.debug else False,
-            'not_load_object_categories': ['ceilings', 'roof']
+            'scene_model': scene, # Beechwood_0_int
+            'load_task_relevant_only': True if self.debug else False, # 控制是否只加载任务相关物体，还是加载场景中的全部物体。
+            'not_load_object_categories': ['ceilings', 'roof'] # 无论是否调试模式，始终不加载 ceilings（天花板）和 roof（屋顶）这两个类别。
         })
 
         # scene customization

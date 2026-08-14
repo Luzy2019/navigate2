@@ -118,18 +118,38 @@ def get_subtask_goal(subtask: Dict[str, Any], kind: str) -> Optional[str]:
     return normalize_goal(value)
 
 
-def split_safe_goal(goal: Any) -> Tuple[Optional[str], List[Dict[str, Any]]]:
-    """Split one ``G_safe`` value into terminal and action-checkpoint goals.
+def split_safe_goal(
+    goal: Any,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split one ``G_safe`` value into terminal and process goals.
 
-    A flat safety object with both ``action`` and ``type`` is a process
-    condition.  Plain BDDL strings, and safety objects without an action,
-    are terminal conditions evaluated when the subtask ends.
+    Mirrors the single-task evaluator layout: every terminal condition keeps
+    its own ``action`` gate — ``None`` evaluates always, ``"completion"``
+    only when the execution goal passed, and any other action only when that
+    action executed.  A safety object with both ``action`` and ``type`` is a
+    process condition (checked before/after the matching action execution).
+
+    Returns ``(terminal_conditions, process_conditions)``.
 
     Example::
 
-        >>> # Terminal-only: plain BDDL string
-        >>> split_safe_goal("(not (covered rag.n.01_1 water.n.01_1))")
-        ('(:goal (and (not (covered rag.n.01_1 water.n.01_1))))', [])
+        >>> # Terminal-only: plain BDDL string, unconditional
+        >>> terminal, process = split_safe_goal(
+        ...     "(not (covered rag.n.01_1 water.n.01_1))"
+        ... )
+        >>> terminal[0]["action"] is None
+        True
+        >>> process
+        []
+
+        >>> # Gated terminal condition: has action but no type
+        >>> goal = [{
+        ...     "action": "DUMP_INTO(compost_bin.n.01_1)",
+        ...     "safety_bddl": "(not (inside spoon.n.01_1 compost_bin.n.01_1))",
+        ... }]
+        >>> terminal, process = split_safe_goal(goal)
+        >>> terminal[0]["action"]
+        'DUMP_INTO(compost_bin.n.01_1)'
 
         >>> # Process condition: has both action and type
         >>> goal = [{
@@ -138,19 +158,21 @@ def split_safe_goal(goal: Any) -> Tuple[Optional[str], List[Dict[str, Any]]]:
         ...     "safety_bddl": "(not (covered countertop.n.01_1 water.n.01_1))",
         ... }]
         >>> terminal, process = split_safe_goal(goal)
-        >>> terminal is None  # all items are process conditions
-        True
+        >>> terminal
+        []
         >>> process[0]["type"]
         'after'
     """
     if goal is None or goal == [] or goal == "":
-        return None, []
+        return [], []
     values = [goal] if isinstance(goal, (str, Mapping)) else list(goal)
-    terminal: List[Any] = []
+    terminal: List[Dict[str, Any]] = []
     process: List[Dict[str, Any]] = []
     for item in values:
         if not isinstance(item, Mapping):
-            terminal.append(item)
+            terminal.append(
+                {"action": None, "safety_bddl": normalize_goal(item)}
+            )
             continue
         condition = dict(item)
         if condition.get("action") and condition.get("type"):
@@ -159,5 +181,12 @@ def split_safe_goal(goal: Any) -> Tuple[Optional[str], List[Dict[str, Any]]]:
             condition["safety_bddl"] = normalize_goal(condition["safety_bddl"])
             process.append(condition)
         else:
+            raw_action = condition.get("action")
+            condition["action"] = (
+                None if raw_action is None else str(raw_action).strip()
+            )
+            condition["safety_bddl"] = normalize_goal(
+                condition.get("safety_bddl")
+            )
             terminal.append(condition)
-    return normalize_goal(terminal), process
+    return terminal, process
