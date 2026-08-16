@@ -23,13 +23,23 @@ _BDDL_ENTITY_TOKEN = re.compile(
 
 
 def parse_json_code_block(output: str) -> Optional[Dict[str, Any]]:
-    """Return the first JSON object fenced as ``json`` in a model response."""
+    """Return the first JSON object fenced as ``json`` in a model response.
+
+    When no fence is present, fall back to parsing the whole response as a bare
+    JSON object.  Models occasionally omit the ``json`` fence; without this
+    fallback the planner would retry the same proposal unnecessarily.
+    """
 
     match = _JSON_CODE_BLOCK.search(output or "")
-    if match is None:
-        return None
+    if match is not None:
+        try:
+            payload = json.loads(match.group(1).strip())
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            return payload
     try:
-        payload = json.loads(match.group(1).strip())
+        payload = json.loads(str(output or "").strip())
     except (TypeError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None

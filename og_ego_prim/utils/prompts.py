@@ -20,8 +20,8 @@ _PLACEMENT_RELATION_RULES = """Placement relation selection is semantic and mand
   contents on a floor or other support surface, use PLACE_ON_TOP(B): DUMP_INTO
   would remove the contents and is not a placement of the source container.
 - For example, "carry the loaded carton to the corridor floor and leave its
-  contents inside" requires PLACE_ON_TOP(floor.n.01_1), not
-  DUMP_INTO(floor.n.01_1). Use DUMP_INTO(compost_bin.n.01_1) only when the task
+  contents inside" requires PLACE_ON_TOP(floor), not
+  DUMP_INTO(floor). Use DUMP_INTO(compost_bin) when the task
   explicitly requires emptying the carton into that disposal container.
 - Do not infer a placement relation from B's category. A hamper, bin, carton,
   cabinet, or washer is not a surface merely because it is a named object.
@@ -150,6 +150,8 @@ def build_starter_step_prompt(
     scene_description=None,
     awareness=None,
     safety_tips=None,
+    placement_constraints=None,
+    floor_room_map=None,
 ):
     """Build a concise prompt for OmniGibson's physical starter primitives."""
     if prompt_setting == "default":
@@ -189,6 +191,22 @@ def build_starter_step_prompt(
     if scene_description:
         scene_section = f"\nScene description:\n{scene_description}\n"
 
+    floor_map_section = ""
+    if floor_room_map:
+        floor_map_section = (
+            "\nFloor-to-room mapping (authoritative, from the task definition):\n"
+            f"{floor_room_map}\n"
+            "Use this to choose the correct floor entity for navigation and staging.\n"
+        )
+
+    placement_section = ""
+    if placement_constraints:
+        placement_section = (
+            "\nTask placement constraints (mandatory, override the generic "
+            "placement rules above):\n"
+            f"{placement_constraints}\n"
+        )
+
     task_specific_sequence_prompt = build_task_specific_sequence_prompt(task_instruction)
 
     return f"""
@@ -211,12 +229,13 @@ Task goals:
 Washing rules:
 {wash_rules_str}
 {scene_section}
+{floor_map_section}
 Available actions:
 - GRASP(object): physically navigate, reach, and grasp the object. The gripper must be empty.
 - PLACE_ON_TOP(destination): physically place the currently grasped object on the destination.
 - PLACE_INSIDE(container): physically place the currently grasped object inside the container.
 - POUR_INTO(destination): pour from the currently grasped filled container into the destination.
-- DUMP_INTO(destination): empty all rigid contents of the currently grasped container into the destination in one action. The source container remains grasped.
+- DUMP_INTO(destination): empty all rigid contents of the currently grasped container into the destination in one action. The source container remains grasped. This means: clean out the held container by moving everything currently inside it into the destination. For example, if you are holding the carton, DUMP_INTO(compost_bin) empties the carton's contents (rag, peach, etc.) into the compost_bin. Never DUMP_INTO the container you are holding (DUMP_INTO(carton) is invalid), and never DUMP_INTO a floor or support surface.
 - OPEN(object): physically open an object. The gripper must be empty.
 - CLOSE(object): physically close an object. The gripper must be empty.
 - NAVIGATE_TO(object): navigate near an object.
@@ -230,6 +249,13 @@ Available actions:
 - WIPE(target): wipe the target object and remove particles covering it. If holding a cleaning tool, the tool is used implicitly.
 - DONE(): finish the task.
 
+IMPORTANT - TARGET RESTRICTIONS (hard constraints, do not violate):
+- Room or area names (e.g. kitchen_0, living_room_0, corridor_0) are context, never action targets. NEVER pass a room name to any action, including NAVIGATE_TO.
+- The robot itself (agent.n.01_1) is never an action target.
+- Floor or support-surface entities (e.g. floor.n.01_1) are valid ONLY as the destination of NAVIGATE_TO (approach the spot) and as the destination of PLACE_ON_TOP (stage an object there). They are NEVER valid as the target of GRASP, OPEN, CLOSE, TOGGLE_ON, TOGGLE_OFF, WIPE, PLACE_INSIDE, POUR_INTO, or DUMP_INTO.
+- Therefore, never produce GRASP(floor.n.01_1), OPEN(floor.n.01_1), PLACE_INSIDE(floor.n.01_1), or DUMP_INTO(floor.n.01_1). Stage objects with PLACE_ON_TOP(floor.n.01_1) and navigate with NAVIGATE_TO(floor.n.01_1) when the task calls for a floor staging area.
+- Every other action argument must be a movable or manipulable object from the Task-related objects list.
+
 Physical-action rules:
 - The executed-action history contains only actions that succeeded. Never assume an action happened unless it appears there or is confirmed by the current state.
 - After required empty-gripper access preparation is complete, propose GRASP directly. The runtime expands it into NAVIGATE_TO(target) followed by GRASP(target), and preserves GRASP as the intended operation after navigation succeeds.
@@ -237,7 +263,7 @@ Physical-action rules:
 - Before PLACE_ON_TOP or PLACE_INSIDE, the object to move must already be grasped.
 - PLACE_ON_TOP and PLACE_INSIDE take only the destination as their single argument.
 - POUR_INTO takes only the fill destination as its single argument; the currently grasped container is the source.
-- DUMP_INTO takes only the destination as its single argument; the currently grasped container is the source. The destination must be a real container or receptacle, never a floor or support surface.
+- DUMP_INTO takes only the destination as its single argument; the currently grasped container is the source. The destination must be a real container or receptacle, never a floor or support surface. The destination must NOT be the container you are currently holding (DUMP_INTO(carton) while holding the carton is invalid). Before DUMP_INTO, check the task instruction to determine whether anything inside the held container must not be thrown away; if a task-required or reusable item is inside, recover it first (GRASP it out and place it somewhere safe), then dump the remaining contents.
 - Propose PLACE_ON_TOP, PLACE_INSIDE, POUR_INTO, or DUMP_INTO directly. The runtime inserts NAVIGATE_TO(destination) when needed and then executes the preserved operation.
 - Use NAVIGATE_TO explicitly before OPEN, CLOSE, TOGGLE_ON, TOGGLE_OFF, or WIPE when its target is not currently near and reachable or is absent from the current observation.
 - Open an openable DUMP_INTO destination before grasping the source container. After DUMP_INTO, place or release the still-grasped empty source container.
@@ -247,6 +273,7 @@ Physical-action rules:
 - Open an openable destination before GRASPing the object that will be placed inside it.
 - After placement the gripper is empty.
 - Before WIPE, navigate to the target. For sink cleaning, toggle the sink on, toggle it off, then WIPE the sink.
+- Follow the TARGET RESTRICTIONS above: rooms and the robot are never targets; floor/support entities are valid only for NAVIGATE_TO and PLACE_ON_TOP.
 - Prefer exact object names from the task-related object list. If visually
   indistinguishable same-category instances cannot be identified, their shared
   generic category is allowed and will be grounded by the runtime.
@@ -254,7 +281,7 @@ Physical-action rules:
 - Set caution to null when no caution is needed.
 
 {safety_instruction}
-
+{placement_section}
 Previous actions:
 {history_actions}
 

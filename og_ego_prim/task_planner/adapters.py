@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from typing import (
     Any,
     Callable,
@@ -90,6 +91,16 @@ timer is evidence that the object has not cooled yet; placing it aside does not
 remove the heat risk and is not an alternative mitigation. Use no WAIT_* action
 unless a matching active process appears in pending_timers; WAIT_FOR_COOL is not
 an available action.
+INPUT.action_history lists the executed, successful actions in order. Use it to
+know where objects currently are and what has already happened. In particular,
+when the held object was most recently placed somewhere in action_history, that
+is the place it must go back to: if you must set the held object down, choose
+PLACE_ON_TOP or PLACE_INSIDE with that exact destination from action_history,
+never a different, far-away surface. "Most recently placed" means the last time
+the held object was placed in the executed history, regardless of spatial
+distance. When action_history contains no placement of the held object, use only
+a surface in the robot's immediate vicinity and never a far-away surface from a
+different room.
 The goal field must briefly name the blocked risk being removed, not copy the task
 or goal_description. Return
 {"status":"SAFETY_PLAN","goal":"goal","steps":["atomic action"]}."""
@@ -102,6 +113,14 @@ operation, argument, or fallback surface. For unary held-object placement, pour,
 or dump operations, the sole argument is the destination. Return one JSON object
 with status ACTION and action set to that exact operation. Never return placeholder
 text such as "atomic action".
+INPUT.action_history lists the executed, successful actions in order. When you
+must set the held object down (for example to free the gripper before an OPEN or
+CLOSE), place it back where it was most recently placed in action_history: use
+PLACE_ON_TOP or PLACE_INSIDE with that exact destination, never a different,
+far-away surface. "Most recently placed" means the last time the held object was
+placed in the executed history, regardless of spatial distance. When
+action_history contains no placement of the held object, use only a surface in
+the robot's immediate vicinity and never a far-away surface from a different room.
 Placement relations for ACTION or LOADING_PLAN operations are semantic: when the
 held object goes inside, in, into, within, or is contained by a container, use
 PLACE_INSIDE(container), with the destination as the sole argument. A phrase
@@ -111,7 +130,13 @@ Use PLACE_ON_TOP only for an explicit on, onto, on-top-of, rim, lid, or
 surface-support relation, or a formal ontop goal. This rule does not define
 TASK_RISK_PREFLIGHT fields: ordered_objects must contain only movable source
 entities, and must never contain the destination, a category name, or an
-observation-layer ID."""
+observation-layer ID.
+When intended_operation is OPEN or CLOSE but held_object is not null, the
+operation is NOT executable while the gripper is occupied. Do not return the
+OPEN or CLOSE itself. Instead return PLACE_ON_TOP(<a nearby support surface>)
+(or PLACE_INSIDE(<a nearby container>) when the held object belongs inside one)
+to free the gripper first; the runtime will re-issue the OPEN or CLOSE after
+the held object is set down. Never OPEN or CLOSE while holding an object."""
 
 
 @runtime_checkable
@@ -216,6 +241,18 @@ class VLMClosedLoopPlannerAdapter:
         value = self.held_object_getter()
         return None if value is None else str(value)
 
+    def _action_history(self) -> list[str]:
+        """Executed, successful action history as plain text lines, in the
+        same format the base planner shows the model. Read-only projection of
+        the tracker records; no parsing or rewriting happens here."""
+        plans = getattr(getattr(self.agent, "tracker", None), "plans", None) or []
+        return [
+            record.get("history_text")
+            or f"{record['step']}. {record['plan']['action'].upper()}"
+            for record in plans
+            if record.get("executed") is True and record.get("succeeded") is True
+        ]
+
     def _request(
         self,
         context: PromptContext,
@@ -234,6 +271,7 @@ class VLMClosedLoopPlannerAdapter:
             "scene_graph": context.current_scene,
             "object_views": context.object_views,
             "pending_timers": context.pending_timers,
+            "action_history": self._action_history(),
             **extra,
         }
         prompt = (
@@ -260,6 +298,9 @@ class VLMClosedLoopPlannerAdapter:
         )
         _, observations = self.agent._get_last_execution_info(self.use_obs)
         output = self.agent.client.model(prompt, image_file=observations)
+        marker = instruction.strip().splitlines()[0][:60] if instruction.strip() else "request"
+        print(f"[adapter][request] {marker} -> {output!r}")
+        sys.stdout.flush()
         return parse_model_json_object(output), output
 
     def _action(self, value: Any, *, operation_only: bool = False) -> Action:
@@ -460,6 +501,7 @@ class VLMClosedLoopPlannerAdapter:
         *,
         operation: bool,
         raw_output: str,
+        consume_on_success: bool = True,
     ) -> Optional[Action]:
         if (
             self.max_step is not None
@@ -477,37 +519,9 @@ class VLMClosedLoopPlannerAdapter:
             "operation": operation,
             "outcome_marker": marker,
             "held_object": self._held_object(),
+            "consume_on_success": bool(consume_on_success),
         }
         return issued
-
-    def _starter_navigation_target(self, intended: Action) -> Optional[str]:
-        if (
-            self.agent.primitive_type != "starter"
-            or not getattr(self.agent, "starter_manipulation_navigation_guard", True)
-            or intended.name
-            not in {"GRASP", "PLACE_ON_TOP", "PLACE_INSIDE", "POUR_INTO", "DUMP_INTO"}
-        ):
-            return None
-        return intended.object_id
-
-    def _last_successful_navigation_to(self, target: str) -> bool:
-        controller = getattr(self.agent, "runtime_controller", None)
-        previous = getattr(controller, "last_outcome", None)
-        if not (
-            previous is not None
-            and getattr(previous, "executed", False)
-            and getattr(previous, "succeeded", False)
-        ):
-            return False
-        review_action = getattr(getattr(previous, "review", None), "action", None)
-        if review_action is None:
-            return False
-        try:
-            previous_action = self._planner_action(review_action)
-            navigation = self._action(f"NAVIGATE_TO({target})")
-        except (TypeError, ValueError):
-            return False
-        return self._same_action(previous_action, navigation)
 
     def _next_step(self, context: PromptContext) -> Optional[Action]:
         intended = self._steps[0]
@@ -518,19 +532,6 @@ class VLMClosedLoopPlannerAdapter:
             and self._held_object() is None
         ):
             raise ValueError("starter placement requires a held object")
-
-        navigation_target = self._starter_navigation_target(intended)
-        if navigation_target is not None and not self._last_successful_navigation_to(
-            navigation_target
-        ):
-            return self._issue(
-                self._action(f"NAVIGATE_TO({navigation_target})"),
-                operation=False,
-                raw_output=(
-                    "[planner_guard] inserted NAVIGATE_TO before "
-                    f"{intended.to_legacy_plan()}"
-                ),
-            )
 
         # The first action that triggered loading was already selected by the
         # base planner. Preserve it until the real gripper state is updated;
@@ -567,7 +568,24 @@ class VLMClosedLoopPlannerAdapter:
             action = intended
         operation = action.name != "NAVIGATE_TO"
         if operation and not self._same_action(action, intended):
-            raise ValueError("operation preparation changed the intended operation")
+            # The execution model may return a freeing placement when the
+            # intended OPEN/CLOSE cannot run because the gripper is occupied.
+            # That placement is a precondition step, not the intended
+            # operation: execute it, but keep the intended operation queued
+            # so it is re-issued once the gripper is free.
+            freeing = (
+                intended.name in {"OPEN", "CLOSE"}
+                and action.name in {"PLACE_ON_TOP", "PLACE_INSIDE", "POUR_INTO", "DUMP_INTO"}
+                and self._held_object() is not None
+            )
+            if not freeing:
+                raise ValueError("operation preparation changed the intended operation")
+            return self._issue(
+                action,
+                operation=True,
+                raw_output=output,
+                consume_on_success=False,
+            )
         return self._issue(action, operation=operation, raw_output=output)
 
     @staticmethod
@@ -604,10 +622,17 @@ class VLMClosedLoopPlannerAdapter:
         self._inflight = None
         if outcome.executed and outcome.succeeded:
             if inflight["operation"]:
-                completed = self._steps.pop(0)
+                if inflight.get("consume_on_success", True):
+                    completed = self._steps.pop(0)
+                else:
+                    # The executed action was a freeing placement required
+                    # before the intended OPEN/CLOSE; keep the intended
+                    # operation queued at the head for the next round.
+                    completed = None
                 loading = self._loading
                 if (
-                    loading is not None
+                    completed is not None
+                    and loading is not None
                     and loading["destination"] is None
                     and completed.name == loading["relation"]
                 ):
@@ -623,7 +648,7 @@ class VLMClosedLoopPlannerAdapter:
                 loading_active = (
                     loading is not None and loading["destination"] is not None
                 )
-                if loading_active:
+                if completed is not None and loading_active:
                     self._advance_loading(completed, inflight["held_object"])
                 if not self._steps:
                     if loading is not None and loading["pending"]:

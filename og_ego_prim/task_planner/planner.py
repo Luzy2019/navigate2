@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -86,7 +87,6 @@ class AgentPlanner:
         verbose: bool = True,
         debug: bool = False,
         observation_dir: Optional[str] = None,
-        starter_manipulation_navigation_guard: bool = False,
     ) -> None:
         if work_dir is None:
             work_dir = WORK_DIR
@@ -106,10 +106,13 @@ class AgentPlanner:
         self.observation_dir = observation_dir
         self.runtime_controller = None
         self._pending_rethinking_prompt = None
-        self._pending_manipulation = None
         self._last_plan_validation_error = None
-        self._subtask_plan_start = 0
         self.held_object_getter = None
+        # Task-authored placement constraints (GT), grouped by 1-based subtask
+        # index plus a global fallback list. Mirrors the safety-tips plumbing.
+        self._aggregate_placement_constraints: List[str] = []
+        self._subtask_placement_constraints: Dict[int, List[str]] = {}
+        self.placement_constraints_str: str = ""
         # Keep the exact text sent to the model available to long-running
         # physical sessions.  ``EvalTracker`` retains model outputs, but it
         # deliberately does not retain the full input prompt.
@@ -123,9 +126,6 @@ class AgentPlanner:
 
         self.prompt_setting = prompt_setting
         self.primitive_type = primitive_type
-        self.starter_manipulation_navigation_guard = bool(
-            starter_manipulation_navigation_guard
-        )
         self.valid_primitives = get_valid_primitives(primitive_type)
         self.use_initial_setup = use_initial_setup
         self.use_self_caption = use_self_caption
@@ -139,6 +139,7 @@ class AgentPlanner:
             self.wash_rules_str,
             self.goal_description,
             self.safety_tips_str,
+            self.floor_room_map_str,
         ) = self.load_info_data()
         if self.verbose:
             print(f'[agent] instruction: {self.task_instruction}')
@@ -147,6 +148,8 @@ class AgentPlanner:
             print(f'[agent] object abilities:\n{self.object_abilities_str}')
             print(f'[agent] wash rules:\n{self.wash_rules_str}')
             print(f'[agent] goal description:\n{self.goal_description}')
+            if self.floor_room_map_str:
+                print(f'[agent] floor room map:\n{self.floor_room_map_str}')
             sys.stdout.flush()
 
         self.client = self._create_model_client()
@@ -247,12 +250,107 @@ class AgentPlanner:
 
         return last_plan, observations
 
+    @staticmethod
+    def _structured_failure_summary(diagnostics, outcome_reason=None, action=None):
+        """Turn executor/primitive failure diagnostics into a compact,
+        task-agnostic corrective summary for the model prompt.
+
+        ``diagnostics`` is the executor's per-action record (``extensions
+        ["diagnostics"]``). It keeps ``error_type`` / ``error_message`` and,
+        for starter primitives, a structured ``metadata`` dict with fields
+        such as ``target_distance``, ``base_alignment_steps``,
+        ``base_yaw_change``, ``phase``, ``status``, etc.  We surface only a
+        few generic recovery signals instead of the raw 300-char error blob,
+        so the model can act (e.g. propose NAVIGATE_TO first) without
+        revealing task-specific instance details.
+        """
+
+        error_message = str(
+            diagnostics.get("error_message") or outcome_reason or "execution failed"
+        )
+        # Keep the human-readable part of the message; the ``Additional info``
+        # tail is re-exposed in distilled form below (Structured info).
+        display_message = error_message.split(" Additional info: ", 1)[0].strip()
+        metadata = diagnostics.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        # Try to recover structured metadata that executors may keep under a
+        # nested key (ActionPrimitiveError.metadata) or as raw ``Additional
+        # info`` text when serialization flattened it.  ``ActionPrimitiveError
+        # .__str__`` renders the metadata dict with Python repr (single
+        # quotes), so try ast.literal_eval as well as JSON.
+        if not metadata and "error_message" in diagnostics:
+            raw = str(diagnostics["error_message"])
+            marker = "Additional info: "
+            if marker in raw:
+                tail = raw.split(marker, 1)[1].strip()
+                for loader in (json.loads, ast.literal_eval):
+                    try:
+                        parsed = loader(tail)
+                        if isinstance(parsed, dict):
+                            metadata = parsed
+                            break
+                    except (TypeError, ValueError, SyntaxError):
+                        continue
+
+        # Distill a generic corrective hint from a small set of well-known
+        # failure signals.  Keep it action-shaped and task-agnostic; it must
+        # not reference specific objects from the current task.
+        hints = []
+        distance = metadata.get("target_distance")
+        if isinstance(distance, (int, float)):
+            if distance > 1.5:
+                hints.append(
+                    "the destination appears far away (target_distance "
+                    f"~{float(distance):.2f}m); you MUST navigate closer before retrying"
+                )
+            elif distance > 0.0:
+                hints.append(
+                    "the destination is not fully within reach; you MUST "
+                    "navigate closer before retrying"
+                )
+        if metadata.get("base_alignment_steps") == 0 and metadata.get(
+            "base_yaw_change"
+        ) in (0, 0.0, None):
+            hints.append("the base did not move during the attempt")
+        if metadata.get("status") == "failed" and metadata.get("phase"):
+            hints.append(f"failed during the {metadata['phase']} stage")
+        if "unreachable" in error_message.lower() or "outside the symbolic" in (
+            error_message.lower()
+        ):
+            hints.append("the target was not reachable from the current stance")
+
+        summary_lines = [f"- Action: {action or ''}"]
+        summary_lines.append(f"- Reason: {display_message}")
+        summary_lines.append(
+            f"- Failure type: {diagnostics.get('error_type') or 'unknown'}"
+        )
+        if metadata:
+            kept = {
+                key: metadata[key]
+                for key in (
+                    "status",
+                    "phase",
+                    "target_distance",
+                    "base_alignment_steps",
+                    "base_yaw_change",
+                    "horizontal_error_rad",
+                )
+                if key in metadata
+            }
+            if kept:
+                summary_lines.append("- Structured info: " + str(kept))
+        if hints:
+            summary_lines.append("- Correction hint: " + "; ".join(hints))
+        return "\n".join(summary_lines)
+
     def _prepare_prompt(self) -> str:
         history_sections = []
         executed_actions = [
             record.get("history_text")
             or f"{record['step']}. {record['plan']['action'].upper()}"
-            for record in self.tracker.plans[self._subtask_plan_start:]
+            for record in self.tracker.plans
             if record.get("executed") is True and record.get("succeeded") is True
         ]
         if executed_actions:
@@ -273,18 +371,22 @@ class AgentPlanner:
                     )
                     or {}
                 )
-                reason = (
-                    diagnostics.get("error_message")
-                    or outcome.reason
-                    or "execution failed"
+                failure_summary = self._structured_failure_summary(
+                    diagnostics,
+                    outcome_reason=outcome.reason,
+                    action=outcome.review.action.to_legacy_plan(),
                 )
                 history_sections.append(
                     "Last execution failed:\n"
-                    f"- Action: {outcome.review.action.to_legacy_plan()}\n"
-                    f"- Reason: {reason}\n"
+                    f"{failure_summary}\n"
                     "The action did not complete. Do not assume its intended "
                     "postcondition; use the current observation and held-object "
-                    "state before choosing the correction."
+                    "state before choosing the correction. "
+                    "If the correction hint says the target is far away, "
+                    "unreachable, or that the base did not move, output "
+                    "NAVIGATE_TO(<the target>) first and only then retry the "
+                    "failed operation. Do not repeat the same operation without "
+                    "changing the robot pose."
                 )
         if callable(self.held_object_getter):
             history_sections.append(
@@ -316,6 +418,8 @@ class AgentPlanner:
                 scene_description=scene_description,
                 awareness=awareness,
                 safety_tips=self.safety_tips_str,
+                placement_constraints=self.placement_constraints_str,
+                floor_room_map=self.floor_room_map_str,
             )
 
         if not self.use_initial_setup and not self.use_self_caption:
@@ -459,14 +563,21 @@ class AgentPlanner:
             for index, entity_id in enumerate(prompt_objects, start=1)
         )
         self._pending_rethinking_prompt = None
-        self._pending_manipulation = None
-        self._subtask_plan_start = len(self.tracker.plans)
         # v3 explicit safety injection follows the active subtask; fall back to
         # the whole-task aggregate when the subtask declares no tips.
         subtask_tips = self._subtask_safety_tips.get(int(subtask_index))
         if not subtask_tips:
             subtask_tips = self._aggregate_safety_tips
         self.safety_tips_str = _format_safety_tips(subtask_tips)
+        # Placement constraints follow the same per-subtask switching: use the
+        # active subtask's rules, then global rules, then the whole-task
+        # aggregate as a final fallback.
+        subtask_constraints = list(
+            self._subtask_placement_constraints.get(int(subtask_index)) or ()
+        )
+        if not subtask_constraints:
+            subtask_constraints = list(self._aggregate_placement_constraints)
+        self.placement_constraints_str = _format_safety_tips(subtask_constraints)
         if self.runtime_controller is not None:
             self.runtime_controller.set_subtask(subtask_index)
 
@@ -504,6 +615,10 @@ class AgentPlanner:
         if len(objects) != self.valid_primitives[operator.upper()]:
             return None
         for obj in objects:
+            # Reject room/floor/agent targets before entity matching so the
+            # reason is recorded even when the token is not in the object list.
+            if self._is_forbidden_target(obj, operator=operator.upper()):
+                return None
             if not planner_entity_candidates(obj, self.allowed_entity_ids):
                 return None
 
@@ -523,6 +638,13 @@ class AgentPlanner:
                 "the gripper is occupied"
             )
             sys.stdout.flush()
+            self._last_plan_validation_error = (
+                f"{operator.upper()} is invalid while the gripper holds "
+                f"{self._held_object()}. First put the held object down with "
+                "PLACE_ON_TOP(<a nearby support>) or PLACE_INSIDE(<a nearby "
+                "container>) to free the gripper, then perform the "
+                f"{operator.upper()} on the target, then GRASP it again if needed."
+            )
             return None
 
         last_outcome = (
@@ -543,6 +665,12 @@ class AgentPlanner:
                 f"{operator.upper()}({params})"
             )
             sys.stdout.flush()
+            self._last_plan_validation_error = (
+                f"{operator.upper()}({params}) already failed and was rejected "
+                "as an unchanged retry. Re-read Current held object and active "
+                "processes, then choose a different applicable action that "
+                "corrects the failed precondition before retrying."
+            )
             return None
 
         placement_actions = {
@@ -559,73 +687,52 @@ class AgentPlanner:
                 "the gripper is empty"
             )
             sys.stdout.flush()
+            self._last_plan_validation_error = (
+                f"{operator.upper()} requires a held object, but the gripper "
+                "is currently empty. First GRASP the object you intend to "
+                "place or transfer, then retry the placement."
+            )
             return None
-
-        if (
-            self.primitive_type == "starter"
-            and operator.upper() == "NAVIGATE_TO"
-            and objects
-            and self._last_plan_is_navigation_to(objects[0])
-        ):
-            print(
-                "[agent][planner_guard] rejecting repeated successful "
-                f"NAVIGATE_TO({objects[0]})"
-            )
-            sys.stdout.flush()
-            return None
-
-        if (
-            self.primitive_type == "starter"
-            and self.starter_manipulation_navigation_guard
-            and operator.upper() in {
-                "GRASP", "PLACE_ON_TOP", "PLACE_INSIDE", "POUR_INTO", "DUMP_INTO"
-            }
-            and objects
-            and not self._last_plan_is_navigation_to(objects[0])
-        ):
-            destination = objects[0]
-            print(
-                "[agent][planner_guard] rewriting starter manipulation to "
-                f"NAVIGATE_TO({destination}) before {operator.upper()}({destination})"
-            )
-            sys.stdout.flush()
-            self._pending_manipulation = (
-                operator.lower(),
-                params,
-                caution,
-                destination,
-            )
-            return "navigate_to", destination, None
 
         return operator.lower(), params, caution
 
-    def _last_plan_is_navigation_to(self, target: str) -> bool:
-        if not getattr(self, "tracker", None) or not self.tracker.plans:
-            return False
+    def _is_forbidden_target(self, entity_id: str, operator: str = "") -> bool:
+        """Reject action targets that the runtime cannot manipulate.
 
-        current_subtask_plans = self.tracker.plans[self._subtask_plan_start:]
-        if not current_subtask_plans:
+        Rooms (e.g. ``kitchen_0``) describe where objects are; the robot
+        itself (``agent.n.01_1``) is not manipulable. Floor/support entities
+        in the object list are valid only as NAVIGATE_TO destinations (approach
+        a staging spot) and PLACE_ON_TOP destinations (stage an object there);
+        they are never valid for GRASP/OPEN/CLOSE/TOGGLE/WIPE/INSIDE/POUR/DUMP.
+        This mirrors the prompt-level TARGET RESTRICTIONS.
+        """
+        raw = str(entity_id or "").strip().lower()
+        if not raw:
             return False
-        last_record = current_subtask_plans[-1]
-        if not (
-            last_record.get("executed") is True
-            and last_record.get("succeeded") is True
-        ):
-            return False
-        try:
-            last_action = Action.from_raw(last_record["plan"]["action"])
-        except (TypeError, ValueError):
-            return False
-        if last_action.name != "NAVIGATE_TO" or last_action.object_id is None:
-            return False
-
-        previous_candidates = set(
-            planner_entity_candidates(last_action.object_id, self.allowed_entity_ids)
-        )
-        target_candidates = set(
-            planner_entity_candidates(target, self.allowed_entity_ids)
-        )
-        return len(previous_candidates & target_candidates) == 1
+        rooms = {str(room).strip().lower() for room in getattr(self, "room_entity_ids", ())}
+        if raw in rooms:
+            self._last_plan_validation_error = (
+                f"'{entity_id}' is a room name, not an action target. "
+                "Navigate to a specific object instead."
+            )
+            return True
+        if raw.startswith("agent."):
+            self._last_plan_validation_error = (
+                f"'{entity_id}' is the robot itself, not an action target."
+            )
+            return True
+        is_floor = raw.split("_")[0] == "floor" or raw.startswith("floor.")
+        if is_floor:
+            upper = str(operator or "").upper()
+            allowed_for_floor = {"NAVIGATE_TO", "PLACE_ON_TOP"}
+            if upper not in allowed_for_floor:
+                self._last_plan_validation_error = (
+                    f"'{entity_id}' is a floor/support surface. It is valid "
+                    f"only for NAVIGATE_TO or PLACE_ON_TOP, not for "
+                    f"{upper or 'this action'}."
+                )
+                return True
+        return False
 
     def generate_caption(self, use_obs=True) -> str:
         _, obs = self._get_last_execution_info(use_obs)
@@ -702,36 +809,25 @@ class AgentPlanner:
         retry_feedback = None
         start_step = self.current_step
         while True:
-            if self._pending_manipulation is not None:
-                operator, params, caution, navigation_target = self._pending_manipulation
-                self._pending_manipulation = None
-                if self._last_plan_is_navigation_to(navigation_target):
-                    next_plan = self.record_plan(
-                        f'{operator}({params})',
-                        caution=caution,
-                    )
-                    yield next_plan
-                    if max_step is not None and self.current_step - start_step >= max_step:
-                        self.tracker.track_termination(
-                            reason='exceeding_max_steps',
-                            msg=f'exceeding max steps {max_step}'
-                        )
-                        return
-                    continue
-
             # get obs after last execution
             last_plan, obs = self._get_last_execution_info(use_obs)
             prompt = self._prepare_prompt()
             if retry_feedback is not None:
                 prompt += f"\n\nPlanner correction:\n{retry_feedback}"
-
-            if self.debug:
-                print(f'[agent] last_step: {last_plan}, Continue (y/Y): ')
+                print(
+                    f"[agent][retry_prompt] === retry {retry} prompt ===\n"
+                    f"{prompt}\n"
+                    f"[agent][retry_prompt] === end ==="
+                )
                 sys.stdout.flush()
 
-                while cmd := input().upper() != 'Y':
-                    print(f'[agent] last_step: {last_plan}, Continue (y/Y): ')
-                    sys.stdout.flush()
+            # if self.debug:
+            #     print(f'[agent] last_step: {last_plan}, Continue (y/Y): ')
+            #     sys.stdout.flush()
+
+            #     while cmd := input().upper() != 'Y':
+            #         print(f'[agent] last_step: {last_plan}, Continue (y/Y): ')
+            #         sys.stdout.flush()
 
             output = self._model_with_prompt_record(
                 prompt,
@@ -816,13 +912,25 @@ class AgentPlanner:
             wash_rules_str = json.dumps(wash_rules, indent=4, ensure_ascii=False)
 
         self.allowed_entity_ids = tuple(context.object_list)
-        # Task-authored (GT) safety tips for the explicit v3 prompt setting.
+        # Room/area names are context, never action targets.  Track them so
+        # ``_verify_plan`` can reject room labels with the same certainty it
+        # rejects unknown entities.
+        self.room_entity_ids = tuple(context.rooms)
+        # Task-authored safety tips (GT) for the explicit v3 prompt setting.
         # Lifelong runners switch the active subset per subtask in
         # ``begin_lifelong_subtask``; the aggregate is the fallback.
         self._aggregate_safety_tips = list(context.safety_tips)
         self._subtask_safety_tips = {
             index: list(tips)
             for index, tips in context.subtask_safety_tips.items()
+        }
+        # Task-authored placement constraints (GT) for starter prompts.
+        self._aggregate_placement_constraints = list(
+            context.placement_constraints
+        )
+        self._subtask_placement_constraints = {
+            index: list(rules)
+            for index, rules in context.subtask_placement_constraints.items()
         }
         return (
             task_instruction,
@@ -832,6 +940,7 @@ class AgentPlanner:
             wash_rules_str,
             context.goal_description,
             _format_safety_tips(self._aggregate_safety_tips),
+            context.floor_room_map,
         )
 
 

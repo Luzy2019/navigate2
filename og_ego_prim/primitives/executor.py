@@ -219,6 +219,22 @@ class Executor:
         self.execute_plan(plan)
         return self.last_execution_diagnostics
 
+    @staticmethod
+    def _exception_metadata(exc: Exception) -> dict:
+        """Extract structured metadata from an exception, when available.
+
+        Starter primitives raise ``ActionPrimitiveError(reason, message,
+        metadata)``; the metadata dict carries actionable signals such as
+        ``target_distance``, ``base_alignment_steps``, ``base_yaw_change``,
+        ``phase``, etc.  Keeping it as a first-class diagnostics field lets the
+        planner distill a corrective hint without re-parsing the flattened
+        ``error_message`` string.
+        """
+        metadata = getattr(exc, "metadata", None)
+        if isinstance(metadata, dict):
+            return dict(metadata)
+        return {}
+
     def execute_plan(self, plan: str):
         '''
         执行单条高层 primitive plan。
@@ -272,6 +288,7 @@ class Executor:
                 status="parse_error",
                 error_type=exc.__class__.__name__,
                 error_message=str(exc),
+                metadata=self._exception_metadata(exc),
             )
             self._log_execution_error(plan, exc)
             raise
@@ -360,6 +377,7 @@ class Executor:
                 diagnostics.update(
                     error_type=error.__class__.__name__,
                     error_message=str(error),
+                    metadata=self._exception_metadata(error),
                 )
             self.last_execution_diagnostics = diagnostics
             print(
