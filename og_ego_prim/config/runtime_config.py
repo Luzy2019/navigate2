@@ -985,7 +985,7 @@ class SchedulerConfig:
 @dataclass
 class RiskPredictorConfig:
     enabled: bool = True
-    provider: str = "task_json"
+    provider: str = "vlm"
     provider_options: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod

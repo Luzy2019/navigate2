@@ -96,9 +96,11 @@ class OnlineBenchmark(Benchmark):
         eval_awareness: bool, 
         eval_execution: bool,
         runtime_config: Optional[RuntimeConfig] = None,
+        risk_model_client: Any = None,
     ):
         super().__init__(task, scene, config, debug, False, primitive_type=primitive_type)
         self.runtime_config = runtime_config or RuntimeConfig.defaults()
+        self._risk_model_client = risk_model_client
         self._closed = False
         self._close_report = None
 
@@ -278,6 +280,8 @@ class OnlineBenchmark(Benchmark):
             risk_predictor = create_risk_predictor(
                 risk_config,
                 task=definition.runtime,
+                client=self._risk_model_client,
+                held_object_getter=self._current_grasped_object_id,
             )
         components = RuntimeComponents(
             perception=self.scene_graph_updater,
