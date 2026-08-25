@@ -7,9 +7,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MODEL = "gpt-4o-mini"
+MODEL = "gpt-4o"
 BASE_URL = "https://llm-api.net/v1"
-OPENAI_API_KEY = "sk-jpLM9oMyLTJQp9y41T1BMh4aavOPADItJADH1riFqUikgLQN"
+OPENAI_API_KEY = "sk-pIXX3MnQ406ZJ0WBDIsRmxSse5ZfZUNDu3V09VV8Aiqk9jxX"
 PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 
 
@@ -92,9 +92,9 @@ def generate_frame_scene_graph(image_path):
 
     message = completion.choices[0].message
     if message.refusal:
-        raise RuntimeError(f"gpt-4o-mini refused the scene graph request: {message.refusal}")
+        raise RuntimeError(f"gpt-4o refused the scene graph request: {message.refusal}")
     if message.parsed is None:
-        raise RuntimeError("gpt-4o-mini returned no structured scene graph.")
+        raise RuntimeError("gpt-4o returned no structured scene graph.")
 
     scene_graph = message.parsed.model_dump()
     print(scene_graph)

@@ -1922,6 +1922,17 @@ class Executor:
         if covered_systems is None:
             raise BadExecutionPlanError(f'target object "{target_obj.name}" cannot be wiped')
 
+        # Fluids (e.g. water) are not grime: WIPE removes visual contaminants
+        # (stain, dust, mold, ...) only. An active fluid source keeps re-covering
+        # its target, so leaving the fluid in the removal set would make the
+        # post-wipe self-check fail with remaining=[<fluid>]. Keep only visual
+        # particle systems; fluids stay in Saturated/rinse handling.
+        covered_systems = [
+            system
+            for system in covered_systems
+            if target_obj.scene.is_visual_particle_system(system_name=system.name)
+        ]
+
         rinse_systems, rinse_sources = self._starter_active_rinse_systems(target_obj)
         rinse_names = {system.name for system in rinse_systems}
         for system in covered_systems:

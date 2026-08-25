@@ -11,7 +11,7 @@ import re
 import sys
 import time
 import traceback
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from og_ego_prim.utils.omnigibson_runtime import maybe_reexec_with_omnigibson_python
 
@@ -125,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-serve-ip", default="")
     parser.add_argument("--local-serve-key", default="EMPTY")
     parser.add_argument("--prompt-setting", choices=("v0", "v1", "v2", "v3"), default="v1")
-    parser.add_argument("--primitive-type", choices=("auto", "ego", "starter", "symbolic"), default="auto")
+    parser.add_argument("--primitive-type", choices=("starter", "ego", "starter", "symbolic"), default="starter")
     parser.add_argument("--scene-graph-step-interval", type=int, default=30)
     parser.add_argument(
         "--online-object-sampling",
@@ -444,12 +444,104 @@ def capture_observation(
     Image.fromarray(frame.rgb).save(target / "obs_0.png")
     if track_video:
         benchmark.tracker.track_video_rgb(resize_rgb(frame.rgb, video_output_size))
+
+    # Dump the accumulated scene graph snapshot (nodes + edges) next to the
+    # observation, so node/edge quality can be audited per executed action.
+    try:
+        updater = getattr(benchmark, "scene_graph_updater", None)
+        snapshot = (
+            updater.get_snapshot()
+            if updater is not None and callable(getattr(updater, "get_snapshot", None))
+            else None
+        )
+        if snapshot is not None:
+            payload = (
+                snapshot.to_dict()
+                if callable(getattr(snapshot, "to_dict", None))
+                else snapshot
+            )
+            graph_path = target / "scene_graph.json"
+            with graph_path.open("w", encoding="utf-8") as file:
+                json.dump(payload, file, indent=2, ensure_ascii=False, default=str)
+            _print_scene_graph_summary(step_tag, payload)
+    except Exception as exc:
+        benchmark.tracker.track_error(
+            action="capture_scene_graph",
+            err_type=exc.__class__.__name__,
+            msg=str(exc),
+        )
+        print(
+            f"[capture][scene_graph] error for {step_tag}: "
+            f"{exc.__class__.__name__}: {exc}",
+            flush=True,
+        )
+
     return {
         "step_tag": step_tag,
         "sensor_name": frame.sensor_name,
         "rgb_shape": list(frame.rgb.shape),
         "frame_index": frame.frame_index,
     }
+
+
+def _print_scene_graph_summary(step_tag: str, payload: Any) -> None:
+    """Print a compact node/edge digest of a scene graph snapshot."""
+    if isinstance(payload, Mapping):
+        payload = payload
+    elif isinstance(payload, dict):
+        pass
+    else:
+        payload = {}
+    rooms = payload.get("rooms") or ()
+    node_total = 0
+    edge_total = 0
+    print(f"[capture][scene_graph] step_tag={step_tag}", flush=True)
+    for room in rooms:
+        if not isinstance(room, Mapping):
+            continue
+        room_name = room.get("room_name") or room.get("room_id") or "unknown_room"
+        nodes = room.get("nodes") or ()
+        edges = room.get("edges") or ()
+        node_total += len(nodes)
+        edge_total += len(edges)
+        print(f"[capture][scene_graph]   Room: {room_name}", flush=True)
+        for node in nodes:
+            if not isinstance(node, Mapping):
+                continue
+            label = (
+                node.get("entity_id")
+                or node.get("label")
+                or node.get("name")
+                or node.get("id")
+            )
+            visible = bool(node.get("is_vis"))
+            states = node.get("states") or {}
+            states_text = (
+                json.dumps(states, ensure_ascii=False, sort_keys=True)
+                if isinstance(states, Mapping) and states
+                else ""
+            )
+            print(
+                f"[capture][scene_graph]     node: {label} "
+                f"[id={node.get('id')}, visible={visible}"
+                + (f", states={states_text}" if states_text else "")
+                + "]",
+                flush=True,
+            )
+        for edge in edges:
+            if not isinstance(edge, Mapping):
+                continue
+            print(
+                f"[capture][scene_graph]     edge: {edge.get('source')} "
+                f"{edge.get('type') or edge.get('relation')} "
+                f"{edge.get('target')}",
+                flush=True,
+            )
+    print(
+        f"[capture][scene_graph]   summary: rooms={len(rooms)} "
+        f"nodes={node_total} edges={edge_total}",
+        flush=True,
+    )
 
 
 def _to_numpy_image(frame: Any) -> np.ndarray:
@@ -591,9 +683,10 @@ def _run(
     (work_dir / "benchmark").mkdir(parents=True, exist_ok=True)
     if args.enable_scene_graph:
         runtime_config.scene_graph.output_dir = str(output_dir / "samjam_outputs")
-        runtime_config.scene_graph.debug_log_path = str(
-            output_dir / "samjam_outputs" / "scene_graph_debug.log"
-        )
+        if runtime_config.scene_graph.output_debug_matching:
+            runtime_config.scene_graph.debug_log_path = str(
+                output_dir / "samjam_outputs" / "scene_graph_debug.log"
+            )
 
     print(
         "safe-memory runtime config: "
@@ -643,7 +736,9 @@ def _run(
         runtime_config=args.runtime_config,
     )
     benchmark_holder.append(benchmark)
-    if scripted is not None and benchmark.primitive_type == "starter":
+    use_example_planning = scripted is not None
+    
+    if use_example_planning and benchmark.primitive_type == "starter":
         scripted = expand_scripted_actions_for_starter(scripted)
     from og_ego_prim.scene_graph.observation_adapter import ISBenchObservationAdapter
 
@@ -652,14 +747,14 @@ def _run(
     evaluator = LifelongEvaluator(
         benchmark.env,
         benchmark.eval_task_config,
-        eval_awareness=scripted is None and args.prompt_setting == "v2",
+        eval_awareness=not use_example_planning and args.prompt_setting == "v2",
     )
     benchmark._lifelong_evaluator = evaluator
     benchmark.tracker.runtime_modules["evaluator"] = type(evaluator).__name__
 
     install_video_step_callback(benchmark, args)
     agent = None
-    if scripted is None:
+    if not use_example_planning:
         from og_ego_prim.risk_predictor.utils import install_vlm_risk_provider
         from og_ego_prim.task_planner import AgentPlanner
 

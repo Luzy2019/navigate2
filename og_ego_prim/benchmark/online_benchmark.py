@@ -145,6 +145,7 @@ class OnlineBenchmark(Benchmark):
                 (config.get("planning_context") or {}).get("object_list") or ()
             )
         )
+        self._feed_task_scene_context(config)
         first_subtask = next(iter(config.get("subtasks") or ()), {})
         initial_instruction = str(
             first_subtask.get("L")
@@ -152,11 +153,6 @@ class OnlineBenchmark(Benchmark):
             or ""
         )
         self.scene_graph_updater.set_task_instruction(initial_instruction)
-        graph_started_at = time.perf_counter()
-        initial_scene_graph = self.scene_graph_updater.reset(self.env)
-        self.tracker.track_scene_graph(initial_scene_graph, force=True)
-        if self._is_graph_construction(initial_scene_graph):
-            self.tracker.track_latency('graph_construction', time.perf_counter() - graph_started_at)
         self.executor = Executor(
             self.env,
             primitive_type=primitive_type,
@@ -181,6 +177,18 @@ class OnlineBenchmark(Benchmark):
 
         self.set_viewer()
         self._add_extra_init_states()
+        # [frame0-fix] Build the first scene graph AFTER the Executor exists so
+        # the navigation arm pose (e.g. tucked_high) is already applied. The old
+        # order perceived the pre-pose frame (arm spread over the table), whose
+        # masks/depth differ from every later frame at the same camera pose; the
+        # same object then got two inconsistent 3D centroids and split into two
+        # nodes. reset() is the first perception; the forced refresh below emits
+        # the second frame with the same arm pose so frame0/frame1 align.
+        graph_started_at = time.perf_counter()
+        initial_scene_graph = self.scene_graph_updater.reset(self.env)
+        self.tracker.track_scene_graph(initial_scene_graph, force=True)
+        if self._is_graph_construction(initial_scene_graph):
+            self.tracker.track_latency('graph_construction', time.perf_counter() - graph_started_at)
         self._refresh_scene_graph(force=True)
 
     def close(self):
@@ -417,6 +425,26 @@ class OnlineBenchmark(Benchmark):
             sensor_kwargs['image_height'] = image_height
             sensor_kwargs['image_width'] = image_width
 
+    def _feed_task_scene_context(self, config: Dict) -> None:
+        """[L3] Feed location/category priors from task JSON to the VLM adapter.
+
+        Uses only ``planning_context.object_list`` + ``initial_setup`` (position
+        priors). Goals, safety rules, and abilities are deliberately excluded so
+        the VLM does not hallucinate objects/states from task intent.
+        """
+
+        object_list = (config.get("planning_context") or {}).get("object_list") or ()
+        initial_setup = (config.get("planning_context") or {}).get("initial_setup") or []
+        setup_text = " ".join(str(item) for item in initial_setup)
+        task_context = [
+            (entity_id, setup_text)
+            for entity_id in object_list
+            if str(entity_id).strip() and not str(entity_id).startswith("agent.")
+        ]
+        set_task_context = getattr(self.scene_graph_updater, "set_task_context", None)
+        if callable(set_task_context):
+            set_task_context(task_context)
+
     def _on_low_level_step(self, context: LowLevelStepContext):
         # Capture this simulator frame before polling timers. A completed
         # process may apply a simulator state and advance one nested frame;
@@ -426,13 +454,7 @@ class OnlineBenchmark(Benchmark):
             self.scene_graph_step_interval > 0
             and context.global_step_index % self.scene_graph_step_interval == 0
         ):
-            started_at = time.perf_counter()
-            snapshot = self.scene_graph_updater.update(context)
-            if self._is_graph_construction(snapshot):
-                self.tracker.track_latency('graph_construction', time.perf_counter() - started_at)
-            self.tracker.track_scene_graph(snapshot)
-            if hasattr(self, 'runtime_controller'):
-                self.runtime_controller.observe(snapshot)
+            self._safe_scene_graph_update(context)
         if hasattr(self, 'runtime_controller'):
             self.runtime_controller.tick_scheduler()
 
@@ -443,13 +465,41 @@ class OnlineBenchmark(Benchmark):
     ):
         if raw_plan is not None:
             self.scene_graph_updater.set_object_goal_from_action(raw_plan)
+        self._safe_scene_graph_update(None, force=force)
+
+    def _safe_scene_graph_update(
+        self,
+        context: Optional[LowLevelStepContext],
+        force: bool = False,
+    ):
+        """Run one perception update; perception failures must not kill the
+        executing primitive. On error, record the error and reuse the last
+        snapshot instead of raising into execute_plan. Both interval-based
+        (step) and post-primitive refreshes feed the runtime controller."""
+
         started_at = time.perf_counter()
-        snapshot = self.scene_graph_updater.update()
+        try:
+            if context is None:
+                snapshot = self.scene_graph_updater.update()
+            else:
+                snapshot = self.scene_graph_updater.update(context)
+        except Exception as exc:
+            self.tracker.track_error(
+                action='scene_graph_update',
+                err_type=exc.__class__.__name__,
+                msg=str(exc),
+            )
+            print(
+                f"[scene_graph][update_error] {exc.__class__.__name__}: {exc}",
+                flush=True,
+            )
+            return None
         if self._is_graph_construction(snapshot):
             self.tracker.track_latency('graph_construction', time.perf_counter() - started_at)
         self.tracker.track_scene_graph(snapshot, force=force)
         if hasattr(self, 'runtime_controller'):
             self.runtime_controller.observe(snapshot)
+        return snapshot
 
     @staticmethod
     def _is_graph_construction(snapshot) -> bool:

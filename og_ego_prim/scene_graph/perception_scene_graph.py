@@ -138,6 +138,8 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
         self.latest_result: Optional[PerceptionResult] = None
         self.task_instruction: Optional[str] = None
         self.task_entity_ids: Tuple[str, ...] = ()
+        self.task_categories: Tuple[str, ...] = ()
+        self.task_context: Tuple[Any, ...] = ()
         self.snapshot = SceneGraphSnapshot(
             step_index=-1, primitive_name=None, raw_plan=None
         )
@@ -198,6 +200,12 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
 
         self.backend.reset(env)
         self.set_task_instruction(self.task_instruction)
+        if self.task_entity_ids:
+            self.set_task_entities(self.task_entity_ids)
+        if self.task_categories:
+            self.set_task_categories(self.task_categories)
+        if self.task_context:
+            self.set_task_context(self.task_context)
         self.snapshot = self._run_perception(context=None, force=True)
         return self.snapshot
 
@@ -254,8 +262,11 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
             self.backend.set_task_instruction(self.task_instruction)
 
     def set_task_categories(self, categories) -> None:
+        self.task_categories = tuple(
+            dict.fromkeys(str(value) for value in categories if str(value))
+        )
         if self.backend is not None and hasattr(self.backend, "set_task_categories"):
-            self.backend.set_task_categories(categories)
+            self.backend.set_task_categories(self.task_categories)
 
     def set_task_entities(self, entity_ids) -> None:
         """Provide exact task instance IDs to backends that need stable bindings."""
@@ -265,6 +276,13 @@ class PerceptionSceneGraphUpdater(SceneGraphUpdater):
         )
         if self.backend is not None and hasattr(self.backend, "set_task_entities"):
             self.backend.set_task_entities(self.task_entity_ids)
+
+    def set_task_context(self, task_context) -> None:
+        """[L3] Forward task scene priors (position/category only) to backend VLM."""
+
+        self.task_context = tuple(task_context or ())
+        if self.backend is not None and hasattr(self.backend, "set_task_context"):
+            self.backend.set_task_context(self.task_context)
 
     def state_changes(
         self,

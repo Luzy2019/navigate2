@@ -158,16 +158,44 @@ def _bbox_match_decision(metrics: Dict[str, Any], iou_threshold: float) -> Tuple
     coverage_threshold = _env_float("ISBENCH_SAMJAM_MATCH_VLM_COVERAGE", 0.5)
     mask_coverage_threshold = _env_float("ISBENCH_SAMJAM_MATCH_MASK_COVERAGE", 0.35)
     max_area_ratio = _env_float("ISBENCH_SAMJAM_MATCH_COVERAGE_MAX_AREA_RATIO", 20.0)
+    # [P1] Reject mask-coverage matches whose SAM mask dwarfs the VLM box.
+    # A huge mask (area_ratio like 11.9x) usually means SAM2 swallowed the
+    # background around a small object; back-projecting it produces a phantom
+    # 3D centroid that can never merge with the correct later detection. This
+    # is the first-frame duplicate-node root cause.
+    mask_coverage_max_area_ratio = _env_float(
+        "ISBENCH_SAMJAM_MATCH_MASK_COVERAGE_MAX_AREA_RATIO", 6.0
+    )
     center_min_coverage = _env_float("ISBENCH_SAMJAM_MATCH_CENTER_MIN_COVERAGE", 0.2)
     center_max_area_ratio = _env_float("ISBENCH_SAMJAM_MATCH_CENTER_MAX_AREA_RATIO", 12.0)
 
     if center_inside and iou >= iou_threshold:
         return True, "iou", iou
-    if center_inside and area_ratio <= max_area_ratio and mask_coverage_value >= mask_coverage_threshold:
+    # [P1] Any coverage-based fallback whose SAM mask dwarfs the VLM box
+    # (area_ratio > mask_coverage_max_area_ratio) is rejected: a huge mask
+    # usually means SAM2 swallowed background around a small object, and
+    # back-projecting it produces a phantom 3D centroid that can never merge
+    # with the correct later detection (the first-frame duplicate root cause).
+    if (
+        center_inside
+        and area_ratio <= max_area_ratio
+        and area_ratio <= mask_coverage_max_area_ratio
+        and mask_coverage_value >= mask_coverage_threshold
+    ):
         return True, "mask_coverage", max(iou, mask_coverage_value)
-    if center_inside and area_ratio <= max_area_ratio and vlm_coverage >= coverage_threshold:
+    if (
+        center_inside
+        and area_ratio <= max_area_ratio
+        and area_ratio <= mask_coverage_max_area_ratio
+        and vlm_coverage >= coverage_threshold
+    ):
         return True, "vlm_coverage", max(iou, vlm_coverage)
-    if center_inside and area_ratio <= center_max_area_ratio and vlm_coverage >= center_min_coverage:
+    if (
+        center_inside
+        and area_ratio <= center_max_area_ratio
+        and area_ratio <= mask_coverage_max_area_ratio
+        and vlm_coverage >= center_min_coverage
+    ):
         return True, "center", max(iou, vlm_coverage)
     return False, "low_geometry", max(iou, vlm_coverage, mask_coverage_value)
 
@@ -812,6 +840,8 @@ class SAMJAMVLMAdapter:
         self.isbench_prompt_path = self.prompt_path.with_name("isbench_adaptive_prompt.txt")
         self.prompt: Optional[str] = None
         self.allowed_object_names: Tuple[str, ...] = ()
+        # [L3] Task scene priors: list of (entity_id, category, description).
+        self.task_context: Tuple[Tuple[str, str, str], ...] = ()
         self.printed_request_config = False
 
     def set_allowed_object_names(self, names: Tuple[str, ...]) -> None:
@@ -824,6 +854,39 @@ class SAMJAMVLMAdapter:
                 if _task_category_name(name) and _task_category_name(name) != "agent"
             )
         )
+
+    def set_task_context(self, task_context) -> None:
+        """[L3] Provide task scene priors (position/category only) for the VLM.
+
+        Expects an iterable of ``(entity_id, category, free-text description)``
+        tuples, e.g. (\"carton.n.02_1\", \"carton\", \"initially on kitchen table\").
+        Only location/category priors are allowed here; goals, safety rules and
+        abilities are intentionally NOT forwarded (they would bias the VLM to
+        hallucinate objects or states that are not in the image).
+        """
+
+        self.task_context = tuple(
+            (str(entity).strip(), _task_category_name(entity), str(desc).strip())
+            for entity, desc in (task_context or ())
+            if str(entity).strip()
+        )
+
+    def _task_context_prompt(self) -> str:
+        if not self.task_context:
+            return ""
+        lines = [
+            "Task scene priors (location/category only; they are NOT proof that an ",
+            "object exists or where it is now):",
+        ]
+        for entity_id, category, desc in self.task_context:
+            lines.append(f"- {entity_id} (category {category!r}): {desc or 'no description'}")
+        lines.append(
+            "Use them only to focus attention or disambiguate lookalike objects. "
+            "Do NOT output an object merely because it is listed here, and never "
+            "output instance suffixes like _1/_2 for multi-instance categories "
+            "(tables, floors): those bindings are resolved by tracking, not by you."
+        )
+        return "\n".join(lines)
 
     def generate(
         self,
@@ -848,7 +911,7 @@ class SAMJAMVLMAdapter:
             kwargs["base_url"] = base_url
         client = OpenAI(**kwargs)
         model = str(
-            self.scene_graph_config.option("scene_graph_vlm_model", "gpt-4o-mini")
+            self.scene_graph_config.option("scene_graph_vlm_model", "gpt-4o")
         ).strip()
         self._print_request_config(base_url, model, api_key)
 
@@ -862,6 +925,9 @@ class SAMJAMVLMAdapter:
                 "task-external objects. Do not emit the robot, robot arm, gripper, "
                 "or an agent node."
             )
+        task_context_block = self._task_context_prompt()
+        if task_context_block:
+            prompt += "\n\n" + task_context_block
         task_focus = re.sub(r"\.n\.\d+_\d+", "", str(task_instruction or ""))
         task_focus = re.sub(r"_+", " ", task_focus)
         task_focus = re.sub(r"\s+", " ", task_focus).strip()
@@ -962,6 +1028,20 @@ class SAMJAMVLMAdapter:
 
     def _encode_rgb(self, rgb: np.ndarray) -> str:
         image = Image.fromarray(np.asarray(rgb, dtype=np.uint8)[:, :, :3]).convert("RGB")
+        # [VLM-detail] Downscale the image for the VLM only. SAM2 / UniGoal keep
+        # the full sensor resolution for 3D mapping; gpt-4o degrades on small
+        # far objects when fed a large image (detail=high re-tiles it), so the
+        # VLM sees a smaller whole image and regains tabletop recall. VLM bboxes
+        # are /1000-normalized so rescaling does not break the mask matching.
+        vlm_max_side = _env_int("ISBENCH_SAMJAM_VLM_MAX_SIDE", 320)
+        width, height = image.size
+        longest = max(width, height)
+        if vlm_max_side > 0 and longest > vlm_max_side:
+            scale = vlm_max_side / float(longest)
+            image = image.resize(
+                (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+                Image.Resampling.LANCZOS,
+            )
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         return base64.b64encode(buffer.getvalue()).decode("utf-8")
@@ -1059,10 +1139,26 @@ class SAMJAMSAM2Backend:
             "ISBENCH_SAMJAM_OUTPUT_DIR"
         )
         self.output_writer = SAMJAMOutputWriter(Path(output_dir)) if output_dir else None
+        self._release_models()
         self._reset_native_state()
         self.last_result = None
         self.object_goal = None
         self.task_instruction = None
+
+    def _release_models(self) -> None:
+        """Release the SAM2 predictor and mask generator held in GPU memory.
+
+        Called once per episode from reset(). The models are intentionally
+        kept alive between frames (update_memory no longer drops them) to
+        avoid reloading the hiera_large checkpoint on every perception step,
+        which repeatedly spiked GPU memory and caused CUDA OOM.
+        """
+        self.mask_generator = None
+        self.video_predictor = None
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def set_object_goal(self, target: str) -> None:
         self.object_goal = str(target).strip() or None
@@ -1082,6 +1178,12 @@ class SAMJAMSAM2Backend:
         )
         if self.vlm_adapter is not None:
             self.vlm_adapter.set_allowed_object_names(self.task_categories)
+
+    def set_task_context(self, task_context) -> None:
+        """[L3] Forward task scene priors to the VLM adapter (pos/category only)."""
+
+        if self.vlm_adapter is not None:
+            self.vlm_adapter.set_task_context(task_context)
 
     def observe(self, env: Any) -> FrameObservation:
         return self.adapter.observe(env)
@@ -1323,11 +1425,26 @@ class SAMJAMSAM2Backend:
             self.samjam_rels = dict(rels)
             return summary
 
-        propagated_objs, propagated_region = self._propagate_native_masks(
-            previous_local_frame_idx=local_frame_idx - 1,
-            current_local_frame_idx=local_frame_idx,
-            image_shape=frame.rgb.shape,
-        )
+        try:
+            propagated_objs, propagated_region = self._propagate_native_masks(
+                previous_local_frame_idx=local_frame_idx - 1,
+                current_local_frame_idx=local_frame_idx,
+                image_shape=frame.rgb.shape,
+            )
+        except Exception:
+            # SAM2 tracking is best-effort; a propagation failure (e.g. CUDA
+            # OOM mid-tracking) must not fail the whole perception update.
+            # Degrade to this frame's candidates only and keep the native
+            # tracker state consistent so the next frame can re-seed.
+            print(
+                "[samjam_sam2] native mask propagation failed; "
+                "falling back to current-frame candidates only",
+                flush=True,
+            )
+            propagated_objs = {}
+            propagated_region = np.zeros(
+                (int(frame.rgb.shape[0]), int(frame.rgb.shape[1])), dtype=bool
+            )
         propagated_native_ids = set(propagated_objs)
         sampled_objs = self._samjam_objects_from_candidates(
             candidates,
@@ -1416,6 +1533,7 @@ class SAMJAMSAM2Backend:
                 offload_state_to_cpu=True,
             )
             try:
+                seeded = False
                 for native_id, obj in self.samjam_cur_objs.items():
                     if previous_local_frame_idx not in obj.frames:
                         continue
@@ -1425,6 +1543,17 @@ class SAMJAMSAM2Backend:
                         obj_id=native_id,
                         mask=np.asarray(obj.frames[previous_local_frame_idx]["seg"], dtype=bool),
                     )
+                    seeded = True
+
+                # No object from the previous frame has a usable mask seed
+                # (e.g. after a failed frame the object table lags the frame
+                # index). SAM2's propagate_in_video would raise
+                # "No input points or masks are provided" for an empty
+                # inference state; bail out instead of failing the whole
+                # perception update so the tracker can re-seed from this
+                # frame's candidates.
+                if not seeded:
+                    return {}, propagated_region
 
                 next_objs = {}
                 for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(

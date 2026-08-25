@@ -2270,8 +2270,26 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         initial_robot_yaw = float(
             T.quat2euler(self.robot.get_position_orientation()[1])[2].item()
         )
+        # Turn the base toward the target before every manipulation phase, not
+        # only after navigation. The native camera pan joint saturates at
+        # +-1.0 rad (~57 deg); when the target lies to the side after a
+        # cross-room move or a held-object relocation, pan alone cannot center
+        # it and the first-view gate fails. A bounded in-place yaw faces the
+        # target so pan/tilt only has to do the fine centering.
+        base_align_phases = {
+            "post_navigation",
+            "pre_grasp",
+            "pre_open",
+            "pre_close",
+            "pre_place_inside",
+            "pre_place_on_top",
+            "pre_pour_into",
+            "pre_dump_into",
+            "pre_toggle",
+            "pre_wipe",
+        }
         base_alignment_steps = 0
-        if self.first_view_targeting_align_base and phase == "post_navigation":
+        if self.first_view_targeting_align_base and phase in base_align_phases:
             robot_position = self.robot.get_position_orientation()[0]
             target_delta = target_point[:2] - robot_position[:2]
             if float(torch.linalg.vector_norm(target_delta).item()) > 1e-6:
@@ -2308,7 +2326,10 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         stable_count = 0
         joint_limit_diagnostic = None
         frustum_diagnostic = None
-        allow_visible_at_joint_limit = phase == "post_navigation" and require_success
+        allow_visible_at_joint_limit = (
+            phase in {"post_navigation", "pre_grasp", "pre_open", "pre_close"}
+            and require_success
+        )
         required_stable_count = max(1, self.first_view_targeting_settle_steps)
         while step_count < self.first_view_targeting_max_steps:
             sensor_position, sensor_orientation = sensor.get_position_orientation(

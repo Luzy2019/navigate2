@@ -14,6 +14,55 @@ def _details(event: RuntimeEvent) -> Dict[str, Any]:
     return dict(event.details or {})
 
 
+# Runtime events worth printing while the benchmark is running so that
+# risk-predictor and task-planner decisions are debuggable without waiting
+# for the end-of-run report.json.
+_DEBUG_EVENT_TYPES = frozenset(
+    {
+        "risk_evaluated",
+        "scheduler_gate_evaluated",
+        "subtask_started",
+        "plan_proposed"
+    }
+)
+
+
+def _print_event(event: RuntimeEvent) -> None:
+    import sys
+
+    if event.event_type not in _DEBUG_EVENT_TYPES:
+        return
+    details = _details(event)
+    prefix = f"[runtime][{event.event_type}]"
+    if event.subtask_id is not None:
+        prefix += f" subtask={event.subtask_id}"
+    if event.event_type in {"risk_evaluated", "scheduler_gate_evaluated"}:
+        action = details.get("action")
+        evaluation = details.get("evaluation")
+        if event.event_type == "risk_evaluated" and isinstance(evaluation, Mapping):
+            print(
+                f"{prefix} action={action!r} decision={evaluation.get('decision')!r} "
+                f"hazards={[h.get('hazard_type') for h in evaluation.get('hazards') or ()]!r}"
+            )
+        elif event.event_type == "scheduler_gate_evaluated":
+            gate = details.get("gate")
+            if isinstance(gate, Mapping):
+                print(
+                    f"{prefix} action={action!r} allowed={gate.get('allowed')!r} "
+                    f"reasons={gate.get('reasons')!r}"
+                )
+        else:
+            print(f"{prefix} action={action!r}")
+    elif event.event_type == "subtask_started":
+        print(prefix)
+    elif event.event_type == "plan_proposed":
+        plan = details.get("plan") or {}
+        print(f"{prefix} action={(plan.get('action'))!r}")
+    else:
+        print(f"{prefix} details={details}")
+    sys.stdout.flush()
+
+
 def _track_plan(tracker: Any, event: RuntimeEvent) -> None:
     payload = _details(event)
     payload.setdefault("step", event.step)
@@ -64,6 +113,9 @@ DEFAULT_TRACKER_ROUTES: Mapping[str, TrackerRoute] = {
     "awareness_observed": _kwargs_route("track_awareness"),
     "caption_observed": _kwargs_route("track_caption"),
     "terminated": _kwargs_route("track_termination"),
+    # ``risk_evaluated`` is intentionally NOT routed to the tracker here: the
+    # benchmark's ``execute_plan`` already records risk evaluations directly to
+    # avoid double-writing. The event sink still prints it live for debugging.
 }
 
 
@@ -105,7 +157,10 @@ class OnlineTrackerEventSink:
         if route is None:
             if self.strict:
                 raise KeyError(f"no tracker route for event {event.event_type!r}")
+            # Still surface unrecognized events that matter for debugging.
+            _print_event(event)
             return
+        _print_event(event)
         route(self.tracker, event)
 
 

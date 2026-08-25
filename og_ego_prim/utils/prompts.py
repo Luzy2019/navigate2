@@ -273,6 +273,7 @@ Physical-action rules:
 - Open an openable destination before GRASPing the object that will be placed inside it.
 - After placement the gripper is empty.
 - Before WIPE, navigate to the target. For sink cleaning, toggle the sink on, toggle it off, then WIPE the sink.
+- To dampen or saturate a cleaning tool (e.g. a rag) with water when a washing rule requires a "saturated" or "damp" condition, do NOT navigate to or GRASP the water entity itself: water is a fluid, not an object, and cannot be an action target. Instead use only these existing primitives: GRASP the tool, NAVIGATE_TO(sink), PLACE_INSIDE(sink), TOGGLE_ON(sink), TOGGLE_OFF(sink), then GRASP the tool again.
 - Follow the TARGET RESTRICTIONS above: rooms and the robot are never targets; floor/support entities are valid only for NAVIGATE_TO and PLACE_ON_TOP.
 - Prefer exact object names from the task-related object list. If visually
   indistinguishable same-category instances cannot be identified, their shared

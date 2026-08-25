@@ -24,6 +24,10 @@ IS-Bench robot-scene constraints:
   exactly one of: `on`, `in`, `above`, `attach to`, `near`.
   Use exactly the two-word string `attach to`; do not output `attached to`,
   `attached_to`, or other inflected or underscored variants.
+  Never output `under`, `below`, `underneath`, `on top of`, `inside`, or any
+  other synonym. Express "X under/underneath Y" as `above` with the subject and
+  object swapped (Y `above` X), "X on top of Y" as X `on` Y, and "X inside Y" as
+  X `in` Y.
   - `on`: the subject is directly supported by or resting on the object.
   - `in`: the subject is inside or contained by the object.
   - `above`: the subject is vertically higher without claiming contact.

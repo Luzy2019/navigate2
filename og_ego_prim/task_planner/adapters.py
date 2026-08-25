@@ -544,6 +544,17 @@ class VLMClosedLoopPlannerAdapter:
                 raw_output="[loading] executing the planner-selected seed operation",
             )
 
+        # WAIT is a pure temporal action with no physical form for the model to
+        # observe or prepare: the prepare model reliably preserves a placement
+        # or grasp, but routinely returns a different operation (often the very
+        # next step of the safety plan, e.g. PLACE_ON_TOP) when intended is
+        # WAIT, replacing the cooling wait it was asked to keep. Skip the
+        # prepare round-trip for WAIT and issue the intended action directly;
+        # the scheduler gate and risk predictor still guard the blocked
+        # heat-exposure action independently.
+        if intended.name == "WAIT":
+            return self._issue(intended, operation=True, raw_output="[adapter] WAIT issued without operation preparation")
+
         payload, output = self._request(
             context,
             _EXECUTE_PROMPT,

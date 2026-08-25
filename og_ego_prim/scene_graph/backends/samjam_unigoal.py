@@ -111,7 +111,7 @@ COARSE_VOCAB = {
     "dresser", "nightstand", "counter", "stool", "toilet", "sink",
     "bathtub", "shower", "refrigerator", "oven", "stove", "microwave",
     "trash can", "bin", "door", "top compartment of the cabinet",
-    "rack over the sink",
+    "rack over the sink", "compost_bin", "washer", "floor"
 }
 FINE_VOCAB = {
     "apple", "banana", "book", "bottle", "bowl", "box", "clock", "cloth",
@@ -120,6 +120,7 @@ FINE_VOCAB = {
     "spoon", "tennis ball", "tissue box", "tofu", "tomato", "towel", "vase",
     "vegetable", "vegetables", "ring shaped bread", "crumpled white plastic waste",
     "cleaning spray bottle", "folded towel", "long bread loaf", "pan",
+    "carton", "hamper", "tablespoon", "peach", "sweatshirt", "battery"
 }
 UNKNOWN_OBJECT_NAME = "unknown_object"
 CAPTION_ALIAS = {
@@ -165,11 +166,11 @@ ATTACHABLE_COARSE_VOCAB = {
 }
 SUPPORT_SURFACE_VOCAB = {
     "bed", "sofa", "table", "desk", "nightstand", "shelf", "counter",
-    "stove", "oven", "microwave", "rack over the sink",
+    "stove", "oven", "microwave", "rack over the sink", "floor"
 }
 CONTAINER_COARSE_VOCAB = {
     "cabinet", "dresser", "refrigerator", "sink", "bathtub", "shower",
-    "trash can", "bin", "top compartment of the cabinet",
+    "trash can", "bin", "top compartment of the cabinet", "washer", "compost_bin"
 }
 COARSE_NEAR_OBSTACLE_VOCAB = {
     "table", "chair", "cabinet", "sofa", "bed", "shelf", "desk",
@@ -364,6 +365,13 @@ class SAMJAMUniGoalGraphAdapter:
         self.last_mapping_debug: Optional[Dict[str, Any]] = None
         self.name_vote_scores: Dict[str, Dict[str, float]] = {}
         self.name_vote_current: Dict[str, str] = {}
+        # [P3] exact BDDL entity id -> canonical category; entity id -> node uid.
+        self.task_entities: Dict[str, str] = {}
+        self.entity_bindings: Dict[str, int] = {}
+        self.pending_state_updates: List[Dict[str, Any]] = []
+        # [manip-edge] (uid1, uid2, relation) edges written this frame from
+        # confirmed manipulation events; reconcile must not delete them.
+        self.manipulation_written_edges: Set[Tuple[int, int, str]] = set()
 
     def reset(self, room_lookup: Optional[Callable[[List[float]], str]] = None) -> None:
         self.room_lookup = room_lookup
@@ -386,9 +394,40 @@ class SAMJAMUniGoalGraphAdapter:
         self.last_mapping_debug = None
         self.name_vote_scores.clear()
         self.name_vote_current.clear()
+        self.entity_bindings.clear()
+        self.pending_state_updates.clear()
+        self.manipulation_written_edges.clear()
 
     def set_env(self, env: Any) -> None:
         self.env = env
+
+    def set_task_entities(self, entity_ids) -> None:
+        """[P3] Accept exact BDDL entity ids and derive canonical categories."""
+
+        entities: Dict[str, str] = {}
+        for value in entity_ids or ():
+            text = str(value).strip()
+            if text:
+                entities[text] = _canonical_or_unknown_caption(text)
+        self.task_entities = entities
+
+    def _entity_id_for(self, moved_object: Any) -> Optional[str]:
+        if not moved_object:
+            return None
+        text = str(moved_object).strip()
+        if text in self.task_entities:
+            return text
+        category = _canonical_or_unknown_caption(text)
+        matches = [
+            entity for entity, cat in self.task_entities.items() if cat == category
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _entity_id_for_uid(self, uid: int) -> Optional[str]:
+        for entity_id, bound_uid in self.entity_bindings.items():
+            if bound_uid == uid:
+                return entity_id
+        return None
 
     def stable_name_for_samjam_object(
         self,
@@ -467,6 +506,14 @@ class SAMJAMUniGoalGraphAdapter:
 
     def note_manipulation_event(self, event: Dict[str, Any]) -> None:
         event = dict(event)
+        if str(event.get("primitive") or "").upper() == "STATE_UPDATE" or event.get(
+            "source"
+        ) == "AgentRuntimeController.scheduler_derived":
+            # [P2] Scheduler state updates only patch node states; they must
+            # not trigger manipulation-style edge reconciliation.
+            self.pending_state_updates.append(event)
+            del self.pending_state_updates[:-50]
+            return
         self.pending_manipulation_events.append(event)
         self.manipulation_event_history.append(event)
         del self.pending_manipulation_events[:-50]
@@ -515,6 +562,10 @@ class SAMJAMUniGoalGraphAdapter:
             segment_index=segment_index,
             source_to_node=source_to_node,
         )
+        # [L2/P3] Fold single-frame ghosts into the fresh same-name detection,
+        # then bind task entities (GT pose anchor) before building relations.
+        absorbed = self._absorb_low_evidence_duplicates(graph, source_to_node)
+        entity_anchors = self._anchor_task_entities()
         self._sync_moving_state(source_to_node, frame_object_by_id, moving_source_ids)
         current_frame_relations = self._build_current_frame_relations(
             source_to_node=source_to_node,
@@ -601,6 +652,9 @@ class SAMJAMUniGoalGraphAdapter:
                 ],
                 "spatial_similarity": str(graph.cfg.spatial_sim_type),
                 "spatial_similarity_threshold": float(graph.cfg.sim_threshold_spatial),
+                "absorbed_duplicates": absorbed,
+                "entity_anchors": entity_anchors,
+                "entity_bindings": dict(self.entity_bindings),
                 "unigoal_mapping_debug": self.last_mapping_debug
                 if self._debug_matching_enabled()
                 else None,
@@ -1346,6 +1400,26 @@ class SAMJAMUniGoalGraphAdapter:
 
         return segment_index
 
+    def _erode_mask_edge(self, mask: Any) -> np.ndarray:
+        """Shrink the mask border before depth back-projection.
+
+        Mask boundary pixels frequently sample the support surface or background
+        depth rather than the object itself; unprojecting them drags the 3D
+        centroid by tens of centimeters (or down to the floor). Eroding the edge
+        keeps only interior pixels with reliable object depth. If the erosion
+        would empty the mask (tiny objects), keep the original mask so the object
+        is not dropped entirely.
+        """
+
+        mask = np.asarray(mask, dtype=bool)
+        if not mask.any():
+            return mask
+        import cv2
+
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        eroded = cv2.erode(mask.astype(np.uint8), kernel, iterations=1).astype(bool)
+        return eroded if eroded.any() else mask
+
     def _to_gobs(
         self,
         frame: FrameObservation,
@@ -1363,7 +1437,10 @@ class SAMJAMUniGoalGraphAdapter:
 
         height, width = frame.rgb.shape[:2]
         masks = (
-            np.asarray([np.asarray(obj.mask, dtype=bool) for obj in usable], dtype=bool)
+            np.asarray(
+                [self._erode_mask_edge(obj.mask) for obj in usable],
+                dtype=bool,
+            )
             if usable
             else np.empty((0, height, width), dtype=bool)
         )
@@ -1585,6 +1662,222 @@ class SAMJAMUniGoalGraphAdapter:
     def _map_object_in_graph(self, graph: Any, map_object: Any) -> bool:
         return any(candidate is map_object for candidate in graph.objects)
 
+    def _apply_state_update_event(
+        self,
+        event: Dict[str, Any],
+        source_to_node: Dict[str, Any],
+    ) -> None:
+        entity = str(event.get("moved_object") or "").strip()
+        updates = dict(event.get("state_updates") or {})
+        if not updates:
+            return
+        node = None
+        bound_uid = self.entity_bindings.get(entity) if entity else None
+        if bound_uid is not None:
+            node = next(
+                (n for n in self.graph.nodes if self._node_uid(n) == bound_uid),
+                None,
+            )
+        if node is None and entity:
+            category = _canonical_or_unknown_caption(entity)
+            matches = [
+                n
+                for n in source_to_node.values()
+                if _canonical_or_unknown_caption(getattr(n, "caption", None)) == category
+            ]
+            node = matches[0] if len(matches) == 1 else None
+        if node is None:
+            self.manipulation_resolutions.append(
+                {
+                    "event": event,
+                    "status": "unresolved",
+                    "reason": "state_update_target_not_found",
+                }
+            )
+            return
+        setattr(
+            node,
+            "states",
+            {**dict(getattr(node, "states", {}) or {}), **updates},
+        )
+
+    def _anchor_task_entities(self) -> List[Dict[str, Any]]:
+        """[P3] Bind task entities to perception nodes via category + GT pose.
+
+        A node is a binding candidate only when it is the unique same-category
+        node within ``radius`` of the ground-truth object position. This runs
+        every update so bindings appear as soon as the true node is detected,
+        without waiting for a manipulation event.
+        """
+
+        if not self.task_entities or self.graph is None:
+            return []
+        radius = _env_float("ISBENCH_SAMJAM_UNIGOAL_ENTITY_ANCHOR_RADIUS", 0.3)
+        bound_uids = set(self.entity_bindings.values())
+        anchors: List[Dict[str, Any]] = []
+        for entity_id, category in self.task_entities.items():
+            if entity_id in self.entity_bindings:
+                continue
+            if self.env is None:
+                continue
+            gt_obj = self._resolve_env_object(entity_id)
+            gt_position = self._object_position(gt_obj)
+            if gt_position is None:
+                continue
+            candidates = []
+            for node in self.graph.nodes:
+                if _canonical_or_unknown_caption(getattr(node, "caption", None)) != category:
+                    continue
+                uid = self._node_uid(node)
+                if uid in bound_uids or getattr(node, "entity_id", None):
+                    continue
+                position = self._node_position(node)
+                if position is None:
+                    continue
+                dim = min(len(position), len(gt_position), 3)
+                distance = float(
+                    np.linalg.norm(
+                        np.asarray(position[:dim]) - np.asarray(gt_position[:dim])
+                    )
+                )
+                if distance <= radius:
+                    candidates.append((distance, node))
+            if len(candidates) != 1:
+                continue
+            distance, node = candidates[0]
+            uid = self._node_uid(node)
+            setattr(node, "entity_id", entity_id)
+            setattr(node, "role", entity_id)
+            self.entity_bindings[entity_id] = uid
+            bound_uids.add(uid)
+            anchors.append(
+                {"entity_id": entity_id, "uid": uid, "distance": round(distance, 4)}
+            )
+        return anchors
+
+    def _node_is_new_this_segment(self, node: Any) -> bool:
+        map_object = getattr(node, "object", None) or {}
+        image_idx = list(map_object.get("image_idx", []) or [])
+        try:
+            return len(image_idx) == 1 and int(image_idx[0]) == self._current_segment_index()
+        except (TypeError, ValueError):
+            return False
+
+    def _transfer_node_identity(self, graph: Any, old_node: Any, new_node: Any) -> None:
+        """Move persistent identity (uid/entity/role/states) onto a re-detected
+        node and drop the stale one at the old location."""
+
+        old_uid = self.node_uids.pop(old_node, None)
+        if old_uid is not None:
+            self.node_uids[new_node] = old_uid
+            setattr(new_node, "uid", old_uid)
+        for field in ("entity_id", "role"):
+            value = getattr(old_node, field, None)
+            if value is not None and getattr(new_node, field, None) is None:
+                setattr(new_node, field, value)
+        old_states = dict(getattr(old_node, "states", {}) or {})
+        if old_states:
+            setattr(
+                new_node,
+                "states",
+                {**old_states, **dict(getattr(new_node, "states", {}) or {})},
+            )
+        # Carry the moved flag forward instead of forcing it True. Forcing it
+        # marks the surviving node as moved permanently, which excludes it from
+        # future low-evidence absorption (the "ratchet" that lets a phantom
+        # carton survive frame after frame). A depth-projection ghost is not a
+        # real move, so only inherit the old node's actual moved state.
+        if self.node_moved.get(old_node, False):
+            self.node_moved[new_node] = True
+        else:
+            self.node_moved.pop(new_node, None)
+        self._remove_object_node(graph, old_node)
+
+    def _absorb_low_evidence_duplicates(
+        self,
+        graph: Any,
+        source_to_node: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """[L2] Absorb single-frame ghost nodes into the fresh detection of the
+        same physical object.
+
+        The UniGoal 3D overlap gate (spatial_sim < 0.01 -> new object) cannot
+        merge a frame-N detection with a frame-M map object whose reconstructed
+        bbox is far away (e.g. a first-frame depth artifact). When the same
+        canonical name is re-detected with a well-evidenced new node, we fold
+        the old low-evidence node into it instead of forever keeping a split.
+
+        Only nodes that (a) were seen exactly once, (b) are not visible now,
+        (c) carry no entity binding and are not marked moved, and (d) are far
+        enough that the normal spatial merge would never fire, are eligible.
+        """
+
+        if not source_to_node:
+            return []
+        absorb_min_iou = _env_float("ISBENCH_SAMJAM_UNIGOAL_ABSORB_MIN_DETECTION_IOU", 0.25)
+        absorb_max_detections = _env_int("ISBENCH_SAMJAM_UNIGOAL_ABSORB_MAX_DETECTIONS", 1)
+        absorb_min_dist = _env_float("ISBENCH_SAMJAM_UNIGOAL_ABSORB_MIN_DIST", 0.5)
+        visible_nodes = set(source_to_node.values())
+        absorbed: List[Dict[str, Any]] = []
+
+        fresh_by_caption: Dict[str, List[Any]] = {}
+        for node in visible_nodes:
+            if not self._node_is_new_this_segment(node):
+                continue
+            if getattr(node, "is_coarse", True):
+                continue
+            caption = _canonical_or_unknown_caption(getattr(node, "caption", None))
+            if caption == UNKNOWN_OBJECT_NAME:
+                continue
+            fresh_by_caption.setdefault(caption, []).append(node)
+
+        for caption, fresh_nodes in fresh_by_caption.items():
+            stale_candidates = [
+                node
+                for node in self.graph.nodes
+                if _canonical_or_unknown_caption(getattr(node, "caption", None)) == caption
+                and node not in visible_nodes
+                and not getattr(node, "is_coarse", True)
+                and getattr(node, "entity_id", None) is None
+                and not self.node_moved.get(node, False)
+                and int((getattr(node, "object", None) or {}).get("num_detections", 0) or 0)
+                <= absorb_max_detections
+            ]
+            if not stale_candidates:
+                continue
+            for fresh_node in fresh_nodes:
+                for stale_node in stale_candidates:
+                    stale_position = self._node_position(stale_node)
+                    fresh_position = self._node_position(fresh_node)
+                    if stale_position is None or fresh_position is None:
+                        continue
+                    dim = min(len(stale_position), len(fresh_position), 3)
+                    distance = float(
+                        np.linalg.norm(
+                            np.asarray(stale_position[:dim])
+                            - np.asarray(fresh_position[:dim])
+                        )
+                    )
+                    if distance < absorb_min_dist:
+                        # Close enough that the regular spatial merge should own it.
+                        continue
+                    self._transfer_node_identity(graph, stale_node, fresh_node)
+                    absorbed.append(
+                        {
+                            "caption": caption,
+                            "uid": self._node_uid(fresh_node),
+                            "distance": round(distance, 4),
+                            "reason": "absorbed_low_evidence_duplicate",
+                        }
+                    )
+                    stale_candidates = [
+                        node for node in stale_candidates if node is not stale_node
+                    ]
+                    break
+        if absorbed:
+            self._refresh_objects_post(graph)
+        return absorbed
+
     def _merge_map_object(self, graph: Any, target_object: Any, source_object: Any) -> None:
         from src.graph.utils.utils import merge_obj2_into_obj1
 
@@ -1593,6 +1886,13 @@ class SAMJAMUniGoalGraphAdapter:
         merge_obj2_into_obj1(graph.cfg, target_object, source_object, run_dbscan=False)
         self._remove_map_object(graph, source_object)
         if source_node is not None and source_node is not target_node:
+            if target_node is not None:
+                # [P3] Entity binding survives node merges.
+                source_entity = getattr(source_node, "entity_id", None)
+                if source_entity and not getattr(target_node, "entity_id", None):
+                    setattr(target_node, "entity_id", source_entity)
+                    setattr(target_node, "role", source_entity)
+                    self.entity_bindings[source_entity] = self._node_uid(target_node)
             self._remove_node(graph, source_node)
 
     def _remove_map_object(self, graph: Any, map_object: Any) -> None:
@@ -1606,6 +1906,19 @@ class SAMJAMUniGoalGraphAdapter:
         self._remove_map_object(graph, map_object)
         if node is not None:
             self._remove_node(graph, node)
+
+    def _remove_object_node(self, graph: Any, node: Any) -> None:
+        """[P1b] Remove an ObjectNode together with its backing map object.
+
+        Prefer this over _remove_map_object_with_node whenever the caller holds
+        a node (ObjectNode) rather than a map-object dict: the former expects a
+        ``dict`` with a ``node`` key and crashes on ObjectNode (no .get).
+        """
+
+        map_object = getattr(node, "object", None)
+        if map_object is not None:
+            self._remove_map_object(graph, map_object)
+        self._remove_node(graph, node)
 
     def _remove_node(self, graph: Any, node: Any) -> None:
         for edge in list(node.edges):
@@ -1681,6 +1994,17 @@ class SAMJAMUniGoalGraphAdapter:
         map_object = getattr(node, "object", None)
         if not map_object:
             return None
+        # Prefer the point-cloud centroid: the oriented bounding box center is
+        # sensitive to asymmetric depth-contaminated points, whereas the mean of
+        # the (eroded, denoised) point cloud is far more stable across frames.
+        pcd = map_object.get("pcd")
+        if pcd is not None:
+            try:
+                points = np.asarray(pcd.points, dtype=np.float64)
+            except Exception:
+                points = np.empty((0, 3), dtype=np.float64)
+            if points.size and np.isfinite(points).all():
+                return [float(value) for value in points.mean(axis=0)]
         bbox = map_object.get("bbox")
         if bbox is None:
             return None
@@ -1987,11 +2311,17 @@ class SAMJAMUniGoalGraphAdapter:
         if oriented is None:
             return
         node1, node2, relation = oriented
+        # [P2] Canonical direction for symmetric relations so the same pair
+        # always reuses one edge across frames (no A-near-B + B-near-A).
+        if relation == "near" and self._node_uid(node1) > self._node_uid(node2):
+            node1, node2 = node2, node1
         edge = next(
             (
                 item
                 for item in node1.edges
-                if item.node1 is node1 and item.node2 is node2
+                if item.node1 is node1
+                and item.node2 is node2
+                and item.relation == relation
             ),
             None,
         )
@@ -2085,6 +2415,22 @@ class SAMJAMUniGoalGraphAdapter:
                 )
                 continue
             for edge in list(node.edges):
+                # [manip-edge] Edges written this frame from confirmed placement
+                # actions are authoritative; the perception-based reconcile must
+                # not delete them (the moved object is usually occluded inside
+                # the container, so no visual evidence will ever confirm them).
+                if (
+                    self._node_uid(edge.node1),
+                    self._node_uid(edge.node2),
+                    edge.relation,
+                ) in self.manipulation_written_edges:
+                    continue
+                if (
+                    self._node_uid(edge.node2),
+                    self._node_uid(edge.node1),
+                    edge.relation,
+                ) in self.manipulation_written_edges:
+                    continue
                 other = edge.node2 if edge.node1 is node else edge.node1
                 direct_key = (self._node_uid(edge.node1), self._node_uid(edge.node2))
                 reverse_key = (self._node_uid(edge.node2), self._node_uid(edge.node1))
@@ -2099,13 +2445,17 @@ class SAMJAMUniGoalGraphAdapter:
                     "edge_target_uid": direct_key[1],
                     "relation_before": edge.relation,
                 }
-                if not getattr(other, "is_vis", False):
+                node_has_current_relation = any(
+                    uid in key for key in frame_relation_map
+                )
+                if not getattr(other, "is_vis", False) and not node_has_current_relation:
+                    # [P2] No evidence either way (other endpoint out of view and
+                    # the node kept no fresh relation): keep the edge.
                     self._record_edge_update_event(
-                        action="delete",
-                        reason="other_endpoint_not_visible",
+                        action="keep",
+                        reason="other_endpoint_not_visible_no_evidence",
                         **event_base,
                     )
-                    edge.delete()
                     continue
                 if direct_key in frame_relation_map:
                     relation_after = frame_relation_map[direct_key]
@@ -2156,10 +2506,14 @@ class SAMJAMUniGoalGraphAdapter:
         frame_relations: List[Tuple[Any, Any, str]],
     ) -> None:
         self._refresh_coarse_near_edges()
-        frame_relation_map = {
-            (self._node_uid(node1), self._node_uid(node2)): relation
-            for node1, node2, relation in frame_relations
-        }
+        frame_relation_map = {}
+        for node1, node2, relation in frame_relations:
+            u1, u2 = self._node_uid(node1), self._node_uid(node2)
+            frame_relation_map[(u1, u2)] = relation
+            if relation == "near":
+                # [P2] near is symmetric: index both orders so reconciliation
+                # never mistakes a direction flip for a missing relation.
+                frame_relation_map[(u2, u1)] = relation
         self._reconcile_manipulated_edges(frame_relation_map)
 
         fine_with_new_parent = {
@@ -2189,6 +2543,11 @@ class SAMJAMUniGoalGraphAdapter:
         self.manipulated_node_uids.clear()
 
     def _resolve_pending_manipulations(self, source_to_node: Dict[str, Any]) -> None:
+        if self.pending_state_updates:
+            state_events = list(self.pending_state_updates)
+            self.pending_state_updates.clear()
+            for state_event in state_events:
+                self._apply_state_update_event(state_event, source_to_node)
         if not self.pending_manipulation_events:
             return
         events = list(self.pending_manipulation_events)
@@ -2196,7 +2555,18 @@ class SAMJAMUniGoalGraphAdapter:
         for event in events:
             node, resolution = self._resolve_manipulation_event(event, source_to_node)
             if node is not None:
-                node.role = _canonical_or_unknown_caption(event.get("moved_object"))
+                entity_id = self._entity_id_for(event.get("moved_object"))
+                if entity_id is not None:
+                    # [P3] Persist the full BDDL entity id, not just the category.
+                    setattr(node, "entity_id", entity_id)
+                    setattr(node, "role", entity_id)
+                    self.entity_bindings[entity_id] = self._node_uid(node)
+                else:
+                    setattr(
+                        node,
+                        "role",
+                        _canonical_or_unknown_caption(event.get("moved_object")),
+                    )
                 state_updates = dict(event.get("state_updates") or {})
                 if state_updates:
                     node.states = {
@@ -2204,8 +2574,132 @@ class SAMJAMUniGoalGraphAdapter:
                         **state_updates,
                     }
                 self.mark_manipulated_nodes([self._node_uid(node)])
+                # [manip-edge] A confirmed placement writes the containment /
+                # support relation directly from the action semantics. The moved
+                # object is usually occluded inside the container afterwards, so
+                # neither the VLM nor the geometric inferrer can ever see it; the
+                # action event is the only source of truth for "inside".
+                self._apply_manipulation_edge(event, node)
             self.manipulation_resolutions.append(resolution)
         del self.manipulation_resolutions[:-100]
+
+    def _apply_manipulation_edge(
+        self,
+        event: Dict[str, Any],
+        moved_node: Any,
+    ) -> None:
+        """Upsert the relation implied by a confirmed placement action.
+
+        PLACE_INSIDE(moved, target)  -> moved in target
+        PLACE_ON_TOP(moved, target)  -> moved on target
+        POUR_INTO / DUMP_INTO        -> (no node-level containment edge; the
+                                        moved content identity is unknown)
+
+        Idempotent: _upsert_edge reuses an existing edge for the same
+        (node1, node2, relation) triple, so if the geometric inferrer already
+        wrote the same relation (object still visible), no duplicate is added.
+        """
+
+        primitive = str(event.get("primitive") or "").upper()
+        if primitive not in {"PLACE_INSIDE", "PLACE_ON_TOP"}:
+            return
+        relation = "in" if primitive == "PLACE_INSIDE" else "on"
+        target_object = event.get("target_object")
+        if not target_object:
+            return
+        target_node = self._resolve_target_node(str(target_object), moved_node)
+        if target_node is None:
+            self._record_edge_update_event(
+                action="unresolved",
+                node_uid=self._node_uid(moved_node),
+                node_name=_canonical_or_unknown_caption(
+                    getattr(moved_node, "caption", None)
+                ),
+                reason="manipulation_target_not_found",
+                target_object=str(target_object),
+            )
+            return
+        self._upsert_edge(moved_node, target_node, relation)
+        self.manipulation_written_edges.add(
+            (
+                self._node_uid(moved_node),
+                self._node_uid(target_node),
+                relation,
+            )
+        )
+        self._record_edge_update_event(
+            action="manipulation_write",
+            node_uid=self._node_uid(moved_node),
+            node_object_id=self._stable_id(moved_node),
+            node_name=_canonical_or_unknown_caption(
+                getattr(moved_node, "caption", None)
+            ),
+            other_uid=self._node_uid(target_node),
+            other_object_id=self._stable_id(target_node),
+            other_name=_canonical_or_unknown_caption(
+                getattr(target_node, "caption", None)
+            ),
+            relation_before=None,
+            relation_after=relation,
+        )
+
+    def _resolve_target_node(self, target_object: str, moved_node: Any) -> Optional[Any]:
+        """Resolve a placement target to a graph node.
+
+        Priority: (1) existing entity binding, (2) same-category unique node,
+        (3) task-object pose proximity, (4) the node the moved object currently
+        points at via an on/in edge (grasp-then-release reuse). This mirrors
+        _resolve_manipulation_event's candidate scoring but for the container.
+        """
+
+        bound_uid = self.entity_bindings.get(target_object)
+        if bound_uid is not None:
+            for node in self.graph.nodes:
+                if self._node_uid(node) == bound_uid:
+                    return node
+
+        normalized = _canonical_or_unknown_caption(target_object)
+        same_name = [
+            node
+            for node in self.graph.nodes
+            if _canonical_or_unknown_caption(getattr(node, "caption", None)) == normalized
+        ]
+        if len(same_name) == 1:
+            return same_name[0]
+
+        task_obj = self._resolve_env_object(target_object)
+        task_position = self._object_position(task_obj)
+        if task_position is not None and same_name:
+            best = None
+            best_distance = float("inf")
+            for node in same_name:
+                position = self._node_position(node)
+                if position is None:
+                    continue
+                dim = min(len(position), len(task_position), 3)
+                distance = float(
+                    np.linalg.norm(
+                        np.asarray(position[:dim]) - np.asarray(task_position[:dim])
+                    )
+                )
+                if distance < best_distance:
+                    best_distance = distance
+                    best = node
+            if best is not None and best_distance <= _env_float(
+                "ISBENCH_SAMJAM_UNIGOAL_ENTITY_ANCHOR_RADIUS", 0.3
+            ):
+                return best
+
+        # Fallback: the moved object currently has an on/in edge; use the other
+        # endpoint as the target (covers RELEASE-style placements where the
+        # target id is implied by the existing support).
+        for edge in moved_node.edges:
+            other = edge.node2 if edge.node1 is moved_node else edge.node1
+            if edge.relation in {"on", "in"} and self._node_uid(other) != self._node_uid(
+                moved_node
+            ):
+                return other
+        return None
 
     def _resolve_manipulation_event(
         self,
@@ -2505,6 +2999,8 @@ class SAMJAMUniGoalGraphAdapter:
             attributes = {
                 "source": "samjam_unigoal",
                 "uid": uid,
+                "entity_id": getattr(node, "entity_id", None)
+                or self._entity_id_for_uid(uid),
                 "trace_id": f"node@{id(node)}",
                 "source_ids": source_ids,
                 "stable_object_id": stable_object_id,
@@ -2731,6 +3227,16 @@ class SAMJAMUniGoalBackend:
     def set_task_categories(self, categories) -> None:
         self.samjam_backend.set_task_categories(categories)
 
+    def set_task_context(self, task_context) -> None:
+        """[L3] Forward task scene priors to the SAMJAM VLM adapter."""
+
+        self.samjam_backend.set_task_context(task_context)
+
+    def set_task_entities(self, entity_ids) -> None:
+        """[P3] Forward exact BDDL entity ids to the UniGoal adapter."""
+
+        self.unigoal_adapter.set_task_entities(entity_ids)
+
     def mark_manipulated_nodes(self, node_uids: List[int]) -> None:
         self.unigoal_adapter.mark_manipulated_nodes(node_uids)
 
@@ -2799,8 +3305,11 @@ class SAMJAMUniGoalBackend:
             samjam_relations=samjam_relations,
         )
         self.last_result = result
-        self.samjam_backend.mask_generator = None
-        self.samjam_backend.video_predictor = None
+        # Do NOT drop the SAM2 model references here. Reloading the
+        # hiera_large checkpoint on every frame repeatedly spikes GPU memory
+        # and is the main driver of the CUDA OOM seen in long episodes.
+        # The model is released once per episode in reset() instead; keep only
+        # the cache cleanup so residual feature tensors are reclaimed.
         import torch
 
         if torch.cuda.is_available():
