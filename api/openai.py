@@ -11,7 +11,7 @@
 import requests
 
 url = "https://llm-api.net/v1/chat/completions"
-api_key = "sk-psVLXPX5aNmSC0Wm4Bt7X4BM85izhpMMaiyfBBTtGHxqY4Tj"
+api_key = "sk-pIXX3MnQ406ZJ0WBDIsRmxSse5ZfZUNDu3V09VV8Aiqk9jxX"
 
 headers = {
     "x-goog-api-key": api_key,
