@@ -3,7 +3,7 @@ includes:
   - task.yaml
 
 task:
-  primitive_type: auto
+  primitive_type: starter
   prompt_setting: v1
 
 scene_graph:

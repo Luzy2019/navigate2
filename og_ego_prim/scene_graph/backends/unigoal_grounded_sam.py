@@ -257,8 +257,8 @@ class UniGoalGroundedSAMBackend:
             device=device,
             base_url=os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE"),
             api_key=os.environ.get("OPENAI_API_KEY") or "EMPTY",
-            llm_model=self.scene_graph_config.option("ISBENCH_SCENE_GRAPH_LLM_MODEL", "gpt-4o-mini"),
-            vlm_model=self.scene_graph_config.option("ISBENCH_SCENE_GRAPH_VLM_MODEL", "gpt-4o-mini"),
+            llm_model=self.scene_graph_config.option("ISBENCH_SCENE_GRAPH_LLM_MODEL", "gpt-4o"),
+            vlm_model=self.scene_graph_config.option("ISBENCH_SCENE_GRAPH_VLM_MODEL", "gpt-4o"),
         )
         graph = Graph(args, is_navigation=True)
         self._patch_unigoal_iou_fallback()

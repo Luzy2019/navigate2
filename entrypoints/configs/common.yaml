@@ -10,7 +10,7 @@ scene_graph:
   step_interval: 50
   update_every: 1
   history_interval: 50
-  image_size: 256x256
+  image_size: 512x512
   sensor_name: null
   hfov: 90.0
   output_debug_matching: true
@@ -26,6 +26,10 @@ scene_graph:
     samjam_unigoal_mask_confidence: 0.0
     samjam_unigoal_min_detections: 1
     samjam_unigoal_name_switch_margin: 1.25
+    # [VLM-detail] Downscale the image fed to the VLM (SAM2/UniGoal keep the
+    # full sensor resolution). gpt-4o recall on small far objects degrades when
+    # the input is large; a smaller whole image restores tabletop detection.
+    samjam_vlm_max_side: 320
     scene_graph_debug_max_items: 40
     samjam_match_vlm_coverage: 0.5
     samjam_match_mask_coverage: 0.35
@@ -73,8 +77,8 @@ scene_graph:
     scene_graph_task_scene_bev_max_side: 4096
     scene_graph_task_scene_bev_max_scale: 48.0
     scene_graph_bev_video_fps: 2.0
-    scene_graph_llm_model: gpt-4o-mini
-    scene_graph_vlm_model: gpt-4o-mini
+    scene_graph_llm_model: gpt-4o
+    scene_graph_vlm_model: gpt-4o
     unigoal_node_space: null
     unigoal_extra_node_space: null
     unigoal_grounded_sam_device: null

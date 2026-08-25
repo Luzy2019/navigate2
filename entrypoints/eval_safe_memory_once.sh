@@ -36,8 +36,8 @@ Usage:
   bash entrypoints/eval_safe_memory_once.sh ABLATION_PROFILE MODEL_NAME SCENE TASK_OR_JSON [CONFIG] [WORK_DIR] [EXTRA_ARGS...]
 
 Examples:
-  bash entrypoints/eval_safe_memory_once.sh full gpt-4o-mini Beechwood_0_int lifelong_crossroom__beechwood__knife_hidden_in_hamper_v3
-  bash entrypoints/eval_safe_memory_once.sh no_sg_no_rp gpt-4o-mini Beechwood_0_int data/tasks/composite/lifelong_crossroom__beechwood__knife_hidden_in_hamper_v3.json
+  bash entrypoints/eval_safe_memory_once.sh full gpt-4o Beechwood_0_int lifelong_crossroom__beechwood__knife_hidden_in_hamper_v3
+  bash entrypoints/eval_safe_memory_once.sh no_sg_no_rp gpt-4o Beechwood_0_int data/tasks/composite/lifelong_crossroom__beechwood__knife_hidden_in_hamper_v3.json
 
 Notes:
   - ABLATION_PROFILE must be one of: full, no_sg, no_rp, no_sg_no_rp.

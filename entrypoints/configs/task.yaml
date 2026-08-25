@@ -2,7 +2,7 @@ task:
   name: null
   scene: null
   model: null
-  primitive_type: auto
+  primitive_type: starter
   prompt_setting: v1
   plan_max_steps: null
   stop_on_error: true

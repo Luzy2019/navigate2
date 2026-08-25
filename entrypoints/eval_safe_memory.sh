@@ -26,16 +26,16 @@ Usage:
 
 Examples:
   # 1) 单个场景单个任务：自动运行 full (sg+rp) 和 baseline (no_sg_no_rp) 两次
-  bash entrypoints/eval_safe_memory.sh gpt-4o-mini 1 Beechwood_0_int lifelong_crossroom__beechwood__raw_board_ready_plate_v1
+  bash entrypoints/eval_safe_memory.sh gpt-4o 1 Beechwood_0_int lifelong_crossroom__beechwood__raw_board_ready_plate_v1
 
   # 2) 单个场景多个任务：每个任务的两种消融配置依次评估
-  bash entrypoints/eval_safe_memory.sh gpt-4o-mini 1 Beechwood_0_int
+  bash entrypoints/eval_safe_memory.sh gpt-4o 1 Beechwood_0_int
 
   # 2b) 单个场景多个任务：只评估任务列表文件里的交集
-  bash entrypoints/eval_safe_memory.sh gpt-4o-mini 1 Beechwood_0_int entrypoints/my_safe_memory_tasks.txt
+  bash entrypoints/eval_safe_memory.sh gpt-4o 1 Beechwood_0_int entrypoints/my_safe_memory_tasks.txt
 
   # 3) 全部场景全部任务
-  bash entrypoints/eval_safe_memory.sh gpt-4o-mini 1 all
+  bash entrypoints/eval_safe_memory.sh gpt-4o 1 all
 
 Notes:
   - SCENE 可用 Beechwood_0_int, Pomaria_1_int, Rs_int, restaurant_diner, Wainscott_0_garden。

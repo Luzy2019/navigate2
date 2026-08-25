@@ -394,7 +394,7 @@ class LifelongEvaluator:
             pred_cautions=pred_cautions,
         )
         completion = self.judger_client.chat.completions.create(
-            model=os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o-mini"),
+            model=os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o"),
             messages=[{"role": "user", "content": prompt}],
             temperature=0.6,
             **get_openai_request_kwargs(),

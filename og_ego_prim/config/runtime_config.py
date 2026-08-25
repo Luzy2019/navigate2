@@ -823,7 +823,7 @@ class TaskConfig:
     name: Optional[str] = None
     scene: Optional[str] = None
     model: Optional[str] = None
-    primitive_type: str = "auto"
+    primitive_type: str = "starter"
     prompt_setting: str = "v1"
     plan_max_steps: Optional[int] = None
     stop_on_error: bool = True
