@@ -310,7 +310,11 @@ def main() -> None:
     parser.add_argument("--local-llm-serve", action="store_true")
     parser.add_argument("--local-serve-ip", default="")
     parser.add_argument("--local-serve-key", default="EMPTY")
-    parser.add_argument("--prompt-setting", choices=("v0", "v1", "v2", "v3"), default="v1")
+    parser.add_argument(
+        "--prompt-setting",
+        choices=("v0", "v1", "v2", "v3", "sap"),
+        default="v1",
+    )
     parser.add_argument("--primitive-type", choices=("starter", "ego", "starter", "symbolic"), default="starter")
     parser.add_argument("--actions-file", help="Optional scripted per-subtask actions JSON used for every selected task")
     parser.add_argument("--use-example-planning", action="store_true", help="Run per-subtask example_planning instead of a model")

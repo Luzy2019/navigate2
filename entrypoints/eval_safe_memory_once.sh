@@ -40,11 +40,12 @@ Examples:
   bash entrypoints/eval_safe_memory_once.sh no_sg_no_rp gpt-4o Beechwood_0_int data/tasks/composite/lifelong_crossroom__beechwood__knife_hidden_in_hamper_v3.json
 
 Notes:
-  - ABLATION_PROFILE must be one of: full, no_sg, no_rp, no_sg_no_rp.
+  - ABLATION_PROFILE must be one of: full, no_sg, no_rp, no_sg_no_rp, sap.
     full = scene graph + risk predictor enabled (default).
     no_sg = scene graph disabled (risk predictor enabled).
     no_rp = risk predictor disabled (scene graph enabled).
     no_sg_no_rp = both disabled (baseline).
+    sap = scene graph and risk predictor disabled; SAP cognition prompt enabled.
   - Each invocation uses a separate default work directory, so different profiles can run concurrently.
   - If CONFIG is omitted, the Python runner selects the task-specific safe-memory YAML when one exists.
   - Set ISBENCH_PYTHON to override the default isbench interpreter.
@@ -62,12 +63,13 @@ if [[ $# -ge 5 ]]; then
 fi
 
 case "${ABLATION_PROFILE}" in
-    full)       EXTRA_FLAGS=() ;;
-    no_sg)      EXTRA_FLAGS=(--no-enable-scene-graph) ;;
-    no_rp)      EXTRA_FLAGS=(--no-enable-risk-predictor) ;;
+    full)       EXTRA_FLAGS=(--enable-scene-graph --enable-risk-predictor) ;;
+    no_sg)      EXTRA_FLAGS=(--no-enable-scene-graph --enable-risk-predictor) ;;
+    no_rp)      EXTRA_FLAGS=(--enable-scene-graph --no-enable-risk-predictor) ;;
     no_sg_no_rp) EXTRA_FLAGS=(--no-enable-scene-graph --no-enable-risk-predictor) ;;
+    sap) EXTRA_FLAGS=(--no-enable-scene-graph --no-enable-risk-predictor --prompt-setting sap) ;;
     *)
-        echo "ABLATION_PROFILE must be full, no_sg, no_rp, or no_sg_no_rp, got: ${ABLATION_PROFILE}" >&2
+        echo "ABLATION_PROFILE must be full, no_sg, no_rp, no_sg_no_rp, or sap, got: ${ABLATION_PROFILE}" >&2
         exit 2
         ;;
 esac
@@ -85,7 +87,7 @@ EXTRA_ARGS=("${@:7}")
 mkdir -p "${WORK_DIR}"
 LOG_FILE="${WORK_DIR}/console.log"
 
-ISBENCH_LOG_FILE_ONLY=1 "${PYTHON_BIN}" -m og_ego_prim.cli.safe_memory_benchmark_once \
+"${PYTHON_BIN}" -m og_ego_prim.cli.safe_memory_benchmark_once \
     "${CONFIG_ARGS[@]}" \
     --model "${MODEL_NAME}" \
     "${EXTRA_FLAGS[@]}" \

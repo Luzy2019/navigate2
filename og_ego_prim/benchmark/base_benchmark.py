@@ -3,7 +3,7 @@ import re
 from typing import Dict, List, Optional
 
 from og_ego_prim.utils.types import StepwisePlan
-from og_ego_prim.primitives.specs import PrimitiveType, expand_legacy_plan_for_starter
+from og_ego_prim.primitives.specs import PrimitiveType
 from og_ego_prim.task_planner import ExamplePlanner
 
 
@@ -28,12 +28,6 @@ class Benchmark(ABC):
 
         self.env_config = self.init_env_config(task, scene, config)
         self._example_planning = self._get_example_planning(config)
-        if primitive_type == "starter":
-            self._example_planning = [
-                expanded_plan
-                for plan in self._example_planning
-                for expanded_plan in expand_legacy_plan_for_starter(plan)
-            ]
 
     @abstractmethod
     def init_env_config(self, task: str, scene: str, config: Dict) -> Dict:

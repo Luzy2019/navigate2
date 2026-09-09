@@ -125,6 +125,9 @@ class AgentPlanner:
         self.debug = debug
 
         self.prompt_setting = prompt_setting
+        self.sap_cognitions = (
+            load_sap_cognitions() if self.prompt_setting == "sap" else ""
+        )
         self.primitive_type = primitive_type
         self.valid_primitives = get_valid_primitives(primitive_type)
         self.use_initial_setup = use_initial_setup
@@ -418,6 +421,7 @@ class AgentPlanner:
                 scene_description=scene_description,
                 awareness=awareness,
                 safety_tips=self.safety_tips_str,
+                sap_cognitions=self.sap_cognitions,
                 placement_constraints=self.placement_constraints_str,
                 floor_room_map=self.floor_room_map_str,
             )
@@ -440,6 +444,18 @@ class AgentPlanner:
                     task_goal=self.goal_description,
                     wash_rules_str=self.wash_rules_str,
                     history_actions=history_plans
+                )
+            elif self.prompt_setting == 'sap':
+                prompt = inject_sap_safety_instruction(
+                    V0StepPlanningPrompt.format(
+                        objects_str=self.objects_str,
+                        task_instruction=self.task_instruction,
+                        object_abilities_str=self.object_abilities_str,
+                        task_goal=self.goal_description,
+                        wash_rules_str=self.wash_rules_str,
+                        history_actions=history_plans,
+                    ),
+                    self.sap_cognitions,
                 )
             elif self.prompt_setting == 'v2': # v0 + cot safety reminder
                 assert self.tracker.awareness is not None and 'content' in self.tracker.awareness
@@ -503,6 +519,19 @@ class AgentPlanner:
                     wash_rules_str=self.wash_rules_str,
                     history_actions=history_plans,
                     scene_description=scene_description,
+                )
+            elif self.prompt_setting == 'sap':
+                prompt = inject_sap_safety_instruction(
+                    T0StepPlanningPrompt.format(
+                        objects_str=self.objects_str,
+                        task_instruction=self.task_instruction,
+                        object_abilities_str=self.object_abilities_str,
+                        task_goal=self.goal_description,
+                        wash_rules_str=self.wash_rules_str,
+                        history_actions=history_plans,
+                        scene_description=scene_description,
+                    ),
+                    self.sap_cognitions,
                 )
             elif self.prompt_setting == 'v2':
                 assert self.tracker.awareness is not None and 'content' in self.tracker.awareness

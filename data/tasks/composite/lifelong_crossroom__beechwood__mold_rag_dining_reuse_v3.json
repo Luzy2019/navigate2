@@ -191,7 +191,7 @@
       "L": "Use rag.n.01_1 to remove mold from the kitchen cabinet, then return that rag to the kitchen bottom cabinet while rag.n.01_2 remains on its separate kitchen table.",
       "G_task": "(:goal (and (not (covered cabinet.n.01_1 mold.n.05_1)) (ontop rag.n.01_1 bottom_cabinet.n.01_1)))",
       "G_safe": [],
-      "H_limit": 80,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(rag.n.01_1)",
@@ -234,7 +234,7 @@
         "(ontop rag.n.01_1 table.n.02_2)",
         "(ontop rag.n.01_2 table.n.02_3)"
       ],
-      "H_limit": 140,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(table.n.02_1)",
@@ -315,7 +315,7 @@
           "type": "before"
         }
       ],
-      "H_limit": 80,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "GRASP(rag.n.01_2)",

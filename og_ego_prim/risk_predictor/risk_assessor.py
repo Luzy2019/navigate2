@@ -2,32 +2,12 @@
 
 from __future__ import annotations
 
-from collections import deque
 import json
-import re
-from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Tuple
+from typing import Any, Callable, Iterable, Mapping, Optional, Tuple
 
-from og_ego_prim.object_model.resolver import normalize_entity_alias
-from og_ego_prim.utils.planning import parse_model_json_object, redact_bddl_instance_ids
+from og_ego_prim.utils.planning import parse_model_json_object
 
 from .models import Caution, HazardDraft, HazardLevel, RiskContext
-
-
-_MEMBERSHIP_RELATIONS = frozenset({"in_room", "in_group"})
-_TRAILING_INSTANCE = re.compile(r"_(\d+)$")
-
-
-def _entity_values(value: Any) -> Tuple[str, ...]:
-    if value is None:
-        return ()
-    values = (value,) if isinstance(value, str) else value
-    if not isinstance(values, Iterable):
-        values = (values,)
-    return tuple(text for item in values if (text := str(item).strip()))
-
-
-def _base_entity_alias(value: Any) -> str:
-    return _TRAILING_INSTANCE.sub("", normalize_entity_alias(value))
 
 
 def _node_name(node: Mapping[str, Any]) -> str:
@@ -38,19 +18,6 @@ def _node_name(node: Mapping[str, Any]) -> str:
         or node.get("caption")
         or node.get("id")
     )
-
-
-def _node_aliases(node: Mapping[str, Any]) -> Tuple[str, ...]:
-    values = (
-        node.get("entity_id"),
-        node.get("source_object_id"),
-        node.get("id"),
-        node.get("label"),
-        node.get("name"),
-        node.get("caption"),
-        node.get("role"),
-    )
-    return tuple(dict.fromkeys(_entity_values(values)))
 
 
 def _scene_payload(scene: Any) -> Mapping[str, Any]:
@@ -64,127 +31,6 @@ def _scene_payload(scene: Any) -> Mapping[str, Any]:
         if isinstance(state, Mapping) and state.get("ready") is False:
             raise RuntimeError("scene graph snapshot is explicitly not ready")
     return payload
-
-
-def _index_graph(
-    payload: Mapping[str, Any],
-) -> Tuple[
-    Dict[str, Mapping[str, Any]],
-    Tuple[Mapping[str, Any], ...],
-    Dict[str, Tuple[int, ...]],
-]:
-    rooms = payload.get("rooms")
-    if not isinstance(rooms, (list, tuple)) or not rooms:
-        # Perception is not authoritative during initialization or when the
-        # scene graph backend is disabled. A temporarily empty graph must not
-        # crash the episode: return an empty graph and let the VLM verdict the
-        # action against the no-evidence prompt (which forces safe).
-        return {}, (), {}
-
-    nodes_by_id: Dict[str, Mapping[str, Any]] = {}
-    raw_edges = []
-    for room in rooms:
-        if not isinstance(room, Mapping):
-            raise RuntimeError("scene graph contains a room that is not a mapping")
-        room_nodes = room.get("nodes", ())
-        room_edges = room.get("edges", ())
-        if not isinstance(room_nodes, (list, tuple)):
-            raise RuntimeError("scene graph room nodes must be a list")
-        if not isinstance(room_edges, (list, tuple)):
-            raise RuntimeError("scene graph room edges must be a list")
-        for node in room_nodes:
-            if not isinstance(node, Mapping) or not str(node.get("id") or "").strip():
-                raise RuntimeError("scene graph contains a node without an id")
-            node_id = str(node["id"])
-            if node_id in nodes_by_id:
-                raise RuntimeError(f"scene graph contains duplicate node id {node_id!r}")
-            nodes_by_id[node_id] = node
-        for edge in room_edges:
-            if not isinstance(edge, Mapping):
-                raise RuntimeError("scene graph contains a relation that is not a mapping")
-            raw_edges.append(edge)
-
-    if not nodes_by_id:
-        # Same transient/empty-perception case as the empty-rooms branch: the
-        # backend returned rooms but zero detected nodes (e.g. first frame only
-        # recognized the floor). Do not crash the episode; evaluate against an
-        # empty graph so the VLM has no evidence to flag a hazard.
-        return {}, (), {}
-
-    physical_edges = []
-    adjacency: Dict[str, list[int]] = {}
-    for edge in raw_edges:
-        relation = str(edge.get("type") or edge.get("relation") or "").strip()
-        if not relation:
-            raise RuntimeError("scene graph contains a relation without a type")
-        relation_key = re.sub(r"[\s_-]+", "_", relation.casefold()).strip("_")
-        if relation_key in _MEMBERSHIP_RELATIONS:
-            continue
-        source = str(edge.get("source") or "").strip()
-        target = str(edge.get("target") or "").strip()
-        if source not in nodes_by_id or target not in nodes_by_id:
-            raise RuntimeError(
-                f"scene graph relation {source!r} {relation!r} {target!r} has a dangling endpoint"
-            )
-        edge_index = len(physical_edges)
-        physical_edges.append(
-            {"source": source, "target": target, "type": relation}
-        )
-        adjacency.setdefault(source, []).append(edge_index)
-        adjacency.setdefault(target, []).append(edge_index)
-
-    return (
-        nodes_by_id,
-        tuple(physical_edges),
-        {node_id: tuple(indices) for node_id, indices in adjacency.items()},
-    )
-
-
-def _resolve_entity(
-    value: str,
-    nodes_by_id: Mapping[str, Mapping[str, Any]],
-) -> Tuple[str, ...]:
-    raw = str(value).strip().casefold()
-    direct = {
-        node_id
-        for node_id, node in nodes_by_id.items()
-        if raw in {str(alias).strip().casefold() for alias in _node_aliases(node)}
-    }
-    if direct:
-        return tuple(sorted(direct))
-
-    base = _base_entity_alias(value)
-    fallback = {
-        node_id
-        for node_id, node in nodes_by_id.items()
-        if base
-        and base
-        in {
-            _base_entity_alias(alias)
-            for alias in _entity_values(
-                (
-                    node.get("label"),
-                    node.get("name"),
-                    node.get("caption"),
-                    node.get("role"),
-                )
-            )
-        }
-    }
-    if fallback:
-        return tuple(sorted(fallback))
-    raise RuntimeError(f"scene graph does not contain required entity {value!r}")
-
-
-def _action_roots(context: RiskContext, held_object: Optional[str]) -> Tuple[str, ...]:
-    action = context.action
-    if action is None:
-        raise RuntimeError("risk assessment requires a candidate action")
-    actor_id = action.actor_id
-    entities = [entity for entity in action.entity_ids if entity != actor_id]
-    if held_object:
-        entities.append(held_object)
-    return tuple(dict.fromkeys(_entity_values(entities)))
 
 
 def _format_scene(
@@ -219,64 +65,6 @@ def _format_scene(
     return "\n".join(lines)
 
 
-def _format_relation_expansion(
-    resolved_roots: Tuple[Tuple[str, Tuple[str, ...]], ...],
-    nodes_by_id: Mapping[str, Mapping[str, Any]],
-    edges: Tuple[Mapping[str, Any], ...],
-    adjacency: Mapping[str, Tuple[int, ...]],
-) -> str:
-    root_ids = tuple(
-        dict.fromkeys(
-            node_id
-            for _, candidate_ids in resolved_roots
-            for node_id in candidate_ids
-        )
-    )
-    if not root_ids:
-        return (
-            "Resolved roots (identity mappings only, not physical relations): none\n"
-            "Reachable physical relations: none"
-        )
-
-    queue = deque((node_id, 0) for node_id in root_ids)
-    visited_nodes = set(root_ids)
-    visited_edges = set()
-    records = []
-    while queue:
-        current_id, depth = queue.popleft()
-        for edge_index in adjacency.get(current_id, ()):
-            edge = edges[edge_index]
-            other_id = edge["target"] if edge["source"] == current_id else edge["source"]
-            if edge_index not in visited_edges:
-                visited_edges.add(edge_index)
-                records.append((depth + 1, edge_index, current_id, edge))
-            if other_id not in visited_nodes:
-                visited_nodes.add(other_id)
-                queue.append((other_id, depth + 1))
-
-    lines = ["Resolved roots (identity mappings only, not physical relations):"]
-    for entity, candidate_ids in resolved_roots:
-        candidates = ", ".join(
-            f"{_node_name(nodes_by_id[node_id])} [id={node_id}]"
-            for node_id in candidate_ids
-        )
-        lines.append(f"- task_entity={entity}; scene_node={candidates}")
-    lines.append("Reachable physical relations:")
-    for depth, _, expanded_from, edge in sorted(records):
-        lines.append(
-            f"- depth {depth}: {_node_name(nodes_by_id[edge['source']])} "
-            f"{edge['type']} {_node_name(nodes_by_id[edge['target']])} "
-            f"(expanded from {_node_name(nodes_by_id[expanded_from])})"
-        )
-    if not records:
-        lines.append("- none")
-    lines.append(
-        f"Traversal complete: {len(visited_nodes)} node(s), "
-        f"{len(visited_edges)} relation(s); no reachable physical relation was omitted."
-    )
-    return "\n".join(lines)
-
-
 def _task_text(task: Any) -> str:
     if task is None:
         return "No task context was provided."
@@ -297,80 +85,10 @@ def _task_text(task: Any) -> str:
         return json.dumps(selected or dict(payload), ensure_ascii=False, sort_keys=True)
     return str(payload)
 
-
-def _format_scheduler(scheduler: Any) -> str:
-    """Render live pending temporal processes for the risk model."""
-    if scheduler is None:
-        return "Time scheduler is unavailable. Do not infer timers or remaining time."
-
-    payload = scheduler.to_dict() if callable(getattr(scheduler, "to_dict", None)) else scheduler
-    if not isinstance(payload, Mapping):
-        return "Time scheduler is unavailable. Do not infer timers or remaining time."
-
-    current_step = payload.get("step")
-    if current_step is None:
-        clock = payload.get("clock")
-        if isinstance(clock, Mapping):
-            current_step = clock.get("step")
-    if current_step is None:
-        clock = getattr(scheduler, "clock", None)
-        current_step = getattr(clock, "step", None)
-    try:
-        current_step = None if current_step is None else int(current_step)
-    except (TypeError, ValueError):
-        current_step = None
-
-    pending = payload.get("pending")
-    if pending is None and callable(getattr(scheduler, "pending_for", None)):
-        pending = scheduler.pending_for()
-    if not isinstance(pending, Iterable) or isinstance(pending, (str, bytes, Mapping)):
-        pending = ()
-
-    lines = ["Time scheduler (authoritative temporal state):"]
-    lines.append(f"- current_step: {current_step if current_step is not None else 'unknown'}")
-    records = []
-    for process in pending:
-        record = process.to_dict() if callable(getattr(process, "to_dict", None)) else process
-        if isinstance(record, Mapping):
-            records.append(record)
-    if not records:
-        lines.append("- pending_processes: none")
-        return "\n".join(lines)
-
-    lines.append("- pending_processes:")
-    for record in records:
-        ready_step = record.get("ready_step")
-        try:
-            ready_step = None if ready_step is None else int(ready_step)
-        except (TypeError, ValueError):
-            ready_step = None
-        remaining = (
-            "unknown"
-            if current_step is None or ready_step is None
-            else str(max(0, ready_step - current_step))
-        )
-        entity_ids = ", ".join(_entity_values(record.get("entity_ids"))) or "global"
-        blocking_actions = ", ".join(_entity_values(record.get("blocking_actions"))) or "none"
-        lines.append(
-            "  - "
-            f"process_id={record.get('process_id')}; "
-            f"type={record.get('process_type')}; "
-            f"entities={entity_ids}; "
-            f"status={record.get('status')}; "
-            f"start_step={record.get('start_step')}; "
-            f"ready_step={ready_step}; "
-            f"remaining_steps={remaining}; "
-            f"readiness_predicate={record.get('readiness_predicate')}; "
-            f"blocking_actions={blocking_actions}"
-        )
-    return "\n".join(lines)
-
-
 def _risk_prompt(
     context: RiskContext,
     held_object: Optional[str],
     scene_text: str,
-    relation_expansion: str,
 ) -> str:
     action = context.action
     action_text = action.to_legacy_plan(lowercase=False) if action is not None else "unknown"
@@ -400,11 +118,6 @@ Mandatory current-action gate:
 
 Current scene graph snapshot:
 {scene_text}
-
-{_format_scheduler(context.scheduler)}
-
-Complete code-generated breadth-first relation expansion from every action entity and the held object:
-{relation_expansion}
 
 Decision rules:
 - Use the scene graph as the source of truth for remembered objects and relations. A node with visible=false is remembered but currently unseen; it is not missing, removed, consumed, or empty.
@@ -530,32 +243,10 @@ class RiskAssessor:
         held_object = self.held_object_getter() if self.held_object_getter else None
         held_object = str(held_object).strip() if held_object else None
         payload = _scene_payload(context.scene)
-        nodes_by_id, edges, adjacency = _index_graph(payload)
-        resolved_roots = []
-        navigation_target = (
-            context.action.object_id
-            if context.action.name == "NAVIGATE_TO"
-            else None
-        )
-        for entity in _action_roots(context, held_object):
-            try:
-                candidate_ids = _resolve_entity(entity, nodes_by_id)
-            except RuntimeError:
-                # if entity != navigation_target:
-                #     raise
-                # continue
-                continue
-            resolved_roots.append((entity, candidate_ids))
         prompt = _risk_prompt(
             context,
             held_object,
             _format_scene(payload),
-            _format_relation_expansion(
-                tuple(resolved_roots),
-                nodes_by_id,
-                edges,
-                adjacency,
-            ),
         )
         self.last_prompt = prompt
         raw_response = self.client.model(prompt)

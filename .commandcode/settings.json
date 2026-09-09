@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(env)",
+      "Shell(grep:*)",
+      "Shell(sed:*)",
+      "Shell(for u in \"https://nikoapi.xyz/\" \"https://nikoapi.xyz/v1/models\" \"https://nikoapi.xyz/anthropic\"; do echo \"=== $u ===\"; curl -sS -m 10 -o /tmp/niko_probe.txt -w \"HTTP %{http_code}\\n\" \"$u\" 2>&1; head -c 400 /tmp/niko_probe.txt; echo; done)",
+      "Shell(conda env list 2>&1 | head -30; echo \"===\"; ls -la ~/miniconda3/envs 2>/dev/null; ls -la ~/anaconda3/envs 2>/dev/null; echo \"===\"; ls /opt/conda/envs 2>/dev/null)",
+      "Shell(source:*)",
+      "Shell(conda:*)",
+      "Shell(python -c import omnigibson; print('omnigibson', omnigibson.__version__) 2 >& 1)",
+      "Shell(bash -lc 'source /home/lzy/anaconda3/etc/profile.d/conda.sh && conda activate isbench && python -c \"import omnigibson as og; print(\\\"omnigibson\\\", og.__version__)\" 2>&1 | tail -20')",
+      "Shell(bash -lc export ISBENCH_OMNIGIBSON_PYTHON=/home/lzy/anaconda3/envs/isbench/bin/python && cd /home/lzy/code/IS-Bench && bash entrypoints/omnigibson_python.sh examples/capture_hotwater_subtask3_perspectives.py 2 >& 1)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

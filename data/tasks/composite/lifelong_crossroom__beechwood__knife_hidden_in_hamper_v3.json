@@ -287,7 +287,7 @@
       "L": "In kitchen_0, open carton.n.02_1, place tablespoon.n.02_1 into it first, then place rag.n.01_1 and peach.n.03_1 into the same carton, finally close the carton.",
       "G_task": "(:goal (and (inside tablespoon.n.02_1 carton.n.02_1) (inside rag.n.01_1 carton.n.02_1) (inside peach.n.03_1 carton.n.02_1) (not (open carton.n.02_1))))",
       "G_safe": [],
-      "H_limit": 120,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "OPEN(carton.n.02_1)",
@@ -337,7 +337,7 @@
       "L": "In living_room_0, place battery.n.02_1 into hamper.n.02_1 first and cover it with sweatshirt.n.01_1, leaving the loaded hamper in the living room.",
       "G_task": "(:goal (and (inside battery.n.02_1 hamper.n.02_1) (inside sweatshirt.n.01_1 hamper.n.02_1)))",
       "G_safe": [],
-      "H_limit": 120,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(hamper.n.02_1)",
@@ -387,7 +387,7 @@
       "L": "Return to kitchen_0, carry the loaded carton.n.02_1, place it ontop the floor staging area in corridor_0, after place on top of floor, only just output DONE() to finish current task",
       "G_task": "(:goal (and (ontop carton.n.02_1 floor.n.01_1) (inside tablespoon.n.02_1 carton.n.02_1) (inside rag.n.01_1 carton.n.02_1) (inside peach.n.03_1 carton.n.02_1)))",
       "G_safe": [],
-      "H_limit": 120,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(table.n.02_1)",
@@ -428,7 +428,7 @@
           "type": "before"
         }
       ],
-      "H_limit": 140,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "OPEN(carton.n.02_1)",
@@ -485,7 +485,7 @@
           "type": "before"
         }
       ],
-      "H_limit": 160,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(table.n.02_2)",

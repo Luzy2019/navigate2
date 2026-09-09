@@ -330,7 +330,7 @@
           "type": "before"
         }
       ],
-      "H_limit": 100,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(broom.n.01_1)",
@@ -399,7 +399,7 @@
           "type": "before"
         }
       ],
-      "H_limit": 180,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(carton.n.02_1)",
@@ -638,7 +638,7 @@
           "safety_bddl": "(and (not (ontop quiche.n.02_1 plate.n.04_1)) (not (ontop quiche.n.02_2 plate.n.04_1)) (inside quiche.n.02_2 carton.n.02_2) (not (open carton.n.02_2)) (not (ontop quiche.n.02_2 plate.n.04_2)))"
         }
       ],
-      "H_limit": 100,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(carton.n.02_1)",

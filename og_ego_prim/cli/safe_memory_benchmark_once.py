@@ -29,6 +29,39 @@ from og_ego_prim.utils.task_registry import get_task_config_path
 from og_ego_prim.utils.topdown_capture import save_topdown_assets
 
 
+def _json_default(o: Any) -> Any:
+    """Fallback serializer for report ``json.dump``.
+
+    Execution/navigation diagnostics can embed raw ``torch.Tensor`` (and numpy)
+    values (e.g. a ``target pose`` recorded in an error payload). ``json.dump``
+    writes incrementally and would otherwise raise ``TypeError`` partway through,
+    leaving a truncated report and losing the whole episode's metrics. This
+    converter guarantees the final report is always serializable.
+    """
+    # numpy scalars / arrays.
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    # torch.Tensor (also covers (Tensor, Tensor) tuples via element defaults).
+    mod = type(o).__module__ or ""
+    if "torch" in mod and hasattr(o, "tolist"):
+        try:
+            if hasattr(o, "detach"):
+                o = o.detach()
+            return o.tolist()
+        except Exception:
+            return repr(o)
+    # bytes / bytearray.
+    if isinstance(o, (bytes, bytearray)):
+        return o.decode("utf-8", errors="replace")
+    # Last-resort: stringify so the dump can never abort a finished episode.
+    try:
+        return repr(o)
+    except Exception:
+        return f"<{type(o).__name__}>"
+
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SAFE_MEMORY_CONFIG = REPOSITORY_ROOT / "entrypoints" / "configs" / "eval_safe_memory.yaml"
 
@@ -124,7 +157,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-llm-serve", action="store_true")
     parser.add_argument("--local-serve-ip", default="")
     parser.add_argument("--local-serve-key", default="EMPTY")
-    parser.add_argument("--prompt-setting", choices=("v0", "v1", "v2", "v3"), default="v1")
+    parser.add_argument(
+        "--prompt-setting",
+        choices=("v0", "v1", "v2", "v3", "sap"),
+        default="v1",
+    )
     parser.add_argument("--primitive-type", choices=("starter", "ego", "starter", "symbolic"), default="starter")
     parser.add_argument("--scene-graph-step-interval", type=int, default=30)
     parser.add_argument(
@@ -154,8 +191,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--save-topdown-video",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Save a topdown.mp4 robot trace beside video.mp4. Enabled by default.",
+        default=False,
+        help="Save a topdown.mp4 robot trace beside video.mp4. Disabled by default "
+        "because topdown capture can segfault Isaac Sim's Replicator annotators "
+        "at the end of a long episode; pass --save-topdown-video to enable.",
     )
     parser.add_argument(
         "--topdown-video-output-size",
@@ -634,7 +673,7 @@ def _run(
     if not args.enable_scene_graph:
         args.scene_graph_step_interval = 0
         runtime_config.scene_graph.backend = "disabled"
-    if not args.enable_risk_predictor:
+    if not args.enable_risk_predictor and args.prompt_setting != "sap":
         args.prompt_setting = "v1"
 
     config = load_task_config(args.task)
@@ -688,19 +727,6 @@ def _run(
                 output_dir / "samjam_outputs" / "scene_graph_debug.log"
             )
 
-    print(
-        "safe-memory runtime config: "
-        f"{Path(args.config).resolve()} "
-        f"source={args.config_resolution.get('source')}",
-        flush=True,
-    )
-    print(
-        "safe-memory scene settings: "
-        f"removed={len(config.get('scene_info', {}).get('scene_file_remove_objects', []))} "
-        f"initial_pose_overrides={len(config.get('scene_info', {}).get('object_initial_poses', {}))} "
-        f"online_object_sampling={args.online_object_sampling}",
-        flush=True,
-    )
     log_path = install_run_log(work_dir)
     print(f"run directory: {work_dir.resolve()}", flush=True)
     print(f"console log: {log_path.resolve()}", flush=True)
@@ -737,9 +763,7 @@ def _run(
     )
     benchmark_holder.append(benchmark)
     use_example_planning = scripted is not None
-    
-    if use_example_planning and benchmark.primitive_type == "starter":
-        scripted = expand_scripted_actions_for_starter(scripted)
+
     from og_ego_prim.scene_graph.observation_adapter import ISBenchObservationAdapter
 
     observation_adapter = ISBenchObservationAdapter()
@@ -864,49 +888,68 @@ def _run(
 
         execution_failed = False
         blocked_reason = None
-        for plan in plans:
-            execution_succeeded = benchmark.execute_plan(plan)
-            retry_after_execution_failure = False
-            if not execution_succeeded:
-                review = benchmark.runtime_controller.last_review
-                outcome = benchmark.runtime_controller.last_outcome
-                if (
-                    agent is not None
-                    and outcome is not None
-                    and not outcome.executed
-                    and review is not None
-                    and review.should_rethink
-                ):
-                    continue
-                if (
-                    agent is not None
-                    and outcome is not None
-                    and outcome.executed
-                    and not outcome.succeeded
-                ):
-                    retry_after_execution_failure = True
-                else:
-                    if outcome is not None and not outcome.executed:
-                        blocked_reason = outcome.reason or "blocked_by_scheduler"
-                        benchmark.tracker.track_termination(reason=blocked_reason)
-                    execution_failed = True
-                    break
-            step = benchmark.tracker.plans[-1]["step"]
-            if not args.no_capture_observations:
-                action_text = plan.to_legacy_plan()
-                action_tag = action_text.replace("(", "__").replace(")", "__")
-                observation_records.append(
-                    capture_observation(
-                        benchmark,
-                        observation_adapter,
-                        output_dir,
-                        f"{step}_{action_tag}",
-                        track_video=args.save_video,
-                        video_output_size=args.video_output_size,
+        subtask_error = None
+        try:
+            for plan in plans:
+                execution_succeeded = benchmark.execute_plan(plan)
+                retry_after_execution_failure = False
+                if not execution_succeeded:
+                    review = benchmark.runtime_controller.last_review
+                    outcome = benchmark.runtime_controller.last_outcome
+                    if (
+                        agent is not None
+                        and outcome is not None
+                        and not outcome.executed
+                        and review is not None
+                        and review.should_rethink
+                    ):
+                        continue
+                    if (
+                        agent is not None
+                        and outcome is not None
+                        and outcome.executed
+                        and not outcome.succeeded
+                    ):
+                        retry_after_execution_failure = True
+                    else:
+                        if outcome is not None and not outcome.executed:
+                            blocked_reason = outcome.reason or "blocked_by_scheduler"
+                            benchmark.tracker.track_termination(reason=blocked_reason)
+                        execution_failed = True
+                        break
+                step = benchmark.tracker.plans[-1]["step"]
+                if not args.no_capture_observations:
+                    action_text = plan.to_legacy_plan()
+                    action_tag = action_text.replace("(", "__").replace(")", "__")
+                    observation_records.append(
+                        capture_observation(
+                            benchmark,
+                            observation_adapter,
+                            output_dir,
+                            f"{step}_{action_tag}",
+                            track_video=args.save_video,
+                            video_output_size=args.video_output_size,
+                        )
                     )
-                )
-            if retry_after_execution_failure:
-                continue
+                if retry_after_execution_failure:
+                    continue
+        except Exception as exc:
+            # An unexpected per-subtask failure (planner guard, primitive
+            # assertion, perception, ...) must not kill the whole run: record
+            # the error, finish this subtask as failed, and still emit the
+            # report/metrics below so SR_L/SSR_L/Vio are always produced.
+            subtask_error = {
+                "type": exc.__class__.__name__,
+                "message": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+            print(
+                f"[safe-memory][subtask_error] subtask={index} "
+                f"{exc.__class__.__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            execution_failed = True
 
         action_end = len(benchmark.tracker.plans)
         executed_action_count = sum(
@@ -916,7 +959,11 @@ def _run(
         if blocked_reason is not None:
             termination_reason = blocked_reason
         elif execution_failed:
-            termination_reason = "execution_error"
+            termination_reason = (
+                "execution_error"
+                if subtask_error is None
+                else "episode_error"
+            )
         elif benchmark.tracker.termination is not None:
             termination_reason = benchmark.tracker.termination["reason"]
         elif action_end > action_start and benchmark.tracker.plans[-1]["plan"]["action"].lower().startswith("done"):
@@ -934,9 +981,39 @@ def _run(
         )
         result_dict = result.to_dict()
         result_dict["actions"] = plan_report_slice(benchmark.tracker.plans, action_start, action_end)
+        if subtask_error is not None:
+            result_dict["error"] = subtask_error
         subtask_reports.append(result_dict)
+        if subtask_error is not None:
+            # 子任务级错误不算整个运行崩溃：继续评估后续子任务。
+            continue
 
     benchmark.tracker.finalize_latency()
+    subtask_errors = [
+        record["error"] for record in subtask_reports if record.get("error")
+    ]
+    try:
+        metrics = evaluator.summary()
+    except Exception as exc:
+        # Evaluator results may be incomplete if the episode aborted early;
+        # still emit best-effort metrics so SR_L/SSR_L/Vio are always present.
+        metrics = {
+            "N": len(evaluator.subtasks),
+            "SR_L": None,
+            "SSR_L": None,
+            "Vio": None,
+            "episode_task_success": False,
+            "episode_safe_success": False,
+            "safety_condition_recall": None,
+            "num_task_successes": 0,
+            "num_safe_successes": 0,
+            "num_safety_conditions": 0,
+            "num_satisfied_safety_conditions": 0,
+            "summary_error": {
+                "type": exc.__class__.__name__,
+                "message": str(exc),
+            },
+        }
     report = {
         "schema_version": 1,
         "benchmark": "safe_memory_lifelong",
@@ -959,7 +1036,8 @@ def _run(
         "observations": observation_records,
         "lifelong_config": config["lifelong_config"],
         "subtask_results": subtask_reports,
-        "metrics": evaluator.summary(),
+        "metrics": metrics,
+        "subtask_errors": subtask_errors,
         "runtime_modules": benchmark.tracker.runtime_modules,
         "planner_episode": [
             entry.to_dict()
@@ -1031,7 +1109,9 @@ def _run(
 
     report_path = output_dir / "report.json"
     with report_path.open("w", encoding="utf-8") as file:
-        json.dump(report, file, indent=2, ensure_ascii=False)
+        json.dump(
+            report, file, indent=2, ensure_ascii=False, default=_json_default
+        )
     print(json.dumps(report["metrics"], indent=2), flush=True)
     print(f"safe-memory report: {report_path}", flush=True)
     return report_path
@@ -1041,6 +1121,17 @@ def run(args: argparse.Namespace) -> Path:
     benchmarks = []
     try:
         return _run(args, benchmark_holder=benchmarks)
+    except Exception as exc:
+        # Last-resort fallback: the episode aborted before a report could be
+        # written.  Dump whatever latency data the tracker collected and a
+        # clear error marker so the run still produces machine-readable output.
+        print(
+            f"[safe-memory][run_error] {exc.__class__.__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        traceback.print_exc()
+        return _write_aborted_report(args, benchmarks, exc)
     finally:
         for benchmark in reversed(benchmarks):
             try:
@@ -1052,6 +1143,86 @@ def run(args: argparse.Namespace) -> Path:
                     file=sys.stderr,
                     flush=True,
                 )
+
+
+def _write_aborted_report(
+    args: argparse.Namespace,
+    benchmarks: List[Any],
+    error: BaseException,
+) -> Path:
+    """Best-effort report for an episode that aborted mid-run.
+
+    Emitted from ``run`` when ``_run`` raised before producing ``report.json``.
+    Metrics are marked None (they could not be computed) instead of being
+    silently omitted, and the error is surfaced top-level as ``run_error``.
+    """
+    output_dir = Path(getattr(args, "work_dir", "."))
+    report = {
+        "schema_version": 1,
+        "benchmark": "safe_memory_lifelong",
+        "task": getattr(args, "task", None),
+        "scene": getattr(args, "scene", None),
+        "model": getattr(args, "model", None),
+        "planner_source": "error",
+        "primitive_type": getattr(args, "primitive_type", None),
+        "runtime_ablation": {
+            "scene_graph_enabled": getattr(args, "enable_scene_graph", None),
+            "risk_predictor_enabled": getattr(args, "enable_risk_predictor", None),
+            "use_initial_setup": getattr(args, "use_initial_setup", None),
+            "use_self_caption": getattr(args, "use_self_caption", None),
+            "prompt_setting": getattr(args, "prompt_setting", None),
+        },
+        "environment_reset_between_subtasks": False,
+        "observation_model": "single_view_egocentric_rgb",
+        "observations": [],
+        "subtask_results": [],
+        "metrics": {
+            "N": 0,
+            "SR_L": None,
+            "SSR_L": None,
+            "Vio": None,
+            "episode_task_success": False,
+            "episode_safe_success": False,
+            "safety_condition_recall": None,
+            "num_task_successes": 0,
+            "num_safe_successes": 0,
+            "num_safety_conditions": 0,
+            "num_satisfied_safety_conditions": 0,
+        },
+        "subtask_errors": [],
+        "run_error": {
+            "type": error.__class__.__name__,
+            "message": str(error),
+        },
+        "latency": (
+            benchmarks[-1].tracker.latency_report()
+            if benchmarks
+            else {}
+        ),
+        "elapsed_wall_seconds": None,
+        "error_stack": (
+            benchmarks[-1].tracker.error_stack
+            if benchmarks
+            else []
+        ),
+    }
+    report_path = output_dir / "report.json"
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with report_path.open("w", encoding="utf-8") as file:
+            json.dump(
+                report, file, indent=2, ensure_ascii=False, default=_json_default
+            )
+        print(json.dumps(report["metrics"], indent=2), flush=True)
+        print(f"safe-memory report (aborted): {report_path}", flush=True)
+    except Exception as exc:
+        print(
+            f"[safe-memory][aborted_report_failed] "
+            f"{exc.__class__.__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+    return report_path
 
 
 def main() -> None:

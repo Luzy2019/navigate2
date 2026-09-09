@@ -170,7 +170,7 @@
       "G_safe": [
         "(not (ontop carton.n.02_1 bottom_cabinet.n.01_1))"
       ],
-      "H_limit": 60,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(vase.n.01_1)",
@@ -222,7 +222,7 @@
       "G_safe": [
         "(not (ontop carton.n.02_2 bottom_cabinet.n.01_1))"
       ],
-      "H_limit": 80,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(carton.n.02_2)",
@@ -348,7 +348,7 @@
           "type": "after"
         }
       ],
-      "H_limit": 80,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(carton.n.02_3)",

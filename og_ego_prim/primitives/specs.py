@@ -98,7 +98,7 @@ def get_valid_primitives(primitive_type: PrimitiveType) -> Dict[str, int]:
             f"expected one of {tuple(VALID_PRIMITIVES_BY_TYPE)}"
         ) from exc
 
-# 扩展动作序列
+# deprecated: 这个函数已经被弃用, plan直接由vlm生成，动作展开不再需要手动进行
 def expand_legacy_plan_for_starter(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Description:
@@ -173,7 +173,7 @@ def expand_legacy_plan_for_starter(plan: Dict[str, Any]) -> List[Dict[str, Any]]
     )
     return expanded
 
-# symbolic -> starter 原语集的动作转换函数
+# deprecated: 这个函数已经被弃用, plan直接由vlm生成，动作转换不再需要手动进行
 def starter_evaluation_action(
     action: str,
     grasped_object: str | None,

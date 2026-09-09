@@ -121,7 +121,7 @@
       "L": "In private_office_0, take the lint screen from desk.n.01_1 and stage it on washer.n.03_1 beside clothes_dryer.n.01_1 in utility_room_0. Take out the dirty lint_screen.n.01_1 from the dryer and place it on top of the washer. ",
       "G_task": "(:goal (and (ontop lint_screen.n.01_2 washer.n.03_1)))",
       "G_safe": [],
-      "H_limit": 80,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(desk.n.01_1)",
@@ -159,7 +159,7 @@
           "safety_bddl": "(and (inside lint_screen.n.01_2 clothes_dryer.n.01_1) (not (inside lint_screen.n.01_3 clothes_dryer.n.01_1)))"
         }
       ],
-      "H_limit": 80,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(lint_screen.n.01_3)",
@@ -213,7 +213,7 @@
           "safety_bddl": "(and (not (covered lint_screen.n.01_1 lint.n.01_1)) (not (covered lint_screen.n.01_1 dust.n.01_1)) (ontop lint_screen.n.01_1 desk.n.01_1))"
         }
       ],
-      "H_limit": 100,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(clothes_dryer.n.03_1)",

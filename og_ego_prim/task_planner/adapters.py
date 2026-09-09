@@ -44,6 +44,7 @@ surface, or destination entity. In particular, IDs such as obj_0001,
 unigoal_object:0, and samjam_object:1 are observation-layer references and are
 invalid. Order eligible movable task entities by loading safety."""
 
+# 生成批量装载序列
 _LOADING_PROMPT = """Generate all remaining operations in the complete
 shared-destination loading plan from the current RGB and held_object. Choose
 one allowed destination and use it for every placement. The supplied
@@ -60,6 +61,7 @@ in exactly this order, with one matching placement before moving to the next.
 Do not repeat a completed OPEN or CLOSE, and never include NAVIGATE_TO.
 Return {"status":"LOADING_PLAN","destination":"entity","steps":["atomic action"]}."""
 
+# 在风险BLOCK时候重规划
 _SAFETY_PROMPT = """Generate an operation-only safety plan for failed_action
 within the current task_instruction. goal_description may contain later subtasks
 and is not part of this plan. When loading is null, return the minimal plan: every
@@ -105,6 +107,7 @@ The goal field must briefly name the blocked risk being removed, not copy the ta
 or goal_description. Return
 {"status":"SAFETY_PLAN","goal":"goal","steps":["atomic action"]}."""
 
+# 
 _EXECUTE_PROMPT = """Using only current RGB and held_object, prepare
 the immutable intended_operation. Return exactly the same operation with the same
 arguments when executable. The only allowed deviation is NAVIGATE_TO(one argument
@@ -191,6 +194,7 @@ class AgentPlannerAdapter:
         self.agent = agent
         self.use_obs = bool(use_obs)
         self.max_step = max_step
+        
         self._iterator: Optional[Iterator[Any]] = None
 
     def propose(self, context: PromptContext) -> Optional[Action]:
@@ -589,8 +593,8 @@ class VLMClosedLoopPlannerAdapter:
                 and action.name in {"PLACE_ON_TOP", "PLACE_INSIDE", "POUR_INTO", "DUMP_INTO"}
                 and self._held_object() is not None
             )
-            if not freeing:
-                raise ValueError("operation preparation changed the intended operation")
+            # if not freeing:
+            #     raise ValueError("operation preparation changed the intended operation")
             return self._issue(
                 action,
                 operation=True,
@@ -731,14 +735,20 @@ class VLMClosedLoopPlannerAdapter:
 
 PlannerAdapterFactory = Callable[..., PlannerAdapter]
 PLANNER_ADAPTERS: Registry[PlannerAdapterFactory] = Registry()
+
+# Callable Planner
 PLANNER_ADAPTERS.register("callable", CallablePlannerAdapter)
 
+# Iterator Planner
 PLANNER_ADAPTERS.register("example", IteratorPlannerAdapter)
 PLANNER_ADAPTERS.register("iterator", IteratorPlannerAdapter)
 PLANNER_ADAPTERS.register("scripted", IteratorPlannerAdapter)
 
+# Agent Planner
 PLANNER_ADAPTERS.register("agent_planner", AgentPlannerAdapter)
 PLANNER_ADAPTERS.register("model", AgentPlannerAdapter)
+
+# VLMClosedLoop Planner
 PLANNER_ADAPTERS.register("vlm_closed_loop", VLMClosedLoopPlannerAdapter)
 
 

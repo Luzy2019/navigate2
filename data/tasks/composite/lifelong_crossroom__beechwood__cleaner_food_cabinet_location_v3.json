@@ -147,7 +147,7 @@
       "L": "Store the cereal box in the kitchen bottom cabinet, then pick up the dirty floor sponge and place it on the kitchen table.",
       "G_task": "(:goal (and (inside box__of__cereal.n.01_1 bottom_cabinet.n.01_1) (ontop sponge.n.01_1 table.n.02_1)))",
       "G_safe": [],
-      "H_limit": 60,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(bottom_cabinet.n.01_1)",
@@ -221,7 +221,7 @@
           "safety_bddl": "(and (not (covered plate.n.04_1 dirt.n.02_1)) (not (covered plate.n.04_1 stain.n.01_1)) (not (covered sponge.n.01_1 dirt.n.02_1)))"
         }
       ],
-      "H_limit": 60,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(plate.n.04_1)",
@@ -290,7 +290,7 @@
           "safety_bddl": "(and (inside bottle__of__cleaner.n.01_1 top_cabinet.n.01_1) (not (inside bottle__of__cleaner.n.01_1 bottom_cabinet.n.01_1)))"
         }
       ],
-      "H_limit": 60,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(top_cabinet.n.01_1)",

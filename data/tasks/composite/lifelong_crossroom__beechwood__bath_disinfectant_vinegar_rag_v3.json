@@ -191,7 +191,7 @@
       "L": "Pick up the cleaning rag near the bathroom sink, clean sink.n.01_1, then carry that rag to utility_room_0 and place it on clothes_dryer.n.01_1.",
       "G_task": "(:goal (not (covered sink.n.01_1 stain.n.01_1)))",
       "G_safe": [],
-      "H_limit": 60,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(rag.n.01_2)",
@@ -238,7 +238,7 @@
           "type": "before"
         }
       ],
-      "H_limit": 60,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(rag.n.01_1)",
@@ -301,7 +301,7 @@
           "type": "before"
         }
       ],
-      "H_limit": 60,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(rag.n.01_3)",

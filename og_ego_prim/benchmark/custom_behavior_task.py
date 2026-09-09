@@ -403,7 +403,8 @@ class CustomBDDLSampler(BDDLSampler):
             return error_msg
         self._inroom_object_scope = room_type_to_scene_objs
 
-
+# 在task sample阶段使用，onlien runtime阶段不使用
+# 主要是为了给task进行采样
 class CustomBehaviorTask(BehaviorTask):
 
     def __init__(

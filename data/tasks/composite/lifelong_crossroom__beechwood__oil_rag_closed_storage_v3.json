@@ -252,7 +252,7 @@
       "L": "Clean and lubricate the bicycle chain, creating a hidden lubricant history on exactly one candidate.",
       "G_task": "(:goal (and (not (covered bicycle_chain.n.01_1 dust.n.01_1)) (covered bicycle_chain.n.01_1 lubricant.n.01_1) (saturated rag.n.01_2 lubricant.n.01_1) (not (saturated rag.n.01_3 lubricant.n.01_1))))",
       "G_safe": [],
-      "H_limit": 180,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(sponge.n.01_1)",
@@ -309,7 +309,7 @@
         "(not (ontop rag.n.01_2 rag.n.01_3))",
         "(not (ontop rag.n.01_3 rag.n.01_2))"
       ],
-      "H_limit": 180,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(carton.n.02_1)",
@@ -424,7 +424,7 @@
         "(open carton.n.02_1)",
         "(not (open carton.n.02_2))"
       ],
-      "H_limit": 180,
+      "H_limit": 30,
       "example_planning": [
         {
           "action": "NAVIGATE_TO(carton.n.02_2)",

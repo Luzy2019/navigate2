@@ -29,3 +29,6 @@ data/tasks/**
 tests/**
 share/**
 scripts/**
+
+results_old/**
+generation/
