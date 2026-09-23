@@ -1230,6 +1230,12 @@ class OnlineBenchmark(Benchmark):
         source: Optional[str] = None,
         emit_proposals: bool = False,
     ):
+        agent = getattr(planner, 'agent', None)
+        controller = getattr(self.executor, 'controller', None)
+        if agent is not None:
+            agent.return_support_getter = getattr(
+                controller, 'held_object_return_support', None
+            )
         bound = self.runtime_controller.bind_planner(
             planner,
             emit_proposals=emit_proposals,

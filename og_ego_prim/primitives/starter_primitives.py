@@ -169,6 +169,7 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         self._pending_symbolic_particle_transfer = None
         self._last_grasp_ready_navigation = None
         self._open_ready_stance_cache = {}
+        self._return_locations = {}
         self.task_placement_slots: Dict[tuple[str, str], Dict[str, Any]] = {}
         self.tactqn_open_goal_radius = float(config.tactqn_open_goal_radius)
         if self.tactqn_open_goal_radius < 0.45:
@@ -398,14 +399,24 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             }
             else None
         )
+        return_location = None
         if args:
+            return_location = (
+                self._return_location_for(args[0])
+                if prim == StarterSemanticActionPrimitiveSet.PLACE_ON_TOP else None
+            )
+            if return_location is not None:
+                yield from self._navigate_to_return_location(args[0], return_location)
             yield from self.center_first_view_on_object(
                 args[0],
                 phase=f"pre_{prim.name.lower()}",
                 surface=(prim == StarterSemanticActionPrimitiveSet.PLACE_ON_TOP),
+                target_point=(return_location["position"] if return_location else None),
             )
         try:
             yield from ctrl(*args)
+            if return_location is not None:
+                self._verify_return_location(return_location)
         except ActionPrimitiveError:
             if not self._primitive_uses_symbolic_shortcut(prim):
                 try:
@@ -707,18 +718,29 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
 
     def _apply_grasp_without_default_reset(self, obj):
         if self.symbolic_grasp:
-            grasp_pose, preferred_goal_direction = yield from (
-                self._navigate_to_grasp_ready_pose(obj)
+            # Loosened to OPEN/CLOSE level: object-nav only (radius-based,
+            # require_target_reachable=False), no IK / collision / OMPL stance
+            # sampling. The remaining radius/yaw gate lives in _symbolic_grasp.
+            yield from self._navigate_to_obj(
+                obj,
+                navigation_reason="symbolic_grasp_object",
+                require_target_reachable=False,
+            )
+            grasp_pose = obj.get_position_orientation()
+            preferred_goal_direction = (
+                self._preferred_goal_direction_from_current_base(grasp_pose)
             )
             yield from self.center_first_view_on_object(
                 obj,
                 phase="pre_grasp",
                 target_point=grasp_pose[0],
             )
-            yield from self._symbolic_grasp(
-                obj,
-                grasp_pose=grasp_pose,
-                preferred_goal_direction=preferred_goal_direction,
+            yield from self._grasp_with_return_location(
+                obj, self._symbolic_grasp(
+                    obj,
+                    grasp_pose=grasp_pose,
+                    preferred_goal_direction=preferred_goal_direction,
+                ),
             )
             return
 
@@ -769,6 +791,9 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         )
         print(f"[starter][grasp] starting physical grasp target={obj.name}")
         sys.stdout.flush()
+        yield from self._grasp_with_return_location(obj, self._physical_grasp_with_repair(obj))
+
+    def _physical_grasp_with_repair(self, obj):
         try:
             yield from super()._grasp(obj)
         except ActionPrimitiveError as exc:
@@ -5320,6 +5345,35 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
 
         yield from super()._place_on_top(obj)
 
+    def _place_with_predicate(self, obj, predicate):
+        record = self._return_location_for(obj) if predicate is object_states.OnTop else None
+        if record is None:
+            yield from super()._place_with_predicate(obj, predicate)
+            return
+        self._tracking_object = obj
+        hand_pose = self._get_hand_pose_for_object_pose(
+            (record["position"], record["orientation"])
+        )
+        yield from self._navigate_if_needed(obj, pose_on_obj=hand_pose)
+        yield from self._move_hand(hand_pose)
+        # The world can change during navigation / arm motion. Recheck at the
+        # last possible point before physical release, not only when sampling.
+        self._validate_return_location(record)
+        if not self._safe_target_in_reach(hand_pose):
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                "Return hand pose is not reachable; retaining the held object.",
+            )
+        self._verify_return_location(record)
+        yield from self._execute_release()
+        if self._get_obj_in_hand() is not None or not record["obj"].states[predicate].get_value(obj):
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.POST_CONDITION_ERROR,
+                "Physical return did not release the object onto its original support.",
+            )
+        yield from self._move_hand_upward()
+        self._verify_return_location(record)
+
     def _should_use_symbolic_cloth_inside_drop(self, obj_in_hand, container) -> bool:
         return (
             self.symbolic_cloth_inside_drop
@@ -5741,17 +5795,291 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
             pending_coverage,
         )
 
+    def _capture_return_location(self, obj):
+        """Snapshot a rigid pickup's original OnTop pose before any grasp motion."""
+        if getattr(obj, "prim_type", None) != PrimType.RIGID:
+            return None
+        state = obj.states.get(object_states.OnTop)
+        if state is None:
+            return None
+        for entity, ref in self.env.task.object_scope.items():
+            support = getattr(ref, "wrapped_obj", None)
+            # Task scope also contains particle systems (e.g. water). OnTop
+            # requires an object and explicitly rejects cloth targets.
+            if support is None or support is obj:
+                continue
+            if getattr(support, "prim_type", None) != PrimType.RIGID:
+                continue
+            if not state.get_value(support):
+                continue
+            position, orientation = obj.get_position_orientation()
+            record = {
+                "obj": obj, "support": support, "entity": entity,
+                "position": position.clone(), "orientation": orientation.clone(),
+                "support_pose": tuple(x.clone() for x in support.get_position_orientation()),
+                "aabb": tuple(x.clone() for x in obj.aabb),
+            }
+            # A large/concave furniture AABB can overlap a valid pickup pose.
+            # Remember unchanged overlaps so they do not become false blockers.
+            lower, upper = record["aabb"]
+            record["existing_overlaps"] = {}
+            for other in self.env.scene.objects:
+                if other is obj or other is support or other is self.robot:
+                    continue
+                other_lower, other_upper = other.aabb
+                if bool(torch.all(torch.minimum(upper, other_upper) -
+                                  torch.maximum(lower, other_lower) > 0.01)):
+                    record["existing_overlaps"][other.name] = (
+                        other, other_lower.clone(), other_upper.clone(),
+                    )
+            return record
+        return None
+
+    def _grasp_with_return_location(self, obj, grasp):
+        """Capture after approach, and retain the origin even on a late grasp error."""
+        was_empty = self._get_obj_in_hand() is None
+        record = None
+        if was_empty:
+            try:
+                record = self._capture_return_location(obj)
+                if record is not None:
+                    base_pos, base_orn = self.robot.get_position_orientation()
+                    record["base_pose"] = torch.tensor([
+                        float(base_pos[0]), float(base_pos[1]),
+                        float(T.quat2euler(base_orn)[2]),
+                    ])
+            except Exception as exc:
+                # Optional return metadata must never prevent the actual grasp.
+                print(f"[starter][return][capture_failed] object={obj.name} "
+                      f"error={type(exc).__name__}: {exc}", flush=True)
+                record = None
+        try:
+            yield from grasp
+        finally:
+            if was_empty and self._get_obj_in_hand() is obj:
+                self._return_locations = getattr(self, "_return_locations", {})
+                self._return_locations.pop(obj.name, None)
+                if record is not None:
+                    self._return_locations[obj.name] = record
+                    print(f"[starter][return][saved] object={obj.name} "
+                          f"support={record['entity']} position={record['position'].tolist()}", flush=True)
+                else:
+                    print(f"[starter][return][unavailable] object={obj.name} "
+                          "reason=no_valid_pickup_support", flush=True)
+
+    def _return_location_for(self, support):
+        held = self._get_obj_in_hand()
+        if held is None:
+            return None
+        record = getattr(self, "_return_locations", {}).get(held.name)
+        if record is None or record["obj"] is not held or record["support"] is not support:
+            return None
+        slot = self._configured_task_placement_slot_pose(held, support) if self.symbolic_place else None
+        if slot is not None:
+            # Resolve one stable pose for navigation, view, release and checking.
+            # Missing slot orientation means the pickup orientation, never the
+            # bottle's changing orientation while it is carried by the gripper.
+            slot = dict(slot)
+            slot.setdefault("orientation", record["orientation"].tolist())
+            position, orientation = self._build_task_placement_pose(held, slot)
+            key = tuple(position.tolist() + orientation.tolist())
+            cached = record.get("configured_return")
+            if cached is None or cached[0] != key:
+                resolved = dict(record)
+                resolved.pop("configured_return", None)
+                resolved.update(position=position, orientation=orientation)
+                lower, upper = record["aabb"]
+                corners = torch.cartesian_prod(*[
+                    torch.stack((lower[i], upper[i])) for i in range(3)
+                ])
+                rotation = T.quat2mat(orientation) @ T.quat2mat(record["orientation"]).T
+                corners = (corners - record["position"]) @ rotation.T + position
+                resolved["aabb"] = (corners.amin(dim=0), corners.amax(dim=0))
+                same_position = torch.allclose(position, record["position"], atol=0.001, rtol=0)
+                same_orientation = min(
+                    torch.norm(orientation - record["orientation"]),
+                    torch.norm(orientation + record["orientation"]),
+                ) <= 0.001
+                if not same_position or not same_orientation:
+                    resolved["existing_overlaps"] = {}
+                if not same_position:
+                    resolved.pop("ready_base_position", None)
+                    resolved.pop("base_pose", None)
+                record["configured_return"] = (key, resolved)
+                print(f"[starter][return][configured_slot] object={held.name} "
+                      f"support={record['entity']} position={position.tolist()}", flush=True)
+            return record["configured_return"][1]
+        return record
+
+    def held_object_return_support(self):
+        """Expose a concrete planner entity, never a guessed nearby support."""
+        held = self._get_obj_in_hand()
+        record = getattr(self, "_return_locations", {}).get(getattr(held, "name", None))
+        if record is None:
+            return None
+        try:
+            record = self._return_location_for(record["support"])
+            if record is None or record.get("navigation_failed", False):
+                return None
+            self._validate_return_location(record)
+        except ActionPrimitiveError:
+            return None
+        except Exception as exc:
+            print(f"[starter][return][hint_unavailable] error={type(exc).__name__}: {exc}", flush=True)
+            return None
+        return record["entity"]
+
+    def _validate_return_location(self, record):
+        """Conservative geometry preflight, without moving or releasing the payload."""
+        support = record["support"]
+        if not any(candidate is support for candidate in self.env.scene.objects):
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                "Original support is no longer in the scene; retaining the held object.",
+            )
+        pos, orn = support.get_position_orientation()
+        old_pos, old_orn = record["support_pose"]
+        if not all(bool(torch.isfinite(x).all()) for x in (
+            pos, orn, old_pos, old_orn, record["position"], record["orientation"], *record["aabb"],
+        )):
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                "Return location contains non-finite geometry; retaining the held object.",
+            )
+        if (torch.norm(pos - old_pos) > 0.01 or
+                min(torch.norm(orn - old_orn), torch.norm(orn + old_orn)) > 0.01):
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                "Return support moved; choose another placement target before releasing.",
+                {"target object": support.name},
+            )
+        lower, upper = record["aabb"]
+        carry_state = getattr(self, "_symbolic_carry_state", None) or {}
+        payload = [state["obj"] for state in carry_state.get("rigid_descendant_states", [])]
+        for obstacle in self.env.scene.objects:
+            if any(obstacle is item for item in (record["obj"], support, self.robot, *payload)):
+                continue
+            obstacle_lower, obstacle_upper = obstacle.aabb
+            overlap = torch.minimum(upper, obstacle_upper) - torch.maximum(lower, obstacle_lower)
+            # Allow contact / numerical penetration, but reject occupied volume.
+            if bool(torch.all(overlap > 0.01)):
+                previous = record.get("existing_overlaps", {}).get(obstacle.name)
+                if (previous is not None and previous[0] is obstacle
+                        and torch.allclose(obstacle_lower, previous[1], atol=0.001, rtol=0)
+                        and torch.allclose(obstacle_upper, previous[2], atol=0.001, rtol=0)):
+                    continue
+                raise ActionPrimitiveError(
+                    ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                    "Original placement position is occupied; choose another support before releasing.",
+                    {"target object": support.name, "blocking object": obstacle.name},
+                )
+
+    def _navigate_to_return_location(self, support, record):
+        self._validate_return_location(record)
+        pose = (record["position"], record["orientation"])
+        if not self.symbolic_place:
+            pose = self._get_hand_pose_for_object_pose(pose)
+        ready_base = record.get("ready_base_position", record.get("base_pose"))
+        current_base = self.robot.get_position_orientation()[0]
+        # Only skip a repeated approach at a previously validated stance.
+        # XY proximity to the object alone could mean standing across a wall.
+        if (ready_base is not None
+                and float(torch.norm(current_base[:2] - ready_base[:2])) <= 0.05
+                and self._return_pose_in_reach(pose)):
+            record["navigation_failed"] = False
+            return
+        # Symbolic return only needs the base within the placement radius
+        # (OPEN-level traversability A*), not an IK/collision/OMPL stance:
+        # the symbolic place sets the pose directly. Physical return keeps
+        # the native stance sampler for hand-pose IK precision.
+        try:
+            if self.symbolic_place:
+                yield from self._navigate_to_obj(
+                    support,
+                    pose_on_obj=pose,
+                    navigation_reason="return_to_pickup_location",
+                    require_target_reachable=False,
+                    maximum_goal_radius_override=self.symbolic_grasp_max_goal_radius,
+                )
+            else:
+                # Native stance planning revalidates the saved base pose with
+                # OG/OMPL, and samples a new stance around this exact point if
+                # it is blocked.
+                yield from self._navigate_to_native_stance_pose(
+                    support, pose_on_obj=pose, navigation_reason="return_to_pickup_location",
+                    sampled_pose_2d=record.get("base_pose"),
+                )
+            self._validate_return_location(record)
+            if not self._return_pose_in_reach(pose):
+                raise ActionPrimitiveError(
+                    ActionPrimitiveError.Reason.PLANNING_ERROR,
+                    "Return navigation finished outside placement reach; retaining the held object.",
+                    {"target object": support.name},
+                )
+        except ActionPrimitiveError:
+            record["navigation_failed"] = True
+            raise
+        record["navigation_failed"] = False
+        record["ready_base_position"] = self.robot.get_position_orientation()[0].clone()
+
+    def _return_pose_in_reach(self, pose):
+        if self.symbolic_place:
+            return self._symbolic_grasp_pose_near_enough(pose)
+        return self._safe_target_in_reach(pose)
+
+    def _verify_return_location(self, record):
+        position, orientation = record["obj"].get_position_orientation()
+        position_error = float(torch.norm(position - record["position"]))
+        dot = torch.abs(torch.dot(
+            orientation / torch.norm(orientation),
+            record["orientation"] / torch.norm(record["orientation"]),
+        )).clamp(0.0, 1.0)
+        angle_error = float(2 * torch.acos(dot))
+        if (not math.isfinite(position_error) or not math.isfinite(angle_error)
+                or position_error > 0.05 or angle_error > 0.15):
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.POST_CONDITION_ERROR,
+                "Object is not at its recorded return pose.",
+                {"object": record["obj"].name, "position error": position_error,
+                 "orientation error": angle_error},
+            )
+
+    def _sample_pose_with_object_and_predicate(
+        self, predicate, held_obj, target_obj, near_poses=None, near_poses_threshold=None,
+    ):
+        record = self._return_location_for(target_obj)
+        if predicate is object_states.OnTop and record is not None and record["obj"] is held_obj:
+            self._validate_return_location(record)
+            return record["position"].clone(), record["orientation"].clone()
+        return super()._sample_pose_with_object_and_predicate(
+            predicate, held_obj, target_obj, near_poses=near_poses,
+            near_poses_threshold=near_poses_threshold,
+        )
+
     def _task_placement_slot_pose(self, obj_in_hand, target_obj, predicate):
         if predicate is not object_states.OnTop:
+            return None
+        record = self._return_location_for(target_obj)
+        if record is not None:
+            self._validate_return_location(record)
+            return {
+                "position": record["position"].tolist(),
+                "orientation": record["orientation"].tolist(),
+            }
+        return self._configured_task_placement_slot_pose(obj_in_hand, target_obj)
+
+    def _configured_task_placement_slot_pose(self, obj_in_hand, target_obj):
+        slots = getattr(self, "task_placement_slots", {})
+        if not slots:
             return None
         object_variants = self._name_variants_for_object(obj_in_hand)
         target_variants = self._name_variants_for_object(target_obj)
         for object_key in object_variants:
             for target_key in target_variants:
-                slot_pose = self.task_placement_slots.get((object_key, target_key))
+                slot_pose = slots.get((object_key, target_key))
                 if slot_pose is not None:
                     return slot_pose
-                slot_pose = self.task_placement_slots.get(
+                slot_pose = slots.get(
                     (object_key.lower(), target_key.lower())
                 )
                 if slot_pose is not None:
@@ -5765,6 +6093,14 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         predicate,
         slot_pose,
     ):
+        record = self._return_location_for(target_obj)
+        if record is not None:
+            self._validate_return_location(record)
+            if not self._return_pose_in_reach((record["position"], record["orientation"])):
+                raise ActionPrimitiveError(
+                    ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                    "Original placement position is too far away; retaining the held object.",
+                )
         particle_states = self._symbolic_carried_particle_states(obj_in_hand)
         rigid_descendant_states = (
             self._symbolic_carried_rigid_descendant_states(obj_in_hand)
@@ -6237,6 +6573,10 @@ class PhysicalStarterSemanticActionPrimitives(StarterSemanticActionPrimitives):
         )
 
     def _navigate_to_explicit_target(self, obj):
+        return_location = self._return_location_for(obj)
+        if return_location is not None:
+            yield from self._navigate_to_return_location(obj, return_location)
+            return return_location["position"]
         if self._should_use_open_pose_navigation(obj):
             yield from self._navigate_to_open_pose_preview(obj)
             return None

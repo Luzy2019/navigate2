@@ -674,6 +674,32 @@ class AgentRuntimeController:
                         "source": "AgentRuntimeController.action_executed",
                     }
                 )
+            if review.action.name == "WAIT_FOR_COOKED" and review.action.object_id:
+                # Temperature falls during later simulator steps. Preserve
+                # which exact container completed heating across subtasks.
+                entity_id = review.action.object_id
+                obj = self.components.objects.get(entity_id)
+                change = StateChange(
+                    step=self.step,
+                    subtask_id=self.active_subtask_id,
+                    entity_id=entity_id,
+                    room_id=None if obj is None else obj.room_id,
+                    key="was_heated",
+                    old=None if obj is None else obj.states.get("was_heated"),
+                    new=True,
+                    source="successful_action",
+                )
+                self.components.objects.apply_state_change(change)
+                if callable(note_manipulation):
+                    note_manipulation(
+                        {
+                            "primitive": "STATE_UPDATE",
+                            "moved_object": entity_id,
+                            "state_updates": {"was_heated": True},
+                            "global_step_index": self.step,
+                            "source": "AgentRuntimeController.successful_action",
+                        }
+                    )
             started_processes = self.components.scheduler.start_from_event(
                 record,
                 context={

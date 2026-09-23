@@ -108,6 +108,8 @@ class AgentPlanner:
         self._pending_rethinking_prompt = None
         self._last_plan_validation_error = None
         self.held_object_getter = None
+        self.return_support_getter = None
+        self._pending_empty_hand_operation = None
         # Task-authored placement constraints (GT), grouped by 1-based subtask
         # index plus a global fallback list. Mirrors the safety-tips plumbing.
         self._aggregate_placement_constraints: List[str] = []
@@ -350,6 +352,9 @@ class AgentPlanner:
 
     def _prepare_prompt(self) -> str:
         history_sections = []
+        pending_hint = self._pending_empty_hand_hint()
+        if pending_hint:
+            history_sections.append(pending_hint)
         executed_actions = [
             record.get("history_text")
             or f"{record['step']}. {record['plan']['action'].upper()}"
@@ -582,6 +587,7 @@ class AgentPlanner:
     ) -> None:
         """Switch the active instruction without resetting the simulator."""
         self.task_instruction = task_instruction
+        self._pending_empty_hand_operation = None
         self.goal_description = task_instruction
         prompt_objects = planner_prompt_entity_ids(
             self.allowed_entity_ids,
@@ -611,8 +617,38 @@ class AgentPlanner:
             self.runtime_controller.set_subtask(subtask_index)
 
 
+    def _pending_empty_hand_hint(self):
+        """Keep a blocked operation until execution confirms its success."""
+        pending = getattr(self, "_pending_empty_hand_operation", None)
+        if pending is None:
+            return None
+        runtime = getattr(self, "runtime_controller", None)
+        outcome = getattr(runtime, "last_outcome", None)
+        if (outcome is not None and outcome is not pending["previous_outcome"]
+                and outcome.executed and outcome.succeeded
+                and outcome.review.action.to_legacy_plan().strip().lower() == pending["action"].lower()):
+            self._pending_empty_hand_operation = None
+            return None
+        # Successful history also covers an adapter executing several actions
+        # before handing control back to this planner.
+        plans = getattr(getattr(self, "tracker", None), "plans", ())
+        for record in plans[pending["history_start"]:]:
+            if (record.get("executed") is True and record.get("succeeded") is True
+                    and record.get("plan", {}).get("action", "").strip().lower() == pending["action"].lower()):
+                self._pending_empty_hand_operation = None
+                return None
+        return (
+            f"Pending empty-gripper operation: {pending['action']}. "
+            f"Putting down {pending['object']} is only staging for this operation. "
+            "If still holding it, place it safely first. Once the gripper is empty, "
+            f"navigate to {pending['target']} if needed and complete {pending['action']}. "
+            f"Do not GRASP {pending['object']} again or finish the subtask before "
+            "that operation succeeds. A failed operation remains pending."
+        )
+
     def _verify_plan(self, plan: Optional[StepwisePlan]) -> Optional[Tuple[str, str, str]]:
         self._last_plan_validation_error = None
+        pending_hint = self._pending_empty_hand_hint()
         if plan is None:
             return None
         if 'action' not in plan:
@@ -620,6 +656,9 @@ class AgentPlanner:
 
         action = plan['action'].strip()
         if action.upper().startswith('DONE'):
+            if pending_hint:
+                self._last_plan_validation_error = pending_hint
+                return None
             done_validator = getattr(self, "done_validator", None)
             reason = done_validator() if callable(done_validator) else None
             if reason:
@@ -656,12 +695,25 @@ class AgentPlanner:
         else:
             caution = plan['caution']
 
+        pending = getattr(self, "_pending_empty_hand_operation", None)
+        if pending and operator.upper() == "GRASP" and params == pending["object"].lower():
+            self._last_plan_validation_error = pending_hint
+            return None
+
         if (
             self.primitive_type == "starter"
             and operator.upper() in {"OPEN", "CLOSE"}
             and callable(self.held_object_getter)
             and self._held_object() is not None
         ):
+            if getattr(self, "_pending_empty_hand_operation", None) is None:
+                self._pending_empty_hand_operation = {
+                    "action": f"{operator.upper()}({params})",
+                    "target": params,
+                    "object": self._held_object(),
+                    "previous_outcome": getattr(getattr(self, "runtime_controller", None), "last_outcome", None),
+                    "history_start": len(getattr(getattr(self, "tracker", None), "plans", ())),
+                }
             print(
                 f"[agent][planner_guard] rejecting {operator.upper()} while "
                 "the gripper is occupied"
@@ -674,6 +726,18 @@ class AgentPlanner:
                 "container>) to free the gripper, then perform the "
                 f"{operator.upper()} on the target, then GRASP it again if needed."
             )
+            return_support_getter = getattr(self, "return_support_getter", None)
+            return_support = return_support_getter() if callable(return_support_getter) else None
+            if return_support and return_support in self.allowed_entity_ids:
+                self._last_plan_validation_error = (
+                    f"{operator.upper()} is invalid while the gripper holds {self._held_object()}. "
+                    f"Its recorded pickup support is {return_support}. First use "
+                    f"NAVIGATE_TO({return_support}), then PLACE_ON_TOP({return_support}) "
+                    "to return it to its recorded position and free the gripper. "
+                    "The executor will revalidate the route and placement position; if either "
+                    "fails, choose a different support instead of repeating the failed action. "
+                    f"Then perform {operator.upper()} and GRASP the object again if needed."
+                )
             return None
 
         last_outcome = (

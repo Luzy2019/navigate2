@@ -157,11 +157,6 @@ openable source, destination, or appliance must be open for a later acquire or
 placement phase, complete NAVIGATE_TO and OPEN while the gripper is empty before
 GRASP. Never attempt OPEN or CLOSE while holding the source or tool.
 
-After the selected workflow's required empty-gripper access preparation is
-complete, propose GRASP(object) directly before any action involving its
-destination. Never navigate to the destination while the required object is
-still unheld.
-
 The runtime inserts navigation before GRASP and held-object placement or transfer.
 For those operations, propose GRASP, PLACE, POUR, or DUMP directly; NAVIGATE_TO is
 not a separate workflow phase. Use explicit NAVIGATE_TO only to reach a target for
@@ -339,11 +334,17 @@ Final applicability check:
 - Treat the latest successful history and Current held object as the current
   state. A failed action changed nothing; do not repeat it until its stated
   precondition has been corrected.
-- An openable destination is ready only when the current state explicitly says
-  it is open, or a successful OPEN(destination) appears after its latest CLOSE.
-  Unknown is not open. If an object must be placed inside a destination that is
-  not confirmed open, use NAVIGATE_TO(destination) or OPEN(destination) before
-  GRASPing the object.
+- Before GRASP(A), check the next intended destination of A.
+  If A must be placed inside an openable container B, first ensure B is open.
+  B is confirmed open only when the current state explicitly says it is open,
+  or a successful OPEN(B) appears after its latest CLOSE(B). Unknown is not open.
+  If B is closed or its open state is unknown, NAVIGATE_TO(B) if needed,
+  then OPEN(B), and wait for successful execution.
+  Only then GRASP(A) and PLACE_INSIDE(B).
+  NAVIGATE_TO(B) alone does not satisfy this prerequisite.
+  Example: to put a bottle into a microwave, open the microwave with an
+  empty gripper before picking up the bottle.
+  If B is already confirmed open, do not open it again.
 - To process an object inside an openable appliance, use this order: OPEN the
   appliance with an empty gripper, GRASP the object, PLACE_INSIDE the appliance,
   CLOSE it, TOGGLE_ON it, WAIT_FOR_COOKED(object), TOGGLE_OFF it, then OPEN it

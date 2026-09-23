@@ -40,8 +40,10 @@ Examples:
   bash entrypoints/eval_safe_memory_once.sh no_sg_no_rp gpt-4o Beechwood_0_int data/tasks/composite/lifelong_crossroom__beechwood__knife_hidden_in_hamper_v3.json
 
 Notes:
-  - ABLATION_PROFILE must be one of: full, no_sg, no_rp, no_sg_no_rp, sap.
-    full = scene graph + risk predictor enabled (default).
+  - ABLATION_PROFILE must be one of: full, no_subgraph, no_node_state, no_sg, no_rp, no_sg_no_rp, sap.
+    full = scene graph + risk predictor with BFS relations and node states.
+    no_subgraph = full without action-rooted BFS relation text.
+    no_node_state = full without node states/hazards in the risk prompt.
     no_sg = scene graph disabled (risk predictor enabled).
     no_rp = risk predictor disabled (scene graph enabled).
     no_sg_no_rp = both disabled (baseline).
@@ -63,13 +65,15 @@ if [[ $# -ge 5 ]]; then
 fi
 
 case "${ABLATION_PROFILE}" in
-    full)       EXTRA_FLAGS=(--enable-scene-graph --enable-risk-predictor) ;;
+    full)       EXTRA_FLAGS=(--enable-scene-graph --enable-risk-predictor --risk-subgraph-retrieval --risk-node-state-annotation) ;;
+    no_subgraph) EXTRA_FLAGS=(--enable-scene-graph --enable-risk-predictor --no-risk-subgraph-retrieval --risk-node-state-annotation) ;;
+    no_node_state) EXTRA_FLAGS=(--enable-scene-graph --enable-risk-predictor --risk-subgraph-retrieval --no-risk-node-state-annotation) ;;
     no_sg)      EXTRA_FLAGS=(--no-enable-scene-graph --enable-risk-predictor) ;;
     no_rp)      EXTRA_FLAGS=(--enable-scene-graph --no-enable-risk-predictor) ;;
     no_sg_no_rp) EXTRA_FLAGS=(--no-enable-scene-graph --no-enable-risk-predictor) ;;
     sap) EXTRA_FLAGS=(--no-enable-scene-graph --no-enable-risk-predictor --prompt-setting sap) ;;
     *)
-        echo "ABLATION_PROFILE must be full, no_sg, no_rp, no_sg_no_rp, or sap, got: ${ABLATION_PROFILE}" >&2
+        echo "ABLATION_PROFILE must be full, no_subgraph, no_node_state, no_sg, no_rp, no_sg_no_rp, or sap, got: ${ABLATION_PROFILE}" >&2
         exit 2
         ;;
 esac

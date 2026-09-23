@@ -1,3 +1,6 @@
+includes:
+  - eval_safe_memory_starter_physical.yaml
+
 navigation:
   # Preserve the raw A* bend around the dining-room floor lamp. The simplified
   # doorway segment passed inside Fetch's effective collision radius.

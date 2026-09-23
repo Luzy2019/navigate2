@@ -2,27 +2,24 @@
 set -euo pipefail
 
 # =============================================================================
-# eval_safe_memory_matrix.sh — 4-task x {full, sap, no_sg} x N-rep comparison matrix
+# eval_safe_memory_matrix.sh — hot-water task x five profiles x N repetitions
 #
-# Tasks (all run in Beechwood_0_int):
-#   lifelong_crossroom__beechwood__cleaner_food_cabinet_location_v3
+# Task (Beechwood_0_int):
 #   lifelong_crossroom__beechwood__hot_water_container_fragile_vase_v3
-#   lifelong_crossroom__beechwood__knife_hidden_in_hamper_v3
-#   lifelong_crossroom__beechwood__mold_rag_dining_reuse_v3
 #
 # Profiles (explicit flags are ALWAYS passed on purpose):
 #   full  = scene graph + risk predictor
 #           (--enable-scene-graph --enable-risk-predictor)
+#   no_subgraph   = full without the action-rooted BFS relation text
+#   no_node_state = full without node states/hazards in the risk prompt
 #   no_sg = scene graph disabled, risk predictor enabled
 #           (--no-enable-scene-graph --enable-risk-predictor)
 #   sap   = scene graph + risk predictor disabled, SAP cognition prompt enabled
 #           (--no-enable-scene-graph --no-enable-risk-predictor --prompt-setting sap)
 #
-# PROFILES is env-overridable, e.g. run only a subset:
-#   PROFILES="full no_sg" bash entrypoints/eval_safe_memory_matrix.sh ...
-#
-#   IMPORTANT: the Python CLI defaults both module flags to False. Each profile
-#   passes explicit flags so its behavior does not depend on parser defaults.
+# This matrix runs full, sap, no_sg, no_subgraph, and no_node_state.
+# Each profile passes explicit scene-graph and predictor flags; once.sh
+# sets the two risk-input switches for the new profiles.
 #
 # Runs are sequential: each OmniGibson/Isaac instance needs ~13-16 GB VRAM, so
 # concurrent instances are not feasible on a single RTX 4080 SUPER.
@@ -37,7 +34,7 @@ set -euo pipefail
 # Examples:
 #   bash entrypoints/eval_safe_memory_matrix.sh gpt-4o Beechwood_0_int 10
 #   bash entrypoints/eval_safe_memory_matrix.sh gpt-4o Beechwood_0_int 10 my_tag
-#   REPS=0 bash entrypoints/eval_safe_memory_matrix.sh          # plan only
+#   bash entrypoints/eval_safe_memory_matrix.sh gpt-4o Beechwood_0_int 0  # plan only
 #   NO_WAIT=1 bash entrypoints/eval_safe_memory_matrix.sh ...   # skip GPU wait
 #   nohup bash entrypoints/eval_safe_memory_matrix.sh gpt-4o Beechwood_0_int 10 \
 #         > results/matrix_launch.log 2>&1 &
@@ -66,20 +63,14 @@ fi
 
 TASKS=(
     "lifelong_crossroom__beechwood__hot_water_container_fragile_vase_v3"
-    "lifelong_crossroom__beechwood__mold_rag_dining_reuse_v3"
-    # "lifelong_crossroom__beechwood__cleaner_food_cabinet_location_v3"
-    # "lifelong_crossroom__beechwood__knife_hidden_in_hamper_v3"
 )
 
-PROFILES=(${PROFILES:-full sap no_sg})
+PROFILES=(full sap no_sg no_subgraph no_node_state)
 
 # Canonical task-specific safe-memory configs (same mapping as
 # TASK_SAFE_MEMORY_CONFIGS in og_ego_prim/cli/safe_memory_benchmark_once.py).
 declare -A TASK_CONFIG=(
     ["lifelong_crossroom__beechwood__hot_water_container_fragile_vase_v3"]="entrypoints/configs/eval_safe_memory_hot_water.yaml"
-    ["lifelong_crossroom__beechwood__mold_rag_dining_reuse_v3"]="entrypoints/configs/eval_safe_memory_mold_rag.yaml"
-    # ["lifelong_crossroom__beechwood__cleaner_food_cabinet_location_v3"]="entrypoints/configs/eval_safe_memory_cleaner_food.yaml"
-    # ["lifelong_crossroom__beechwood__knife_hidden_in_hamper_v3"]="entrypoints/configs/eval_safe_memory_knife_hidden_hamper.yaml"
 )
 
 BATCH_DIR="results/${BATCH_TAG}"
@@ -264,6 +255,8 @@ run_cell() {
 
     case "${profile}" in
         full)  flags=(--enable-scene-graph --enable-risk-predictor) ;;
+        no_subgraph) flags=(--enable-scene-graph --enable-risk-predictor) ;;
+        no_node_state) flags=(--enable-scene-graph --enable-risk-predictor) ;;
         no_sg) flags=(--no-enable-scene-graph --enable-risk-predictor) ;;
         sap) flags=(--no-enable-scene-graph --no-enable-risk-predictor --prompt-setting sap) ;;
         *)

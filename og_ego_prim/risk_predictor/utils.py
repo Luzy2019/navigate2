@@ -14,9 +14,12 @@ def install_vlm_risk_provider(benchmark: Any, client: Any) -> RiskProvider:
     risk_predictor = benchmark.runtime_controller.components.risk_predictor
     if not benchmark.runtime_config.risk.enabled:
         return risk_predictor.provider
+    risk_options = benchmark.runtime_config.risk.provider_options
     provider = ModelRiskProvider(
         RiskAssessor(
             client,
+            subgraph_retrieval=bool(risk_options.get("subgraph_retrieval", True)),
+            node_state_annotation=bool(risk_options.get("node_state_annotation", True)),
             held_object_getter=getattr(
                 benchmark,
                 "_current_grasped_object_id",

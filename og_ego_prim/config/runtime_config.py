@@ -497,7 +497,8 @@ class StarterPrimitivesConfig:
     explicit_navigation_max_goal_radius: Optional[float] = None
     explicit_grasp_use_object_navigation: bool = False
     explicit_grasp_navigation_max_goal_radius: Optional[float] = None
-    first_view_targeting: bool = True
+    # Opt in to camera centering and its pre/post-action validation together.
+    first_view_targeting: bool = False
     first_view_targeting_max_steps: int = 120
     first_view_targeting_angular_tolerance: float = 0.045
     first_view_targeting_max_joint_step: float = 0.16
@@ -1002,6 +1003,9 @@ class RiskPredictorConfig:
         ).strip().lower()
         if not provider:
             raise ValueError("risk.provider must not be empty")
+        for key in ("subgraph_retrieval", "node_state_annotation"):
+            if key in options:
+                options[key] = _to_bool(options[key])
         return cls(
             enabled=enabled,
             provider=provider,

@@ -18,7 +18,8 @@ navigation:
   already_reachable_max_goal_radius: 1.3
 
 starter_primitives:
-  first_view_targeting: true
+  # Disable pre/post-action camera centering and first-view validation.
+  first_view_targeting: false
   first_view_targeting_max_steps: 180
   first_view_targeting_angular_tolerance: 0.045
   first_view_targeting_max_joint_step: 0.16
@@ -32,4 +33,4 @@ starter_primitives:
   explicit_navigation_max_goal_radius: null
   explicit_grasp_use_object_navigation: true
   explicit_grasp_navigation_max_goal_radius: 1.2
-  fixed_navigation_arm_pose_name: vertical
+  fixed_navigation_arm_pose_name: tucked_high

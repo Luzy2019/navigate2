@@ -132,6 +132,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Enable runtime risk predictor for action review. Disable to bypass risk checks.",
     )
+    parser.add_argument(
+        "--risk-subgraph-retrieval",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Include action-rooted BFS relation expansion in the risk prompt.",
+    )
+    parser.add_argument(
+        "--risk-node-state-annotation",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Expose scene graph node states and hazard labels to the risk model.",
+    )
     parser.add_argument("--work-dir", default="results")
 
     # 给你的任务运行一个简短的标签，包含在时间戳运行目录和 README 中。
@@ -287,6 +299,17 @@ def _apply_config(args: argparse.Namespace) -> tuple[argparse.Namespace, Runtime
     args.config_resolution = config_resolution
     config_dict = load_runtime_config_dict(config_path)
     runtime_config = RuntimeConfig.from_mapping(config_dict)
+    risk_options = runtime_config.risk.provider_options
+    for arg_name, option_name in (
+        ("risk_subgraph_retrieval", "subgraph_retrieval"),
+        ("risk_node_state_annotation", "node_state_annotation"),
+    ):
+        value = getattr(args, arg_name)
+        if value is None:
+            value = risk_options.get(option_name, True)
+        value = bool(value)
+        setattr(args, arg_name, value)
+        risk_options[option_name] = value
     task_config = runtime_config.task
     if not _flag_present("--task") and args.task is None:
         args.task = task_config.name
@@ -1027,6 +1050,8 @@ def _run(
         "runtime_ablation": {
             "scene_graph_enabled": args.enable_scene_graph,
             "risk_predictor_enabled": args.enable_risk_predictor,
+            "risk_subgraph_retrieval": args.risk_subgraph_retrieval,
+            "risk_node_state_annotation": args.risk_node_state_annotation,
             "use_initial_setup": args.use_initial_setup,
             "use_self_caption": args.use_self_caption,
             "prompt_setting": args.prompt_setting,
@@ -1168,6 +1193,8 @@ def _write_aborted_report(
         "runtime_ablation": {
             "scene_graph_enabled": getattr(args, "enable_scene_graph", None),
             "risk_predictor_enabled": getattr(args, "enable_risk_predictor", None),
+            "risk_subgraph_retrieval": getattr(args, "risk_subgraph_retrieval", None),
+            "risk_node_state_annotation": getattr(args, "risk_node_state_annotation", None),
             "use_initial_setup": getattr(args, "use_initial_setup", None),
             "use_self_caption": getattr(args, "use_self_caption", None),
             "prompt_setting": getattr(args, "prompt_setting", None),

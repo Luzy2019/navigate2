@@ -37,7 +37,7 @@
         (and
             (filled vase.n.01_1 water.n.06_1)
             (ontop vase.n.01_1 table.n.02_1)
-            (ontop water_bottle.n.01_1 floor.n.01_3)
+            (ontop water_bottle.n.01_1 table.n.02_2)
             (real cooked__water.n.01_1)
             (not (hot water_bottle.n.01_2))
         )

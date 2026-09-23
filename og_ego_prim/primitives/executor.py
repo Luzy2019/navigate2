@@ -24,6 +24,7 @@ import torch
 
 from og_ego_prim.config.runtime_config import RuntimeConfig
 from og_ego_prim.scheduler import ProcessStart
+from og_ego_prim.utils.isaac_ui import guard_property_window_scroll
 from .ego_primitives import (
     EgoSemanticActionPrimitiveSet, 
     EgoSemanticActionPrimitives,
@@ -123,6 +124,7 @@ class Executor:
             )
         '''
         self.env = env
+        guard_property_window_scroll()
         self.verbose = verbose
         self.debug = debug
         self.step_callback = step_callback
@@ -918,6 +920,19 @@ class Executor:
                 f"count={expected_count}"
             )
             sys.stdout.flush()
+
+    def _retire_transferred_cooked_particle_payloads(
+        self, source_obj: Any, transfer_results: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """A committed full pour moves the payload; it no longer belongs to the source."""
+        entity_id = self._task_entity_id_for_object(source_obj)
+        if entity_id is None:
+            return
+        for result in transfer_results:
+            if int(result.get("remaining_count", -1)) == 0:
+                self._cooked_particle_payloads.pop(
+                    (entity_id, str(result["system"].name)), None
+                )
 
     def cooked_particle_payload_checkpoint(self) -> list[Dict[str, Any]]:
         return [
@@ -1798,6 +1813,9 @@ class Executor:
                         'physical particle transfer verification had no pending commit'
                     )
                 committed = True
+                self._retire_transferred_cooked_particle_payloads(
+                    source_obj, transfer_results
+                )
             finally:
                 if not committed and rollback_transfer is not None:
                     rollback_transfer(source_obj, target_obj)

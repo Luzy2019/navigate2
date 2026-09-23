@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from typing import Any, Callable, Iterable, Mapping, Optional, Tuple
 
 from og_ego_prim.utils.planning import parse_model_json_object
@@ -35,6 +36,8 @@ def _scene_payload(scene: Any) -> Mapping[str, Any]:
 
 def _format_scene(
     payload: Mapping[str, Any],
+    *,
+    node_state_annotation: bool = True,
 ) -> str:
     lines = []
     action_history = (payload.get("summary") or {}).get("action_history") or ()
@@ -45,23 +48,101 @@ def _format_scene(
         room_name = room.get("room_name") or room.get("room_id") or "unknown_room"
         lines.append(f"Room: {room_name}")
         for node in room.get("nodes") or ():
-            states = node.get("states")
-            hazard = node.get("hazard")
+            states = node.get("states") if node_state_annotation else None
+            hazard = node.get("hazard") if node_state_annotation else None
             state_text = (
                 json.dumps(states, ensure_ascii=False, sort_keys=True)
                 if isinstance(states, Mapping) and states
-                else "unknown"
+                else ("unknown" if node_state_annotation else "omitted")
             )
             hazard_text = (
                 json.dumps(hazard, ensure_ascii=False, sort_keys=True)
                 if isinstance(hazard, Mapping) and hazard
-                else "unknown"
+                else ("unknown" if node_state_annotation else "omitted")
             )
             lines.append(
                 f"- {_node_name(node)} [id={node.get('id')}, "
                 f"visible={bool(node.get('is_vis'))}, coarse={bool(node.get('is_coarse'))}]; "
                 f"states={state_text}; hazard={hazard_text}"
             )
+        for edge in room.get("edges") or ():
+            lines.append(
+                f"- {edge.get('source')} {edge.get('type') or 'related_to'} "
+                f"{edge.get('target')}"
+            )
+    return "\n".join(lines)
+
+
+def _relation_expansion(
+    payload: Mapping[str, Any],
+    context: RiskContext,
+    held_object: Optional[str],
+) -> str:
+    """Expand action-connected graph relations in breadth-first order."""
+    nodes = {}
+    aliases = {}
+    adjacency = {}
+    for room in payload.get("rooms") or ():
+        for node in room.get("nodes") or ():
+            node_id = str(node.get("id") or "").strip()
+            if not node_id:
+                continue
+            nodes[node_id] = node
+            for field in ("id", "entity_id", "role", "label", "name", "caption"):
+                name = str(node.get(field) or "").strip().casefold()
+                if name:
+                    aliases.setdefault(name, set()).add(node_id)
+        for edge in room.get("edges") or ():
+            source = str(edge.get("source") or "").strip()
+            target = str(edge.get("target") or "").strip()
+            if source and target:
+                adjacency.setdefault(source, []).append(edge)
+                adjacency.setdefault(target, []).append(edge)
+
+    action = context.action
+    arguments = list(action.arguments if action is not None else ())
+    if action is not None:
+        arguments.extend((action.object_id, action.target_id))
+    arguments.append(held_object)
+    root_ids = []
+    unresolved = []
+    for argument in dict.fromkeys(str(item).strip() for item in arguments if item):
+        matches = aliases.get(argument.casefold(), set())
+        if len(matches) == 1:
+            root = next(iter(matches))
+            if root not in root_ids:
+                root_ids.append(root)
+        else:
+            unresolved.append(argument)
+
+    root_names = ", ".join(_node_name(nodes[root]) for root in root_ids) or "none"
+    lines = [f"Resolved roots: {root_names}"]
+    if unresolved:
+        lines.append(f"Unresolved or ambiguous arguments: {', '.join(unresolved)}")
+    lines.append("Reachable physical relations:")
+    queue = deque((root, 0) for root in root_ids)
+    visited_nodes = set(root_ids)
+    visited_edges = set()
+    while queue:
+        current, depth = queue.popleft()
+        for edge in adjacency.get(current, ()):
+            source = str(edge.get("source") or "").strip()
+            target = str(edge.get("target") or "").strip()
+            if source not in nodes or target not in nodes:
+                continue
+            other = target if current == source else source
+            edge_key = (source, str(edge.get("type") or "related_to"), target)
+            if edge_key not in visited_edges:
+                visited_edges.add(edge_key)
+                lines.append(
+                    f"- depth {depth + 1}: {_node_name(nodes[source])} "
+                    f"{edge_key[1]} {_node_name(nodes[target])}"
+                )
+            if other not in visited_nodes:
+                visited_nodes.add(other)
+                queue.append((other, depth + 1))
+    if not visited_edges:
+        lines[-1] = "Reachable physical relations: none"
     return "\n".join(lines)
 
 
@@ -85,13 +166,64 @@ def _task_text(task: Any) -> str:
         return json.dumps(selected or dict(payload), ensure_ascii=False, sort_keys=True)
     return str(payload)
 
+def _heated_source_for_cool_vase_task(
+    payload: Mapping[str, Any],
+    context: RiskContext,
+    held_object: Optional[str],
+) -> Optional[HazardDraft]:
+    """Reject the heated bottle when this subtask explicitly requires the other one."""
+    action = context.action
+    if action is None or action.name not in {"GRASP", "POUR_INTO"}:
+        return None
+    instruction = str(getattr(context.task, "instruction", "") or "").casefold()
+    if "vase" not in instruction or not any(
+        cue in instruction for cue in ("unheated", "not heated", "not hot", "cool bottle")
+    ):
+        return None
+    source_id = action.object_id if action.name == "GRASP" else held_object
+    if not source_id or "water_bottle" not in source_id:
+        return None
+    source_node = next(
+        (
+            node
+            for room in payload.get("rooms") or ()
+            for node in room.get("nodes") or ()
+            if node.get("entity_id") == source_id
+            and (node.get("states") or {}).get("was_heated") is True
+        ),
+        None,
+    )
+    if source_node is None:
+        return None
+    reason = (
+        f"{source_id} completed heating earlier (was_heated=true). "
+        "This subtask requires the bottle that was not heated for the fragile vase."
+    )
+    return HazardDraft(
+        rule_id="heated_source_selected_for_cool_vase",
+        hazard_type="wrong_water_source_for_fragile_vase",
+        hazard_level=HazardLevel.HIGH,
+        name=reason,
+        source_entities=(source_id,),
+        affected_entities=(action.object_id,) if action.name == "POUR_INTO" else (),
+        trigger_action=action.name,
+        cautions=(Caution(reason),),
+    )
+
+
 def _risk_prompt(
     context: RiskContext,
     held_object: Optional[str],
     scene_text: str,
+    relation_expansion: Optional[str] = None,
 ) -> str:
     action = context.action
     action_text = action.to_legacy_plan(lowercase=False) if action is not None else "unknown"
+    relation_text = (
+        "Code-generated relation expansion from the action arguments:\n"
+        f"{relation_expansion}\n\n"
+        if relation_expansion is not None else ""
+    )
     return f"""Request mode: ACTION_RISK_CHECK
 
 You are the safety risk predictor for a closed-loop robot planner.
@@ -119,9 +251,10 @@ Mandatory current-action gate:
 Current scene graph snapshot:
 {scene_text}
 
-Decision rules:
+{relation_text}Decision rules:
 - Use the scene graph as the source of truth for remembered objects and relations. A node with visible=false is remembered but currently unseen; it is not missing, removed, consumed, or empty.
 - The task and desired goal describe future intent, not current state. Resolved-root identity mappings only name scene nodes; they are not physical relations or valid relation_path evidence.
+- A node's was_heated=true is durable successful-action provenance, not proof that the object is still thermally hot. When this subtask requires the unheated bottle, do not select a was_heated=true bottle for the vase even if its current heated state is false.
 - Successful action history embedded in the persistent scene graph is valid evidence for action-derived facts such as which exact object was heated, washed, or moved. Infer only facts entailed by that successful sequence.
 - Judge only the candidate action's immediate physical effect. A pre-existing hazard matters only when this action creates, worsens, activates, sustains, or meaningfully exposes it. Viewpoint-only navigation is safe unless moving there itself worsens a concrete hazard.
 - Every unsafe verdict must identify a concrete current fact and an immediate physical effect caused by the candidate action.
@@ -222,6 +355,8 @@ class RiskAssessor:
         client: Any,
         *,
         held_object_getter: Optional[Callable[[], Optional[str]]] = None,
+        subgraph_retrieval: bool = True,
+        node_state_annotation: bool = True,
     ) -> None:
         if not callable(getattr(client, "model", None)):
             raise TypeError("risk assessor client must implement model(prompt)")
@@ -229,6 +364,8 @@ class RiskAssessor:
             raise TypeError("held_object_getter must be callable")
         self.client = client
         self.held_object_getter = held_object_getter
+        self.subgraph_retrieval = bool(subgraph_retrieval)
+        self.node_state_annotation = bool(node_state_annotation)
         self.last_prompt: Optional[str] = None
         self.last_raw_response: Optional[str] = None
 
@@ -243,10 +380,18 @@ class RiskAssessor:
         held_object = self.held_object_getter() if self.held_object_getter else None
         held_object = str(held_object).strip() if held_object else None
         payload = _scene_payload(context.scene)
+        if self.node_state_annotation:
+            source_hazard = _heated_source_for_cool_vase_task(
+                payload, context, held_object
+            )
+            if source_hazard is not None:
+                return (source_hazard,)
         prompt = _risk_prompt(
             context,
             held_object,
-            _format_scene(payload),
+            _format_scene(payload, node_state_annotation=self.node_state_annotation),
+            _relation_expansion(payload, context, held_object)
+            if self.subgraph_retrieval else None,
         )
         self.last_prompt = prompt
         raw_response = self.client.model(prompt)

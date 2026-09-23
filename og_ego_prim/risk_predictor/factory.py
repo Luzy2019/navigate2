@@ -62,6 +62,8 @@ def _vlm_provider_factory(
     task=None,
     client=None,
     held_object_getter=None,
+    subgraph_retrieval: bool = True,
+    node_state_annotation: bool = True,
     **_: Any,
 ) -> RiskProvider:
     """Build a VLM-only risk provider from a model client (a RiskAssessor).
@@ -79,6 +81,8 @@ def _vlm_provider_factory(
         RiskAssessor(
             client,
             held_object_getter=held_object_getter,
+            subgraph_retrieval=subgraph_retrieval,
+            node_state_annotation=node_state_annotation,
         ),
         provider_id="vlm",
     )
@@ -88,7 +92,8 @@ DEFAULT_PROVIDER_REGISTRY.register("vlm", _vlm_provider_factory)
 DEFAULT_PROVIDER_REGISTRY.register("model", _vlm_provider_factory)
 DEFAULT_PROVIDER_REGISTRY.register(
     "hybrid",
-    lambda task=None, client=None, held_object_getter=None, **_: HybridRiskProvider(
+    lambda task=None, client=None, held_object_getter=None,
+    subgraph_retrieval=True, node_state_annotation=True, **_: HybridRiskProvider(
         tuple(
             provider
             for provider in (
@@ -101,6 +106,8 @@ DEFAULT_PROVIDER_REGISTRY.register(
                     task=task,
                     client=client,
                     held_object_getter=held_object_getter,
+                    subgraph_retrieval=subgraph_retrieval,
+                    node_state_annotation=node_state_annotation,
                 ),
             )
             if provider is not None
@@ -125,6 +132,8 @@ def create_risk_provider(
     task: Any = None,
     client: Any = None,
     held_object_getter: Any = None,
+    subgraph_retrieval: bool = True,
+    node_state_annotation: bool = True,
 ) -> RiskProvider:
     """Create one of the runtime risk providers."""
     return DEFAULT_PROVIDER_REGISTRY.create(
@@ -132,6 +141,8 @@ def create_risk_provider(
         task=task,
         client=client,
         held_object_getter=held_object_getter,
+        subgraph_retrieval=subgraph_retrieval,
+        node_state_annotation=node_state_annotation,
     )
 
 
@@ -151,6 +162,8 @@ def create_risk_predictor(
         task=task,
         client=client,
         held_object_getter=held_object_getter,
+        subgraph_retrieval=bool(options.get("subgraph_retrieval", True)),
+        node_state_annotation=bool(options.get("node_state_annotation", True)),
     )
     return RiskPredictor(provider)
 
