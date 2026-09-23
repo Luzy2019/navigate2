@@ -740,32 +740,6 @@ class AgentPlanner:
                 )
             return None
 
-        last_outcome = (
-            None
-            if self.runtime_controller is None
-            else self.runtime_controller.last_outcome
-        )
-        if (
-            self.primitive_type == "starter"
-            and last_outcome is not None
-            and last_outcome.executed
-            and not last_outcome.succeeded
-            and last_outcome.review.action.to_legacy_plan().strip().lower()
-            == f"{operator}({params})".lower()
-        ):
-            print(
-                "[agent][planner_guard] rejecting unchanged retry of failed "
-                f"{operator.upper()}({params})"
-            )
-            sys.stdout.flush()
-            self._last_plan_validation_error = (
-                f"{operator.upper()}({params}) already failed and was rejected "
-                "as an unchanged retry. Re-read Current held object and active "
-                "processes, then choose a different applicable action that "
-                "corrects the failed precondition before retrying."
-            )
-            return None
-
         placement_actions = {
             "PLACE_ON_TOP", "PLACE_INSIDE", "POUR_INTO", "DUMP_INTO"
         }
